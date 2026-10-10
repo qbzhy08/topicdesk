@@ -199,7 +199,7 @@ function renderReport(rep, state) {
         <div><b>${rep.total_docs}</b><small>资料（含重复）</small></div>
         <div><b>${rep.unique_docs}</b><small>去重后</small></div>
         <div><b>${rep.events}</b><small>事件</small></div>
-        <div><b>${rep.image_stats?.kept ?? 0}</b><small>保留配图</small></div>
+        <div><b>${rep.image_stats?.kept ?? 0}</b><small>可用配图${rep.image_stats?.new ? `（新增 ${rep.image_stats.new.kept}）` : ""}</small></div>
         <div><b>${rep.actions_done}</b><small>执行行动</small></div>
       </div>
       <p class="chips">${chips(rep.by_novelty, NOVELTY)}</p>

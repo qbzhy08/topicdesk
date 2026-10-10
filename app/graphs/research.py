@@ -466,28 +466,47 @@ def act(ctx):
 # ---------------------------------------------------------------- 节点：images
 
 def images(ctx):
+    """为本次资料处理配图：已处理过的资料直接复用（不占名额），新资料按相关度、来源多样性挑选。"""
     p = ctx.params
     max_docs, per_doc = p.get("image_docs", 8), p.get("images_per_doc", 6)
     docs = [d for d in _task_docs(ctx.task_id)
             if not d["duplicate_of"] and (d["meta"] or {}).get("image_candidates")]
     docs.sort(key=lambda d: (-(d["meta"].get("relevance") or 0), d["content_kind"] != "full"))
-    total = {"kept": 0, "rejected": 0, "docs": 0}
-    for d in docs[:max_docs]:
-        if db.query_one("SELECT COUNT(*) n FROM images WHERE doc_id=?", (d["id"],))["n"]:
-            continue
+    done_before = {r["doc_id"] for r in db.query(
+        f"SELECT DISTINCT doc_id FROM images WHERE doc_id IN ({','.join('?' * len(docs))})",
+        [d["id"] for d in docs])} if docs else set()
+    todo = [d for d in docs if d["id"] not in done_before]
+    # 来源轮转：避免名额全被同一来源占用
+    picked, per_src = [], {}
+    for d in todo:
+        if per_src.get(d["source_id"], 0) < max(2, max_docs // 3):
+            picked.append(d)
+            per_src[d["source_id"]] = per_src.get(d["source_id"], 0) + 1
+        if len(picked) >= max_docs:
+            break
 
-        def dl(u, referer=None):
-            try:
-                return ctx.tool("image_download", url=u, referer=referer)
-            except Exception as e:
-                return {"ok": False, "reason": f"下载异常：{str(e)[:100]}"}
+    def dl(u, referer=None):
+        try:
+            return ctx.tool("image_download", url=u, referer=referer)
+        except Exception as e:
+            return {"ok": False, "reason": f"下载异常：{str(e)[:100]}"}
+
+    new = {"kept": 0, "rejected": 0, "docs": 0}
+    for d in picked:
         res = store_images(d["id"], d["url"], d["meta"]["image_candidates"], max_images=per_doc,
                            download_fn=dl)
-        total["kept"] += res["kept"]
-        total["rejected"] += res["rejected"]
-        total["docs"] += 1
-    ctx.state["image_stats"] = total
-    ctx.observe(f"处理 {total['docs']} 篇资料的配图：保留 {total['kept']} 张，筛除 {total['rejected']} 张")
+        new["kept"] += res["kept"]
+        new["rejected"] += res["rejected"]
+        new["docs"] += 1
+    ids = [d["id"] for d in _task_docs(ctx.task_id)]
+    agg = db.query_one(
+        f"SELECT SUM(status='kept') kept, SUM(status='rejected') rejected, COUNT(DISTINCT doc_id) docs "
+        f"FROM images WHERE doc_id IN ({','.join('?' * len(ids))})", ids) if ids else {}
+    ctx.state["image_stats"] = {"kept": agg.get("kept") or 0, "rejected": agg.get("rejected") or 0,
+                                "docs": agg.get("docs") or 0, "new": new,
+                                "reused_docs": len(done_before)}
+    ctx.observe(f"配图：复用已处理资料 {len(done_before)} 篇；新处理 {new['docs']} 篇，保留 {new['kept']} 张、"
+                f"筛除 {new['rejected']} 张；本次资料共有可用配图 {agg.get('kept') or 0} 张")
     return "report"
 
 

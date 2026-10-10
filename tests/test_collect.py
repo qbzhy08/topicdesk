@@ -236,6 +236,9 @@ class ResearchGraphTest(CollectBase):
         steps = db.query("SELECT thought FROM steps WHERE task_id=? AND node='plan'", (tid,))
         self.assertIn("历史记忆", steps[0]["thought"])
         self.assertGreater(db.query_one("SELECT COUNT(*) n FROM documents")["n"], n1)
+        # 第二次运行：已处理过配图的资料直接复用，报告里仍统计到这些配图
+        self.assertGreaterEqual(rep["image_stats"]["kept"], 2)
+        self.assertGreaterEqual(rep["image_stats"]["reused_docs"], 1)
 
     def test_rss_source_failure_does_not_lose_progress(self):
         orig = self.web.__call__
