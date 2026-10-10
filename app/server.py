@@ -10,6 +10,7 @@ import time
 from flask import Flask, abort, jsonify, request, send_from_directory
 
 from . import config, db, graphs, llm  # noqa: F401  导入即注册编排图
+from . import memory as mem
 from .collect import sources as sources_mod
 from .collect.dedup import canonical_url
 from .config import ROOT
@@ -323,6 +324,84 @@ def test_llm():
         return jsonify(ok=True, reply=r["content"][:200], usage=r["usage"])
     except Exception as e:
         return jsonify(ok=False, error=str(e)[:300])
+
+
+# ---------------------------------------------------------------- 记忆
+
+@app.get("/api/memories")
+def list_mem():
+    a = request.args
+    return jsonify(mem.list_memories(a.get("scope"), a.get("topic"), a.get("kind"), a.get("status"),
+                                     a.get("user_id", "default")))
+
+
+@app.get("/api/memories/<mid>")
+def get_mem(mid):
+    try:
+        return jsonify(mem.detail(mid))
+    except KeyError:
+        abort(404)
+
+
+@app.post("/api/memories/<mid>/correct")
+def correct_mem(mid):
+    b = request.get_json(force=True)
+    content = (b.get("content") or "").strip()
+    if not content:
+        return jsonify(error="更正内容不能为空"), 400
+    try:
+        return jsonify(mem.correct(mid, content, actor="user", reason=b.get("reason") or "用户更正"))
+    except KeyError:
+        abort(404)
+
+
+@app.delete("/api/memories/<mid>")
+def delete_mem(mid):
+    b = request.get_json(silent=True) or {}
+    try:
+        return jsonify(mem.delete(mid, actor="user", reason=b.get("reason") or "用户删除"))
+    except KeyError:
+        abort(404)
+
+
+@app.post("/api/preferences")
+def add_pref():
+    b = request.get_json(force=True)
+    t = b.get("type")
+    if t not in mem.PREF_TYPES or b.get("value") in (None, "", []):
+        return jsonify(error="偏好类型或内容无效"), 400
+    mid = mem.set_preference(b.get("user_id", "default"), t, b["value"], applies_to=b.get("applies_to") or "all")
+    return jsonify(id=mid), 201
+
+
+@app.get("/api/memory/preview")
+def preview_recall():
+    a = request.args
+    rec = mem.recall(a.get("user_id", "default"), a.get("topic"), a.get("purpose", "research"),
+                     int(a.get("budget", 1200)), record_use=False)
+    return jsonify(rec)
+
+
+@app.get("/api/memory/topics")
+def mem_topics():
+    return jsonify(db.query("SELECT topic, COUNT(*) n, SUM(kind='fact') facts, SUM(kind='dispute') disputes, "
+                            "MAX(updated_at) last FROM memories WHERE scope='topic' AND status IN "
+                            "('active','stale') GROUP BY topic ORDER BY last DESC"))
+
+
+@app.get("/api/replay")
+def replay_info():
+    from . import replay
+    return jsonify(replay.info())
+
+
+@app.post("/api/replay/day")
+def replay_day():
+    from . import replay
+    if not replay.STATE["enabled"]:
+        return jsonify(error="未启用回放模式（启动时加 --replay）"), 400
+    replay.set_day(int((request.get_json(force=True) or {}).get("day", 1)))
+    return jsonify(replay.info())
 
 
 def _recheck_loop(interval_min: float):

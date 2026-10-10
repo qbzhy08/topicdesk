@@ -12,6 +12,7 @@
   <nav id="nav">
     <a href="#/" data-nav="tasks">任务</a>
     <a href="#/library" data-nav="library">资料库</a>
+    <a href="#/memory" data-nav="memory">记忆</a>
     <a href="#/sources" data-nav="sources">信息源</a>
     <a href="#/settings" data-nav="settings">设置</a>
   </nav>
@@ -24,6 +25,12 @@
       <label>主题<input name="topic" required placeholder="例如：开源大模型 长上下文 评测"></label>
       <label>补充中文关键词（逗号分隔，可空）<input name="keywords" placeholder="例如：长上下文, 大海捞针"></label>
       <label>英文检索式（逗号分隔；配置了大模型可留空）<input name="en_keywords" placeholder="例如：long context LLM benchmark"></label>
+      <details>
+        <summary>本次要求（默认只对本次生效）</summary>
+        <label>关注重点<input name="tt_focus" placeholder="例如：复现结果, 大海捞针"></label>
+        <label>不想看的内容<input name="tt_exclude" placeholder="例如：融资, 手机"></label>
+        <label class="opt"><input type="checkbox" name="tt_save"> 同时保存为长期偏好（以后的任务也生效）</label>
+      </details>
       <details>
         <summary>来源、预算与高级参数</summary>
         <div class="src-checks" id="src-checks"></div>

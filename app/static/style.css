@@ -167,3 +167,15 @@ button.sm { padding: 3px 10px; font-size: 12px; }
 .img-grid .noimg { aspect-ratio: 16/10; display: grid; place-items: center; color: var(--muted); font-size: 12px; background: var(--paper); }
 .img-grid figcaption { padding: 8px; font-size: 12px; line-height: 1.5; word-break: break-all; }
 code { font-family: var(--mono); font-size: 12px; background: var(--paper); padding: 1px 4px; border-radius: 3px; }
+
+/* ---------- 记忆 ---------- */
+.tag.v-supported { color: var(--ok); border-color: var(--ok); }
+.tag.v-disputed { color: var(--warn); border-color: var(--warn); }
+.tag.v-refuted { color: var(--accent); border-color: var(--accent); }
+.tag.st-stale { color: var(--warn); border-color: var(--warn); }
+.tag.st-deleted, .tag.st-invalid, .tag.st-superseded { color: var(--accent); }
+.doc-row.mem-superseded, .doc-row.mem-deleted, .doc-row.mem-invalid { opacity: .55; }
+.doc-row.mem-superseded b, .doc-row.mem-deleted b { text-decoration: line-through; }
+.mem-box { margin: 6px 0; }
+.mem-box summary { color: var(--ink); }
+.card h3 { margin: 0 0 8px; font-size: 16px; }

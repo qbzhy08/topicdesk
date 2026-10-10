@@ -49,7 +49,14 @@ async function submitTask(e) {
   const budget = {};
   for (const k of ["max_steps", "max_tool_calls", "max_seconds", "max_cost"]) budget[k] = Number(f.get(k));
   const graph = f.get("graph");
+  const thisTime = { focus: split(f.get("tt_focus")), exclude: split(f.get("tt_exclude")) };
+  if (f.get("tt_save")) {      // 用户明确确认后才写入长期偏好
+    for (const [type, value] of Object.entries(thisTime)) {
+      if (value.length) await api("/api/preferences", { method: "POST", body: { type, value } });
+    }
+  }
   const params = graph === "research" ? {
+    this_time: f.get("tt_save") ? {} : thisTime,
     keywords: split(f.get("keywords")), en_keywords: split(f.get("en_keywords")),
     sources: allChecked() ? undefined : f.getAll("src"), max_docs: Number(f.get("max_docs")), max_fetch: Number(f.get("max_fetch")),
     hitl_on_block: !!f.get("hitl_on_block"), ...extra } : extra;
@@ -91,6 +98,7 @@ function route() {
   current = null;
   const h = location.hash || "#/";
   const view = h.startsWith("#/library") ? "library" : h.startsWith("#/doc/") ? "library"
+    : h.startsWith("#/memory") ? "memory"
     : h.startsWith("#/sources") ? "sources" : h.startsWith("#/settings") ? "settings" : "tasks";
   $$("#nav a").forEach((a) => a.classList.toggle("on", a.dataset.nav === view));
   $("#app").classList.toggle("wide", view !== "tasks");
@@ -100,6 +108,9 @@ function route() {
   if (h.startsWith("#/library")) return showLibrary(new URLSearchParams(h.split("?")[1] || ""));
   const d = h.match(/^#\/doc\/(\w+)/);
   if (d) return showDoc(d[1]);
+  const mm = h.match(/^#\/memory\/(m_\w+)/);
+  if (mm) return showMemory(mm[1]);
+  if (h.startsWith("#/memory")) return showMemoryHome(new URLSearchParams(h.split("?")[1] || ""));
   if (h.startsWith("#/sources")) return showSources();
   if (h.startsWith("#/settings")) return showSettings();
   $("#detail").innerHTML = `<div class="empty">从左侧提交一个主题，或打开已有任务。<br>任务进度保存在本地数据库，刷新页面不会丢失。</div>`;
@@ -205,12 +216,31 @@ function renderReport(rep, state) {
       <p class="chips">${chips(rep.by_novelty, NOVELTY)}</p>
       <p class="chips">${chips(rep.by_source, Object.fromEntries(sourcesCache.map((s) => [s.id, s.name])))}</p>
       <p class="chips">${chips(rep.by_kind, KIND)}</p>
+      ${rep.memory ? memoryReport(rep.memory) : ""}
       <h4>覆盖矩阵</h4>${covTable(rep.coverage)}
       <h4>检索计划</h4><p class="small">中文词：${esc((rep.plan?.terms_zh || []).join("、"))}；英文检索式：${esc((rep.plan?.queries_en || []).join("；") || "无")}；由 ${rep.plan?.by === "llm" ? "大模型" : "规则"} 生成；关键词调整 ${rep.refine_rounds} 次</p>
       ${rep.failures?.length ? `<h4>失败与降级</h4><table class="tbl"><tr><th>对象</th><th>原因</th><th>处理</th></tr>${rep.failures.map((f) => `
         <tr><td>${esc(f.target || f.type)}${f.query ? `<br><small>${esc(f.query)}</small>` : ""}</td><td><span class="tag">${esc(f.kind)}</span> ${esc(f.reason)}</td><td>${esc(f.fallback || "")}</td></tr>`).join("")}</table>` : ""}
       <h4>可能遗漏</h4><ul class="small">${(rep.omissions || []).map((o) => `<li>${esc(o)}</li>`).join("") || "<li>无</li>"}</ul>
     </div>`;
+}
+
+const VERIFY = { supported: "已核实", unverified: "待核实", disputed: "有争议", refuted: "已被否定" };
+const MSTATUS = { active: "有效", stale: "需复查/需更正", superseded: "已被更正", deleted: "已删除",
+  invalid: "已失效", resolved: "已裁决" };
+
+function memoryReport(m) {
+  const chip = (n, v) => `<span class="chip">${n} <b>${v}</b></span>`;
+  return `<h4>记忆</h4>
+    <details class="mem-box" ${m.recalled?.length ? "open" : ""}><summary>本次召回 ${m.recalled?.length || 0} 条长期记忆</summary>
+      <ul class="small">${(m.recalled || []).map((l) => `<li>${esc(l)}</li>`).join("") || "<li>无（首次处理该主题）</li>"}</ul>
+      ${(m.pref_notes || []).map((n) => `<p class="small gap">${esc(n)}</p>`).join("")}
+    </details>
+    <p class="chips">${chip("新增事实", m.new_facts)}${chip("被更多来源支持", m.supported)}${chip("更正", m.corrected)}${chip("冲突", m.conflicts)}</p>
+    ${(m.corrections || []).map((c) => `<p class="small">更正：<s>${esc(c.old)}</s> → <b>${esc(c.new)}</b>${c.stale_deliveries?.length ? `（${c.stale_deliveries.length} 条历史交付已标记需更正）` : ""}</p>`).join("")}
+    ${(m.disputes || []).map((d) => `<p class="small">${d.open ? `<span class="gap">未解争议</span> ${esc(d.content)}` : `争议已裁决：采信「${esc(d.winner)}」，否定「${esc(d.loser)}」`}（证据分 ${d.score?.join(" vs ")}）</p>`).join("")}
+    ${m.facts?.length ? `<details class="mem-box"><summary>本次涉及的事实 ${m.facts.length} 条</summary><ul class="small">${m.facts.map((f) =>
+      `<li><a href="#/memory/${f.id}">${esc(f.content)}</a> <span class="tag v-${f.verify}">${VERIFY[f.verify] || f.verify}</span> 独立来源 ${f.independent ?? 0}</li>`).join("")}</ul></details>` : ""}`;
 }
 
 function covTable(cov) {
@@ -365,6 +395,113 @@ async function showDoc(id) {
     <h3>正文</h3><div class="doc-text">${(d.text || "").split(/\n+/).map((p) => p.startsWith("## ") ? `<h4>${esc(p.slice(3))}</h4>` : `<p>${esc(p)}</p>`).join("")}</div>`;
 }
 
+// ---------------------------------------------------------------- 记忆
+const PREF_TYPES = { reading_minutes: "阅读时间（分钟）", background: "知识背景", focus: "关注重点",
+  exclude: "不想看的内容", source_prefer: "来源偏好", style: "写作要求" };
+
+function memRow(m) {
+  const v = m.meta?.verify;
+  return `<a class="doc-row mem-${m.status}" href="#/memory/${m.id}">
+    <div class="doc-main"><b>${esc(m.content)}</b>
+      <small>${esc(m.kind)} · 更新 ${fmtTime(m.updated_at)} · 使用 ${m.used_count} 次${m.last_used_at ? `（最近 ${fmtTime(m.last_used_at)}）` : ""}${m.note ? ` · ${esc(m.note)}` : ""}</small></div>
+    <div class="doc-tags">
+      <span class="tag st-${m.status}">${MSTATUS[m.status] || m.status}</span>
+      ${v ? `<span class="tag v-${v}">${VERIFY[v] || v}</span>` : ""}
+      ${m.meta?.independent != null ? `<span class="tag">独立来源 ${m.meta.independent}${m.meta.reprints ? ` · 转载 ${m.meta.reprints}` : ""}</span>` : ""}
+      ${m.applies_to && m.applies_to !== "all" ? `<span class="tag">${esc(m.applies_to)}</span>` : ""}
+    </div></a>`;
+}
+
+async function showMemoryHome(qs) {
+  const el = $("#detail");
+  const topics = await api("/api/memory/topics");
+  const topic = qs.get("topic") || topics[0]?.topic || "";
+  const showDead = qs.get("all") === "1";
+  const [prefs, rows, preview] = await Promise.all([
+    api("/api/memories?scope=user&kind=preference&status=alive"),
+    topic ? api(`/api/memories?scope=topic&topic=${encodeURIComponent(topic)}${showDead ? "" : "&status=alive"}`) : [],
+    topic ? api(`/api/memory/preview?topic=${encodeURIComponent(topic)}`) : null]);
+  const by = (k) => rows.filter((m) => m.kind === k);
+  el.innerHTML = `
+    <div class="detail-head"><div><p class="kicker">记忆</p><h1>下次再来，别从头开始</h1>
+      <p class="meta">每条记忆都记录来源、适用范围、更新时间和使用次数；可以查看证据、更正或删除，失效会同步到派生条目。</p></div></div>
+    <div class="card"><h3>用户偏好（长期）</h3>
+      ${prefs.map(memRow).join("") || '<p class="small">还没有长期偏好。任务里的“本次要求”默认不会保存，勾选“同时保存为长期偏好”或在这里添加才会生效。</p>'}
+      <form id="pref-form" class="row" style="margin-top:10px">
+        <select name="type">${Object.entries(PREF_TYPES).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select>
+        <input name="value" placeholder="内容，多个用逗号分隔" required>
+        <input name="applies_to" placeholder="适用范围（可空=全部，如 topic:主题名）">
+        <button>保存为长期偏好</button></form>
+    </div>
+    <div class="filters">
+      <select id="mem-topic">${topics.map((t) => `<option ${t.topic === topic ? "selected" : ""}>${esc(t.topic)}</option>`).join("") || "<option>暂无主题记忆</option>"}</select>
+      <label class="opt"><input type="checkbox" id="mem-dead" ${showDead ? "checked" : ""}> 显示已更正/已删除/已失效</label>
+    </div>
+    ${topic ? `
+    <h3>未解争议</h3>${by("dispute").map(memRow).join("") || '<p class="small">无</p>'}
+    <h3>事实与验证状态</h3>${by("fact").map(memRow).join("") || '<p class="small">无</p>'}
+    <h3>历史交付</h3>${by("delivery").map(memRow).join("") || '<p class="small">无</p>'}
+    <details class="card"><summary>下一次任务会召回什么（预览，约 ${preview.tokens} token，预算外舍弃 ${preview.dropped} 条）</summary><pre>${esc(preview.text || "（无）")}</pre></details>` : ""}`;
+  $("#mem-topic").onchange = (e) => location.hash = `#/memory?topic=${encodeURIComponent(e.target.value)}${showDead ? "&all=1" : ""}`;
+  $("#mem-dead").onchange = (e) => location.hash = `#/memory?topic=${encodeURIComponent(topic)}${e.target.checked ? "&all=1" : ""}`;
+  $("#pref-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const type = f.get("type");
+    const value = type === "reading_minutes" ? Number(f.get("value")) : (["focus", "exclude", "source_prefer"].includes(type) ? split(f.get("value")) : f.get("value"));
+    try { await api("/api/preferences", { method: "POST", body: { type, value, applies_to: f.get("applies_to") || "all" } }); showMemoryHome(qs); }
+    catch (err) { alert(err.message); }
+  };
+}
+
+async function showMemory(id) {
+  const el = $("#detail");
+  const m = await api(`/api/memories/${id}`);
+  const alive = ["active", "stale"].includes(m.status);
+  el.innerHTML = `
+    <p class="kicker"><a href="#/memory?topic=${encodeURIComponent(m.topic || "")}">← 记忆</a></p>
+    <h1 class="doc-title">${esc(m.content)}</h1>
+    <table class="tbl meta-tbl">
+      <tr><th>类型</th><td>${esc(m.scope)} / ${esc(m.kind)}${m.meta?.type ? ` / ${esc(PREF_TYPES[m.meta.type] || m.meta.type)}` : ""}</td></tr>
+      <tr><th>状态</th><td><span class="tag st-${m.status}">${MSTATUS[m.status] || m.status}</span>
+        ${m.meta?.verify ? `<span class="tag v-${m.meta.verify}">${VERIFY[m.meta.verify]}</span>` : ""} ${esc(m.note || "")}</td></tr>
+      ${m.meta?.independent != null ? `<tr><th>证据强度</th><td>独立来源 ${m.meta.independent} 个${m.meta.primary ? "（含一手来源）" : ""}；转载 ${m.meta.reprints || 0} 篇（不重复计数）${m.meta.generated_ignored ? `；系统生成内容 ${m.meta.generated_ignored} 条已忽略` : ""}；置信度 ${m.confidence ?? "—"}</td></tr>` : ""}
+      <tr><th>适用范围</th><td>${esc(m.applies_to || "all")}${m.topic ? ` · 主题：${esc(m.topic)}` : ""}</td></tr>
+      <tr><th>来源</th><td><code>${esc(JSON.stringify(m.source))}</code></td></tr>
+      <tr><th>时间</th><td>创建 ${fmtTime(m.created_at)} · 更新 ${fmtTime(m.updated_at)}${m.recheck_at ? ` · 复查 ${fmtTime(m.recheck_at)}` : ""}</td></tr>
+      <tr><th>使用</th><td>${m.used_count} 次${m.last_used_at ? `，最近 ${fmtTime(m.last_used_at)}` : ""}</td></tr>
+      ${m.meta?.previous_content ? `<tr><th>更正前</th><td><s>${esc(m.meta.previous_content)}</s></td></tr>` : ""}
+      ${m.successor ? `<tr><th>已被更正为</th><td><a href="#/memory/${m.successor.id}">${esc(m.successor.content)}</a></td></tr>` : ""}
+    </table>
+    ${alive ? `<form id="mem-edit" class="card"><h3>更正这条记忆</h3>
+      <textarea name="content" rows="2" style="width:100%">${esc(m.content)}</textarea>
+      <input name="reason" placeholder="更正原因（可空）" style="width:100%;margin:6px 0;padding:6px">
+      <div class="row"><button>保存更正</button><button type="button" class="ghost danger" id="mem-del">删除这条记忆</button></div>
+      <p class="small">更正会生成新版本，旧版本保留可追溯；依赖它的派生记忆（如历史交付）会被标记“需更正”。删除后不再被召回，派生记忆同步失效。</p></form>` : ""}
+    ${m.evidence?.length ? `<h3>证据（${m.evidence.length}）</h3><table class="tbl"><tr><th>资料</th><th>原文引句</th><th>立场</th></tr>${m.evidence.map((e) => `
+      <tr><td><a href="#/doc/${e.doc_id}">${esc(e.title || e.url)}</a><br><small>${esc(e.source_id)} · v${e.version}${e.duplicate_of ? " · 转载" : ""}${e.doc_status !== "active" ? ` · ${esc(e.doc_status)}` : ""}</small></td>
+      <td>${esc(e.snippet)}</td><td>${e.stance === "support" ? "支持" : e.stance === "refute" ? "反对/旧版" : esc(e.stance)}</td></tr>`).join("")}</table>` : ""}
+    ${m.upstream?.length ? `<h3>依据</h3><ul class="small">${m.upstream.map((u) => `<li>${u.kind === "document" ? `<a href="#/doc/${u.id}">` : `<a href="#/memory/${u.id}">`}${esc(u.content)}</a> · ${esc(MSTATUS[u.status] || u.status)}</li>`).join("")}</ul>` : ""}
+    ${m.derived?.length ? `<h3>派生条目</h3><ul class="small">${m.derived.map((u) => `<li><a href="#/memory/${u.id}">${esc(u.content)}</a> · ${esc(MSTATUS[u.status] || u.status)}</li>`).join("")}</ul>` : ""}
+    <h3>变化记录</h3><ol class="timeline">${m.events.map((e) => `<li class="ok"><div class="step-head"><b>${esc(e.event)}</b><span>${esc(e.actor)} · ${fmtTime(e.created_at)}${e.task_id ? ` · <a href="#/task/${e.task_id}">${esc(e.task_id)}</a>` : ""}</span></div>
+      ${e.detail && Object.keys(e.detail).length ? `<p class="obs">${esc(JSON.stringify(e.detail))}</p>` : ""}</li>`).join("")}</ol>`;
+  if (alive) {
+    $("#mem-edit").onsubmit = async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.target);
+      const r = await api(`/api/memories/${id}/correct`, { method: "POST", body: { content: f.get("content"), reason: f.get("reason") } });
+      location.hash = `#/memory/${r.new}`;
+    };
+    $("#mem-del").onclick = async () => {
+      const reason = prompt("删除原因（可空）") ?? null;
+      if (reason === null) return;
+      const r = await api(`/api/memories/${id}`, { method: "DELETE", body: { reason } });
+      alert(`已删除；同步失效 ${r.invalidated.length} 条派生记忆`);
+      showMemory(id);
+    };
+  }
+}
+
 // ---------------------------------------------------------------- 信息源
 async function showSources() {
   const el = $("#detail");
@@ -428,7 +565,15 @@ async function showSettings() {
       <div class="row"><button>保存</button><button type="button" class="ghost" id="llm-test">测试连接</button>
       <span class="${s.available ? "ok" : "gap"}">${s.available ? "已配置" : "未配置"}</span></div>
       <p id="llm-result" class="small"></p>
-    </form>`;
+    </form>
+    <div class="card" id="replay-card"></div>`;
+  api("/api/replay").then((r) => {
+    const c = $("#replay-card");
+    if (!r.enabled) { c.innerHTML = `<h3>固定样例回放</h3><p class="small">用 <code>bash start.command --replay</code> 启动可进入离线回放模式（模拟网站、独立数据库），用于演示长期记忆。</p>`; return; }
+    c.innerHTML = `<h3>固定样例回放（当前第 ${r.day} 天）</h3><p class="small">第 2 天：IT之家把 128K 更正为 64K，并出现一篇 256K 新进展；Hacker News 不可用。</p>
+      <div class="row"><button class="ghost" data-day="1">切到第 1 天</button><button class="ghost" data-day="2">切到第 2 天</button></div>`;
+    $$("[data-day]", c).forEach((b) => b.onclick = async () => { await api("/api/replay/day", { method: "POST", body: { day: +b.dataset.day } }); showSettings(); });
+  });
   $("#llm-form").onsubmit = async (e) => {
     e.preventDefault();
     const f = Object.fromEntries(new FormData(e.target).entries());

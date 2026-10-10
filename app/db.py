@@ -215,7 +215,7 @@ CREATE TABLE IF NOT EXISTS article_versions (
 
 JSON_FIELDS = {
     "params", "state", "budget", "usage", "input", "output", "payload",
-    "response", "config", "health", "locator", "meta", "source", "derived_from",
+    "response", "config", "health", "locator", "meta", "source", "derived_from", "detail",
 }
 
 
@@ -250,9 +250,41 @@ def reset():
     _local.conn = None
 
 
+MIGRATIONS = [
+    # (表, 列, 类型)：已有数据库升级时补列
+    ("memories", "mkey", "TEXT"),
+    ("memories", "confidence", "REAL"),
+    ("memories", "time_sensitive", "INTEGER DEFAULT 0"),
+    ("memories", "superseded_by", "TEXT"),
+    ("memories", "note", "TEXT"),
+    ("memories", "meta", "TEXT NOT NULL DEFAULT '{}'"),
+]
+
+EXTRA_SCHEMA = """
+CREATE TABLE IF NOT EXISTS memory_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id TEXT NOT NULL,
+    event TEXT NOT NULL,      -- create/update/support/conflict/verify/recall/correct/delete/invalidate/supersede
+    detail TEXT,
+    task_id TEXT,
+    actor TEXT NOT NULL DEFAULT 'agent',   -- agent / user / system
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_memev ON memory_events(memory_id, id);
+CREATE INDEX IF NOT EXISTS idx_mem_topic ON memories(scope, topic, status);
+CREATE INDEX IF NOT EXISTS idx_evidence_claim ON evidence(claim_id);
+"""
+
+
 def init_db():
-    conn().executescript(SCHEMA)
-    conn().commit()
+    c = conn()
+    c.executescript(SCHEMA)
+    for table, col, typ in MIGRATIONS:
+        cols = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+        if col not in cols:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+    c.executescript(EXTRA_SCHEMA)
+    c.commit()
 
 
 @contextmanager

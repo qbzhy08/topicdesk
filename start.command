@@ -35,4 +35,4 @@ fi
 PORT="${PORT:-8000}"
 echo "启动服务：http://127.0.0.1:$PORT  （关闭此窗口或按 Ctrl+C 停止）"
 ( sleep 2; open "http://127.0.0.1:$PORT" ) &
-exec .venv/bin/python run.py --port "$PORT" --auto-resume
+exec .venv/bin/python run.py --port "$PORT" --auto-resume "$@"

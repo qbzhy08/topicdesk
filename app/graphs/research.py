@@ -21,6 +21,8 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from .. import db, llm
+from .. import memory as mem
+from .. import memory_facts as mf
 from ..collect import tools as _tools  # noqa: F401  注册工具
 from ..collect.dedup import canonical_url, parse_date
 from ..collect.fetch import FetchError
@@ -150,9 +152,28 @@ def plan(ctx):
                        "本次重点找新进展和更正，已有资料只做去重比对。")
         ctx.think(memory_note)
 
+    # ---- 召回长期记忆：用户偏好 + 主题事实/争议/历史交付（在 token 预算内）
+    mem.expire_due()
+    rec = mem.recall(ctx.user_id, ctx.topic, "research", p.get("memory_budget", 1200), ctx.task_id,
+                     query_terms=topic_terms(ctx.topic))
+    eff = mem.effective_preferences(rec, p.get("this_time"))
+    st["memory"] = {"used": rec["used"], "lines": rec["text"].splitlines(), "tokens": rec["tokens"],
+                    "dropped": rec["dropped"], "pref_notes": eff["notes"],
+                    "prefs": {k: {"value": v["value"], "from": v["from"]} for k, v in eff["prefs"].items()}}
+    if rec["used"]:
+        ctx.think(f"召回记忆 {len(rec['used'])} 条（约 {rec['tokens']} token，预算外舍弃 {rec['dropped']} 条）：\n"
+                  + "\n".join(rec["text"].splitlines()[:8]))
+        memory_note += "\n已知记忆：\n" + rec["text"]
+    for n in eff["notes"]:
+        ctx.think(n)
+
     terms_zh = list(dict.fromkeys(topic_terms(ctx.topic) + list(p.get("keywords") or [])))
     queries_en = list(p.get("en_keywords") or [])
     aspects = [dict(a) for a in DEFAULT_ASPECTS]
+    prefs = eff["prefs"]
+
+    def _vals(v):
+        return [x.strip() for x in (re.split(r"[,，、;；]", v) if isinstance(v, str) else v or []) if str(x).strip()]
     plan_src = "rules"
     if llm.available() and not p.get("no_llm"):
         try:
@@ -170,9 +191,25 @@ def plan(ctx):
             ctx.think(f"LLM 规划：{d.get('notes', '')}")
         except Exception as e:  # LLM 失败不影响流程
             ctx.think(f"LLM 规划失败（{str(e)[:80]}），使用规则后备")
-    elif prev_plan.get("queries_en") and not queries_en:
-        queries_en = prev_plan["queries_en"]
-        ctx.think(f"未配置 LLM，复用上次有效的英文关键词 {queries_en}")
+    elif not queries_en:
+        last_q = next((d["meta"].get("queries_en") for d in rec["deliveries"]
+                       if (d["meta"] or {}).get("queries_en")), None) or prev_plan.get("queries_en")
+        if last_q:
+            queries_en = last_q
+            ctx.think(f"未配置 LLM，从历史交付记忆复用有效的英文关键词 {queries_en}")
+
+    # ---- 偏好影响检索：关注重点 → 增加关键词和子问题；排除内容 → 过滤；来源偏好 → 提高优先级
+    if prefs.get("focus"):
+        fv = _vals(prefs["focus"]["value"])
+        terms_zh = list(dict.fromkeys(terms_zh + fv))
+        aspects.append({"id": "user_focus", "name": f"用户关注：{'、'.join(fv)}", "kind": "keywords",
+                        "need": 2, "keywords": fv})
+        ctx.think(f"按{'本次要求' if prefs['focus']['from'] == 'this_time' else '长期偏好'}，"
+                  f"增加关注重点 {fv}（加入检索词，并要求至少 2 篇资料覆盖）")
+    st["exclude"] = _vals(prefs["exclude"]["value"]) if prefs.get("exclude") else []
+    if st["exclude"]:
+        ctx.think(f"按偏好排除包含 {st['exclude']} 的资料")
+    st["prefer_sources"] = _vals(prefs["source_prefer"]["value"]) if prefs.get("source_prefer") else []
 
     # 主题核心词也作为“概况”的判断依据
     aspects[0]["keywords"] = terms_zh + queries_en
@@ -205,8 +242,25 @@ def plan(ctx):
         ctx.think("没有英文关键词：英文来源本轮跳过，会在覆盖报告中列为可能遗漏")
     for u in p.get("urls") or []:
         _push(st, _fetch_action(u, "用户指定的链接", prio=90, base={"source_id": "web"}))
+    # ---- 记忆驱动的核验：未解争议 → 补充检索；需复查的时效性事实 → 重新抓取原文
+    verify_srcs = [s for s in srcs if (s["config"] or {}).get("lang") == "zh" and
+                   (s["method"] == "api" or (s["config"] or {}).get("search_feed"))]
+    for dsp in rec["disputes"]:
+        q = (dsp["meta"] or {}).get("query") or dsp["content"][:16]
+        for s in verify_srcs[:2]:
+            _push(st, _search_action(s["id"], q, terms_zh, f"记忆中有未解争议「{dsp['content'][:40]}」，补充核验",
+                                     prio=58))
+    for f in rec["facts"]:
+        if f["status"] != "stale":
+            continue
+        for e in db.query("SELECT d.url FROM evidence e JOIN documents d ON d.id=e.doc_id "
+                          "WHERE e.claim_id=? AND e.stance='support' LIMIT 1", (f["id"],)):
+            _push(st, _fetch_action(e["url"], f"记忆中的时效性事实需复查：「{f['content'][:30]}」", prio=58))
     for a in st["queue"]:
         a["initial"] = True        # 初始检索：保证每个来源至少查一次，不因资料数量提前达标而跳过
+        if a["type"] == "search" and a["source"] in st["prefer_sources"]:
+            a["prio"] += 10
+            a["why"] += "（偏好来源，优先）"
     st["per_source"] = {}
     ctx.observe(f"子问题 {len(aspects)} 个；初始行动 {len(st['queue'])} 个；"
                 f"中文词 {terms_zh}；英文检索式 {queries_en}")
@@ -412,6 +466,12 @@ def act(ctx):
             st["zero"].append(a["key"])
             ctx.observe(f"{a['source']}「{a['query']}」无相关结果")
             return "decide"
+        if st.get("exclude"):
+            before = len(items)
+            items = [it for it in items if not any(x.lower() in f"{it.get('title')} {it.get('summary')}".lower()
+                                                   for x in st["exclude"])]
+            if before - len(items):
+                ctx.observe(f"按偏好排除 {before - len(items)} 条（包含 {st['exclude']}）")
         # 单来源配额：避免某个来源（如站内搜索一次返回很多条）占满资料上限、挤掉其他来源
         quota = p.get("per_source", max(6, p.get("max_docs", 40) // 4))
         used = st.setdefault("per_source", {}).get(a["source"], 0)
@@ -507,6 +567,71 @@ def images(ctx):
                                 "reused_docs": len(done_before)}
     ctx.observe(f"配图：复用已处理资料 {len(done_before)} 篇；新处理 {new['docs']} 篇，保留 {new['kept']} 张、"
                 f"筛除 {new['rejected']} 张；本次资料共有可用配图 {agg.get('kept') or 0} 张")
+    return "remember"
+
+
+# ---------------------------------------------------------------- 节点：remember（写入长期记忆）
+
+def remember(ctx):
+    """把本次资料中的关键事实写入主题记忆：更正传播 → 抽取事实 → 合并（支持/冲突/更正）→ 裁决争议。
+    出现新的争议且还有核验机会时，回到检索做补充核验（证据冲突时补充核验）。"""
+    st, p = ctx.state, ctx.params
+    stats = st.setdefault("mem_stats", {})
+    seen_docs = set(st.setdefault("mem_docs", []))
+    stale = mf.propagate_doc_updates(ctx.topic, ctx.task_id)
+    if stale:
+        stats.setdefault("stale_from_updates", []).extend(stale)
+        ctx.observe(f"资料更新：{len(stale)} 条旧事实在新版本中找不到原数字，标记需复查")
+    docs = [d for d in _task_docs(ctx.task_id) if not d["duplicate_of"] and d["id"] not in seen_docs
+            and (d["content_kind"] in ("full", "excerpt") or
+                 ((d["meta"] or {}).get("primary") and len(d["text"] or "") >= 150))   # 论文摘要也算
+            and ((d["meta"] or {}).get("relevance") or 0) >= 0.3]
+    # 更新过的资料优先，其次一手来源和相关度
+    docs.sort(key=lambda d: (d["novelty"] != "update", not (d["meta"] or {}).get("primary"),
+                             -((d["meta"] or {}).get("relevance") or 0)))
+    docs = docs[:p.get("fact_docs", 10)]
+    full = [db.query_one("SELECT id, title, text FROM documents WHERE id=?", (d["id"],)) for d in docs]
+    terms = st["plan"]["terms_zh"] + [w for q in st["plan"]["queries_en"] for w in q.split() if len(w) > 3]
+    claims = mf.extract_claims(ctx, full, terms)
+    fact_ids = set(st.setdefault("mem_facts", []))
+    before = stats.get("conflicts", 0)
+    for c in claims:
+        fact_ids.add(mf.merge_claim(ctx.topic, c, ctx.task_id, stats))
+    # 转载/重复报道：记录为证据（可追溯“谁在转述”），但独立来源数不增加
+    for d in _task_docs(ctx.task_id):
+        if not d["duplicate_of"]:
+            continue
+        for e in db.query("SELECT DISTINCT claim_id FROM evidence WHERE doc_id=? AND stance='support'",
+                          (d["duplicate_of"],)):
+            f = mem.get(e["claim_id"])
+            if f and f["status"] in ("active", "stale") and mf.add_evidence(f["id"], d["id"], "转载/重复报道"):
+                mf.verify(f["id"], ctx.task_id)
+                stats["reprint_evidence"] = stats.get("reprint_evidence", 0) + 1
+                fact_ids.add(f["id"])
+    st["mem_facts"] = sorted(fact_ids)
+    st["mem_docs"] = sorted(seen_docs | {d["id"] for d in docs})
+    resolved = mf.resolve_disputes(ctx.topic, ctx.task_id)
+    stats["disputes"] = resolved
+    open_d = [r for r in resolved if r.get("open")]
+    ctx.observe(f"从 {len(docs)} 篇资料抽取 {len(claims)} 条事实：新增 {stats.get('new_facts', 0)}，"
+                f"被更多来源支持 {stats.get('supported', 0)}，更正 {stats.get('corrected', 0)}，"
+                f"冲突 {stats.get('conflicts', 0)}；争议裁决 {len(resolved) - len(open_d)} 个，仍未解决 {len(open_d)} 个")
+    new_conflicts = stats.get("conflicts", 0) - before
+    if new_conflicts and open_d and not st.get("verify_round") and p.get("verify_conflicts", True) \
+            and not st.get("_budget_exhausted"):
+        st["verify_round"] = 1
+        srcs = [s for s in list_sources() if s["id"] not in st["disabled"] and
+                (s["config"] or {}).get("lang") == "zh" and s["method"] == "api"]
+        added = 0
+        for dsp in open_d[:3]:
+            m = mem.get(dsp["dispute"])
+            q = (m["meta"] or {}).get("query") or m["content"][:16]
+            for s in srcs[:2]:
+                added += _push(st, _search_action(s["id"], q, st["plan"]["terms_zh"],
+                                                  f"发现证据冲突「{m['content'][:40]}」，补充核验", prio=70))
+        if added:
+            ctx.think(f"出现 {new_conflicts} 处证据冲突，回到检索补充核验（{added} 个检索行动），之后重新评估")
+            return "decide"
     return "report"
 
 
@@ -532,7 +657,29 @@ def report(ctx):
     gaps = [v["name"] for v in cov.values() if v["have"] < v["need"]]
     if gaps:
         omissions.append(f"覆盖不足的子问题：{gaps}")
+    mstats = st.get("mem_stats", {})
+    fact_ids = st.get("mem_facts", [])
+    top_docs = [d["id"] for d in sorted(docs, key=lambda d: -((d["meta"] or {}).get("relevance") or 0))
+                if not d["duplicate_of"]][:30]
+    if not st.get("delivery_id"):
+        summary = (f"检索交付 {len(docs)} 篇（新进展 {sum(1 for d in docs if d['novelty'] == 'new')}、"
+                   f"更新 {sum(1 for d in docs if d['novelty'] == 'update')}），涉及事实 {len(fact_ids)} 条")
+        st["delivery_id"] = mf.record_delivery(
+            ctx.topic, ctx.task_id, ctx.user_id, summary, fact_ids, top_docs,
+            {"queries_en": st["plan"]["queries_en"], "terms_zh": st["plan"]["terms_zh"]})
+    memory_report = {
+        "recalled": st.get("memory", {}).get("lines", []), "recalled_ids": st.get("memory", {}).get("used", []),
+        "pref_notes": st.get("memory", {}).get("pref_notes", []), "prefs": st.get("memory", {}).get("prefs", {}),
+        "new_facts": mstats.get("new_facts", 0), "supported": mstats.get("supported", 0),
+        "corrected": mstats.get("corrected", 0), "corrections": mstats.get("corrections", []),
+        "conflicts": mstats.get("conflicts", 0), "disputes": mstats.get("disputes", []),
+        "stale_from_updates": mstats.get("stale_from_updates", []), "delivery_id": st["delivery_id"],
+        "facts": [{"id": f["id"], "content": f["content"], "verify": (f["meta"] or {}).get("verify"),
+                   "independent": (f["meta"] or {}).get("independent"), "status": f["status"]}
+                  for f in (mem.get(i) for i in fact_ids) if f][:30],
+    }
     st["report"] = {
+        "memory": memory_report,
         "total_docs": len(docs),
         "unique_docs": sum(1 for d in docs if not d["duplicate_of"]),
         "events": len({d["event_id"] for d in docs}),
@@ -549,7 +696,7 @@ def report(ctx):
 
 register_graph(Graph(
     name="research", start="plan", on_budget="images",
-    nodes=dict(plan=plan, decide=decide, act=act, images=images, report=report),
+    nodes=dict(plan=plan, decide=decide, act=act, images=images, remember=remember, report=report),
 ))
 
 
