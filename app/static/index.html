@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>主题编辑台</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="masthead">
+  <a href="#/" class="brand">主题编辑台<span>TopicDesk</span></a>
+  <nav>
+    <a href="#/">任务</a>
+  </nav>
+</header>
+
+<main id="app">
+  <aside class="rail">
+    <form id="new-task" class="card">
+      <h2>新主题</h2>
+      <label>主题<input name="topic" required placeholder="例如：开源大模型的长上下文评测"></label>
+      <label>流程<select name="graph"></select></label>
+      <details>
+        <summary>预算与参数</summary>
+        <div class="grid2">
+          <label>最多步数<input name="max_steps" type="number" value="60"></label>
+          <label>工具调用<input name="max_tool_calls" type="number" value="120"></label>
+          <label>时长 (秒)<input name="max_seconds" type="number" value="900"></label>
+          <label>成本 ($)<input name="max_cost" type="number" step="0.1" value="1"></label>
+        </div>
+        <label>参数 (JSON)<textarea name="params" rows="3">{}</textarea></label>
+      </details>
+      <button type="submit">开始</button>
+    </form>
+    <h3 class="rail-title">最近任务</h3>
+    <ul id="task-list" class="task-list"></ul>
+  </aside>
+
+  <section id="detail" class="detail">
+    <div class="empty">从左侧提交一个主题，或打开已有任务。<br>任务进度保存在本地数据库，刷新页面不会丢失。</div>
+  </section>
+</main>
+
+<template id="tpl-detail">
+  <div class="detail-head">
+    <div>
+      <p class="kicker" data-f="graph"></p>
+      <h1 data-f="topic"></h1>
+      <p class="meta"><span class="badge" data-f="status"></span> <span data-f="node"></span></p>
+    </div>
+    <div class="actions">
+      <button data-act="resume" class="ghost">继续执行</button>
+      <button data-act="cancel" class="ghost danger">取消</button>
+    </div>
+  </div>
+  <div class="budget" data-f="budget"></div>
+  <p class="error" data-f="error"></p>
+  <div data-f="hitl"></div>
+  <details class="card rewind">
+    <summary>回退到某一步重跑</summary>
+    <div class="row">
+      <select data-f="rewind-node"></select>
+      <input data-f="rewind-inv" placeholder="要失效的中间结果键，逗号分隔（可空）">
+      <button data-act="rewind" class="ghost">回退并执行</button>
+    </div>
+  </details>
+  <h2 class="section">任务轨迹</h2>
+  <ol class="timeline" data-f="timeline"></ol>
+  <details class="card">
+    <summary>任务内记忆（当前状态）</summary>
+    <pre data-f="state"></pre>
+  </details>
+</template>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
