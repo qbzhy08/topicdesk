@@ -273,7 +273,9 @@ def run_task(task_id: str) -> str:
                                     graph.on_budget)
                 node = graph.on_budget
                 save_checkpoint(task_id, seq, node, state, usage)
-            if node == graph.on_budget:
+            # 进入收尾路径后（on_budget 节点及其后续节点）允许少量超支，但设硬上限防止失控
+            if graph.on_budget and state.get("_budget_exhausted") and \
+                    usage.get("steps", 0) < budget["max_steps"] + 15:
                 grace = True
             else:
                 _set_status(task_id, "failed", f"预算耗尽：{reason}")

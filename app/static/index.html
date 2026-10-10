@@ -9,28 +9,43 @@
 <body>
 <header class="masthead">
   <a href="#/" class="brand">主题编辑台<span>TopicDesk</span></a>
-  <nav>
-    <a href="#/">任务</a>
+  <nav id="nav">
+    <a href="#/" data-nav="tasks">任务</a>
+    <a href="#/library" data-nav="library">资料库</a>
+    <a href="#/sources" data-nav="sources">信息源</a>
+    <a href="#/settings" data-nav="settings">设置</a>
   </nav>
 </header>
 
 <main id="app">
-  <aside class="rail">
+  <aside class="rail" id="rail">
     <form id="new-task" class="card">
       <h2>新主题</h2>
-      <label>主题<input name="topic" required placeholder="例如：开源大模型的长上下文评测"></label>
-      <label>流程<select name="graph"></select></label>
+      <label>主题<input name="topic" required placeholder="例如：开源大模型 长上下文 评测"></label>
+      <label>补充中文关键词（逗号分隔，可空）<input name="keywords" placeholder="例如：长上下文, 大海捞针"></label>
+      <label>英文检索式（逗号分隔；配置了大模型可留空）<input name="en_keywords" placeholder="例如：long context LLM benchmark"></label>
       <details>
-        <summary>预算与参数</summary>
+        <summary>来源、预算与高级参数</summary>
+        <div class="src-checks" id="src-checks"></div>
         <div class="grid2">
-          <label>最多步数<input name="max_steps" type="number" value="60"></label>
-          <label>工具调用<input name="max_tool_calls" type="number" value="120"></label>
+          <label>资料上限<input name="max_docs" type="number" value="40"></label>
+          <label>抓全文上限<input name="max_fetch" type="number" value="15"></label>
+          <label>最多步数<input name="max_steps" type="number" value="80"></label>
+          <label>工具调用<input name="max_tool_calls" type="number" value="160"></label>
           <label>时长 (秒)<input name="max_seconds" type="number" value="900"></label>
           <label>成本 ($)<input name="max_cost" type="number" step="0.1" value="1"></label>
         </div>
-        <label>参数 (JSON)<textarea name="params" rows="3">{}</textarea></label>
+        <label class="opt"><input type="checkbox" name="hitl_on_block"> 页面受限时暂停，等我处理</label>
+        <label>流程<select name="graph"></select></label>
+        <label>额外参数 (JSON)<textarea name="params" rows="2">{}</textarea></label>
       </details>
-      <button type="submit">开始</button>
+      <button type="submit">开始检索</button>
+    </form>
+    <form id="import-form" class="card">
+      <h2>导入链接</h2>
+      <label>链接<input name="url" required placeholder="https://..."></label>
+      <label>归入主题<input name="topic" placeholder="可空"></label>
+      <button type="submit" class="ghost">导入</button>
     </form>
     <h3 class="rail-title">最近任务</h3>
     <ul id="task-list" class="task-list"></ul>
@@ -49,6 +64,7 @@
       <p class="meta"><span class="badge" data-f="status"></span> <span data-f="node"></span></p>
     </div>
     <div class="actions">
+      <a class="btn ghost" data-f="docs-link">查看本次资料</a>
       <button data-act="resume" class="ghost">继续执行</button>
       <button data-act="cancel" class="ghost danger">取消</button>
     </div>
@@ -56,6 +72,7 @@
   <div class="budget" data-f="budget"></div>
   <p class="error" data-f="error"></p>
   <div data-f="hitl"></div>
+  <div data-f="report"></div>
   <details class="card rewind">
     <summary>回退到某一步重跑</summary>
     <div class="row">

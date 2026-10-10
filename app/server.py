@@ -4,9 +4,14 @@
 """
 from __future__ import annotations
 
+import threading
+import time
+
 from flask import Flask, abort, jsonify, request, send_from_directory
 
-from . import db, graphs  # noqa: F401  导入即注册编排图
+from . import config, db, graphs, llm  # noqa: F401  导入即注册编排图
+from .collect import sources as sources_mod
+from .collect.dedup import canonical_url
 from .config import ROOT
 from .harness import GRAPHS, create_task, resolve_hitl, rewind, runner
 
@@ -148,7 +153,198 @@ def answer_hitl(rid):
     return jsonify(task_id=tid)
 
 
-def create_app(auto_resume: bool = False):
+# ---------------------------------------------------------------- 资料库
+
+DOC_LIST_COLS = ("id, url, canonical_url, source_id, topic, title, author, published_at, fetched_at, "
+                 "content_kind, novelty, version, duplicate_of, event_id, status, LENGTH(text) chars, "
+                 "json_extract(meta,'$.primary') primary_src, json_extract(meta,'$.relevance') relevance, "
+                 "json_extract(meta,'$.relation') relation, json_extract(meta,'$.via_browser') via_browser")
+
+
+@app.get("/api/topics")
+def topics():
+    return jsonify(db.query("SELECT topic, COUNT(*) n, MAX(fetched_at) last FROM documents "
+                            "WHERE status='active' GROUP BY topic ORDER BY last DESC"))
+
+
+@app.get("/api/docs")
+def list_docs():
+    a = request.args
+    where, args = ["1=1"], []
+    if a.get("topic"):
+        where.append("topic=?"); args.append(a["topic"])
+    if a.get("task"):
+        where.append("meta LIKE ?"); args.append(f"%{a['task']}%")
+    if a.get("status", "active") != "all":
+        where.append("status=?"); args.append(a.get("status", "active"))
+    for k in ("novelty", "source_id", "content_kind"):
+        if a.get(k):
+            where.append(f"{k}=?"); args.append(a[k])
+    if a.get("hide_dup") == "1":
+        where.append("duplicate_of IS NULL")
+    if a.get("q"):
+        where.append("(title LIKE ? OR text LIKE ?)"); args += [f"%{a['q']}%"] * 2
+    order = {"time": "COALESCE(published_at,'') DESC", "fetched": "fetched_at DESC",
+             "relevance": "relevance DESC"}.get(a.get("sort", "time"), "fetched_at DESC")
+    rows = db.query(f"SELECT {DOC_LIST_COLS} FROM documents WHERE {' AND '.join(where)} "
+                    f"ORDER BY {order} LIMIT 500", args)
+    if rows:
+        ids = [r["id"] for r in rows]
+        cnt = {r["doc_id"]: r for r in db.query(
+            f"SELECT doc_id, SUM(status='kept') kept, SUM(status='rejected') rejected FROM images "
+            f"WHERE doc_id IN ({','.join('?' * len(ids))}) GROUP BY doc_id", ids)}
+        for r in rows:
+            c = cnt.get(r["id"]) or {}
+            r["images_kept"], r["images_rejected"] = c.get("kept") or 0, c.get("rejected") or 0
+    return jsonify(rows)
+
+
+@app.get("/api/docs/<did>")
+def get_doc(did):
+    d = db.query_one("SELECT * FROM documents WHERE id=?", (did,))
+    if d is None:
+        abort(404)
+    d["images"] = db.query("SELECT * FROM images WHERE doc_id=? ORDER BY status, position", (did,))
+    versions = db.query("SELECT id, version, fetched_at, status, novelty, json_extract(meta,'$.change') change "
+                        "FROM documents WHERE canonical_url=? ORDER BY version", (d["canonical_url"],))
+    for v in versions:
+        if isinstance(v.get("change"), str):
+            import json as _j
+            v["change"] = _j.loads(v["change"])
+    d["versions"] = versions
+    root = d["duplicate_of"] or d["id"]
+    d["reprints"] = db.query(f"SELECT {DOC_LIST_COLS} FROM documents WHERE (duplicate_of=? OR id=?) "
+                             "AND id!=? AND status='active'", (root, root, did))
+    d["same_event"] = db.query(f"SELECT {DOC_LIST_COLS} FROM documents WHERE event_id=? AND id!=? "
+                               "AND status='active' AND (duplicate_of IS NULL OR duplicate_of!=?)",
+                               (d["event_id"], did, root))
+    src = db.query_one("SELECT id, name, method FROM sources WHERE id=?", (d["source_id"],))
+    d["source"] = src
+    (d.get("meta") or {}).pop("image_candidates", None)
+    return jsonify(d)
+
+
+@app.get("/media/<path:p>")
+def media(p):
+    return send_from_directory(config.DATA_DIR, p)
+
+
+# ---------------------------------------------------------------- 信息源
+
+@app.get("/api/sources")
+def get_sources():
+    rows = sources_mod.list_sources(enabled_only=False)
+    stats = {r["source_id"]: r for r in db.query(
+        "SELECT source_id, COUNT(*) n, MAX(fetched_at) last FROM documents WHERE status='active' "
+        "GROUP BY source_id")}
+    for r in rows:
+        r["docs"] = (stats.get(r["id"]) or {}).get("n", 0)
+    return jsonify(rows)
+
+
+@app.post("/api/sources")
+def add_source():
+    b = request.get_json(force=True)
+    feed = (b.get("feed") or "").strip()
+    name = (b.get("name") or "").strip()
+    if not feed.startswith("http") or not name:
+        return jsonify(error="需要名称和 RSS 地址"), 400
+    sid = "rss_" + canonical_url(feed).split("//")[1].replace("/", "_").replace(".", "_")[:40]
+    if db.query_one("SELECT id FROM sources WHERE id=?", (sid,)):
+        return jsonify(error="该 RSS 已存在"), 400
+    db.insert("sources", dict(id=sid, name=name, method="rss", base_url=feed,
+                              config={"feed": feed, "full_text": bool(b.get("full_text")),
+                                      "lang": b.get("lang", "zh"),
+                                      "detail": "browser" if b.get("browser") else "html"},
+                              enabled=1, health={}))
+    return jsonify(id=sid), 201
+
+
+@app.patch("/api/sources/<sid>")
+def patch_source(sid):
+    b = request.get_json(force=True)
+    if "enabled" in b:
+        db.update("sources", "id", sid, {"enabled": 1 if b["enabled"] else 0})
+    return jsonify(ok=True)
+
+
+@app.post("/api/sources/<sid>/test")
+def test_source(sid):
+    from .collect.fetch import FetchError
+    q = (request.get_json(silent=True) or {}).get("query", "")
+    t0 = time.time()
+    try:
+        items = sources_mod.search(sid, q or "AI", limit=5, terms=[] if not q else None)
+    except FetchError as e:
+        return jsonify(ok=False, error=e.to_dict(), ms=int((time.time() - t0) * 1000))
+    return jsonify(ok=True, count=len(items), ms=int((time.time() - t0) * 1000),
+                   sample=[{"title": i["title"], "url": i["url"], "kind": i["content_kind"]} for i in items[:5]])
+
+
+# ---------------------------------------------------------------- 导入、复查、设置
+
+@app.post("/api/import")
+def import_link():
+    b = request.get_json(force=True)
+    url = (b.get("url") or "").strip()
+    if not url.startswith("http"):
+        return jsonify(error="请输入 http(s) 链接"), 400
+    tid = create_task("import", (b.get("topic") or "未分类").strip(),
+                      params={"url": url, "mode": b.get("mode", "auto")})
+    runner.start(tid)
+    return jsonify(id=tid), 201
+
+
+@app.post("/api/recheck")
+def start_recheck():
+    b = request.get_json(silent=True) or {}
+    tid = create_task("recheck", b.get("topic") or "*", params={"limit": b.get("limit", 20)})
+    runner.start(tid)
+    return jsonify(id=tid), 201
+
+
+@app.get("/api/settings/llm")
+def get_llm():
+    return jsonify(llm.public_settings())
+
+
+@app.post("/api/settings/llm")
+def set_llm():
+    b = request.get_json(force=True)
+    llm.save_settings(b.get("base_url", ""), b.get("api_key", ""), b.get("model", ""))
+    return jsonify(llm.public_settings())
+
+
+@app.post("/api/settings/llm/test")
+def test_llm():
+    try:
+        r = llm.chat([{"role": "user", "content": "只回复 JSON：{\"ok\": true}"}], json_mode=True,
+                     max_tokens=20, timeout=30)
+        return jsonify(ok=True, reply=r["content"][:200], usage=r["usage"])
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)[:300])
+
+
+def _recheck_loop(interval_min: float):
+    while True:
+        time.sleep(interval_min * 60)
+        try:
+            due = db.query_one("SELECT COUNT(*) n FROM documents WHERE status='active' AND "
+                               "recheck_at IS NOT NULL AND recheck_at<=?", (db.now(),))["n"]
+            busy = db.query_one("SELECT COUNT(*) n FROM tasks WHERE graph='recheck' AND "
+                                "status IN ('pending','running')")["n"]
+            if due and not busy:
+                runner.start(create_task("recheck", "*", params={"limit": 20}))
+        except Exception:
+            pass
+        finally:
+            db.reset()
+
+
+def create_app(auto_resume: bool = False, recheck_every: float = 0):
     db.init_db()
+    sources_mod.seed_sources()
     runner.recover_on_boot(auto_resume=auto_resume)
+    if recheck_every > 0:
+        threading.Thread(target=_recheck_loop, args=(recheck_every,), daemon=True).start()
     return app
