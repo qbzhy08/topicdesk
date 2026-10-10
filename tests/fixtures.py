@@ -152,6 +152,21 @@ WAF_PAGE = ("<!DOCTYPE html><html><head><meta charset='UTF-8'></head><body><div 
             "<script>var waf_verification_challenge=1;</script></body></html>")
 
 
+JUEJIN_JSON = json.dumps({"err_no": 0, "err_msg": "success", "data": [
+    {"result_type": 2, "title_highlight": "<em>长上下文</em>大模型评测踩坑记录",
+     "content_highlight": "我们对比了几个开源模型的<em>长上下文</em>表现",
+     "result_model": {"article_id": "7001", "article_info": {
+         "article_id": "7001", "title": "长上下文大模型评测踩坑记录", "brief_content": "对比几个开源模型",
+         "ctime": str(int((NOW - timedelta(days=3)).timestamp())), "view_count": 3200, "digg_count": 88},
+         "author_user_info": {"user_name": "掘金作者"}}}], "cursor": "1", "has_more": False}, ensure_ascii=False)
+
+JUEJIN_PAGE = ("<html><head><title>长上下文大模型评测踩坑记录 - 掘金</title></head><body><article class='article'>"
+               "<h1>长上下文大模型评测踩坑记录</h1>"
+               + "".join(f"<p>第{i}段：我们在 32K 和 128K 两档长度上评测了几个开源大模型，发现长上下文场景下"
+                         f"检索类任务和推理类任务的表现差距很大。</p>" for i in range(14)) +
+               "</article></body></html>")
+
+
 class FakeWeb:
     def __init__(self):
         self.calls = []
@@ -165,7 +180,7 @@ class FakeWeb:
             "https://github.com/example/longeval.png": png(64, 64),
         }
 
-    def __call__(self, url, headers, timeout):
+    def __call__(self, url, headers, timeout, method="GET", json_body=None):
         self.calls.append(url)
         H = {"content-type": "text/html; charset=utf-8"}
         X = {"content-type": "application/xml; charset=utf-8"}
@@ -183,6 +198,10 @@ class FakeWeb:
             if self.state["waf_36kr"]:
                 return 200, {"content-type": "text/html"}, WAF_PAGE.encode(), url
             return 200, X, kr_feed().encode(), url
+        if url.startswith("https://api.juejin.cn/search_api/v1/search") and method == "POST":
+            return 200, J, JUEJIN_JSON.encode(), url
+        if url == "https://juejin.cn/post/7001":
+            return 200, H, JUEJIN_PAGE.encode(), url
         if url.startswith("https://www.qbitai.com/?s="):
             return 200, X, qbitai_search().encode(), url
         if url == "https://www.qbitai.com/2026/10/502364.html":

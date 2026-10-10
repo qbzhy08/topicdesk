@@ -136,7 +136,8 @@ class StoreTest(CollectBase):
 
 class ResearchGraphTest(CollectBase):
     PARAMS = {"keywords": ["长上下文"], "en_keywords": ["long context LLM"], "no_llm": True,
-              "max_docs": 30}
+              "max_docs": 30,
+              "sources": ["ithome", "36kr", "sspai", "qbitai", "juejin", "leiphone", "arxiv", "hn", "github"]}
 
     def _run(self, params=None):
         tid = create_task("research", "开源大模型 长上下文 评测", params=params or self.PARAMS,
@@ -150,7 +151,11 @@ class ResearchGraphTest(CollectBase):
         rep = task["state"]["report"]
         tools = db.query("SELECT tool, input, status FROM tool_calls WHERE task_id=?", (tid,))
         searched = {t["input"]["source_id"] for t in tools if t["tool"] == "source_search"}
-        self.assertEqual(searched, {"ithome", "36kr", "sspai", "qbitai", "arxiv", "hn", "github"})
+        self.assertEqual(searched, {"ithome", "36kr", "sspai", "qbitai", "juejin", "leiphone",
+                                    "arxiv", "hn", "github"})
+        jj = db.query_one("SELECT * FROM documents WHERE url='https://juejin.cn/post/7001'")
+        self.assertEqual((jj["content_kind"], jj["author"]), ("full", "掘金作者"))   # 站内搜索 → 抓全文
+        self.assertIn("leiphone", task["state"]["disabled"])        # 不存在的 RSS：记录并停用，不死循环
         # 站内搜索：标题不含关键词，抓全文后确认相关，并且只追正文里的论文链接，不追导航链接
         qb = db.query_one("SELECT * FROM documents WHERE url='https://www.qbitai.com/2026/10/502364.html'")
         self.assertEqual(qb["content_kind"], "full")
@@ -225,10 +230,10 @@ class ResearchGraphTest(CollectBase):
     def test_rss_source_failure_does_not_lose_progress(self):
         orig = self.web.__call__
 
-        def broken(url, h, t):
+        def broken(url, h, t, **kw):
             if url == "https://36kr.com/feed":
                 raise fetch.FetchError("timeout", "模拟超时", url)
-            return orig(url, h, t)
+            return orig(url, h, t, **kw)
         fetch.set_transport(broken)
         tid, status, task = self._run()
         self.assertEqual(status, "done")

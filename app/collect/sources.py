@@ -38,6 +38,21 @@ BUILTIN = [
          config={"feed": "https://36kr.com/feed", "full_text": True}),
     dict(id="sspai", name="少数派", method="rss", lang="zh", base_url="https://sspai.com",
          config={"feed": "https://sspai.com/feed", "full_text": False, "detail": "browser"}),
+    dict(id="leiphone", name="雷锋网", method="rss", lang="zh", base_url="https://www.leiphone.com",
+         config={"feed": "https://www.leiphone.com/feed", "full_text": "auto"}),
+    dict(id="ifanr", name="爱范儿", method="rss", lang="zh", base_url="https://www.ifanr.com",
+         config={"feed": "https://www.ifanr.com/feed", "full_text": "auto"}),
+    dict(id="infoq", name="InfoQ 中文", method="rss", lang="zh", base_url="https://www.infoq.cn",
+         config={"feed": "https://www.infoq.cn/feed", "full_text": False, "detail": "browser",
+                 "note": "RSS 只有链接，正文页为前端渲染"}),
+    dict(id="geekpark", name="极客公园", method="rss", lang="zh", base_url="https://www.geekpark.net",
+         config={"feed": "https://www.geekpark.net/rss", "full_text": "auto"}),
+    dict(id="huxiu", name="虎嗅", method="rss", lang="zh", base_url="https://www.huxiu.com",
+         config={"feed": "https://www.huxiu.com/rss/0.xml", "full_text": "auto"}),
+    dict(id="oschina", name="开源中国", method="rss", lang="zh", base_url="https://www.oschina.net",
+         config={"feed": "https://www.oschina.net/news/rss", "full_text": "auto"}),
+    dict(id="juejin", name="掘金", method="api", lang="zh", base_url="https://juejin.cn",
+         config={"note": "站内搜索接口（POST JSON），可按关键词检索历史技术文章"}),
     dict(id="qbitai", name="量子位", method="rss", lang="zh", base_url="https://www.qbitai.com",
          config={"feed": "https://www.qbitai.com/feed",
                  "search_feed": "https://www.qbitai.com/?s={q}&feed=rss2", "full_text": False,
@@ -178,8 +193,10 @@ def search_rss(source: dict, query: str, limit: int = 20, terms: list[str] | Non
     if not entries and not use_search:
         raise FetchError("bad_content", "RSS 中没有条目（可能返回了网页而不是 RSS）", url)
     terms = terms or topic_terms(query)
-    # 站内搜索已按关键词匹配过（常常匹配的是正文），标题里不一定出现关键词，所以不再按相关度过滤
-    min_rel = 0.0 if use_search else 0.5
+    # 站内搜索已按关键词匹配过（常常匹配的是正文），不再过滤；
+    # 最新文章 RSS：命中任一核心词就先收进来（约 1/n），抓到全文后再精细判断相关度
+    min_rel = 0.0 if use_search else min(0.5, 0.99 / max(len(terms), 1))
+    ft = cfg.get("full_text")
     items = []
     for e in entries:
         art = extract_article(e["content_html"], e["url"], is_fragment=True)
@@ -187,12 +204,13 @@ def search_rss(source: dict, query: str, limit: int = 20, terms: list[str] | Non
         rel = relevance(terms, e["title"], text_)
         if query and rel < min_rel:
             continue
-        kind = art["content_kind"] if cfg.get("full_text") else "summary"
+        is_full = ft is True or (ft == "auto" and art["content_kind"] == "full")
+        kind = art["content_kind"] if is_full else "summary"
         items.append({
             "url": e["url"], "title": e["title"], "author": e["author"],
             "published_at": iso(e["published_at"]) or e["published_at"],
-            "summary": text_[:300], "text": text_ if cfg.get("full_text") else None,
-            "content_kind": kind, "images": art["images"] if cfg.get("full_text") else [],
+            "summary": text_[:300], "text": text_ if is_full else None,
+            "content_kind": kind, "images": art["images"] if is_full else [],
             "source_id": source["id"], "primary": False, "relevance": rel,
             "meta": {"feed": url, "feed_via": via, "site_search": use_search,
                      "detail": cfg.get("detail", "html"), "out_links": art["links"][:20]},
@@ -277,7 +295,48 @@ def search_github(source: dict, query: str, limit: int = 8, **_) -> list[dict]:
     return items
 
 
-SEARCHERS = {"rss": search_rss, "arxiv": search_arxiv, "hn": search_hn, "github": search_github}
+# ---------------------------------------------------------------- 掘金（站内搜索 API）
+
+def search_juejin(source: dict, query: str, limit: int = 15, **_) -> list[dict]:
+    import random
+    url = ("https://api.juejin.cn/search_api/v1/search?aid=2608&uuid=" +
+           str(random.randint(7 * 10**18, 8 * 10**18)) + "&spider=0")
+    body = {"key_word": query, "id_type": 2, "cursor": "0", "limit": limit, "search_type": 0,
+            "sort_type": 0, "version": 1}
+    r = fetcher.post_json(url, body, cache_ttl=3600,
+                          headers={"Origin": "https://juejin.cn", "Referer": "https://juejin.cn/"})
+    try:
+        d = r.json()
+    except ValueError as e:
+        raise FetchError("bad_content", f"掘金返回的不是 JSON：{r.text[:80]}", url) from e
+    if d.get("err_no") not in (0, None):
+        raise FetchError("blocked", f"掘金接口错误 {d.get('err_no')}：{d.get('err_msg')}", url)
+    items = []
+    for row in d.get("data") or []:
+        m = row.get("result_model") or {}
+        info = m.get("article_info") or {}
+        aid = m.get("article_id") or info.get("article_id")
+        if not aid:
+            continue
+        ctime = info.get("ctime")
+        items.append({
+            "url": f"https://juejin.cn/post/{aid}",
+            "title": html_to_text(row.get("title_highlight") or info.get("title") or ""),
+            "author": (m.get("author_user_info") or {}).get("user_name"),
+            "published_at": iso(int(ctime)) if str(ctime or "").isdigit() else None,
+            "summary": html_to_text(row.get("content_highlight") or info.get("brief_content") or ""),
+            "text": None, "content_kind": "summary", "images": [], "source_id": "juejin",
+            "primary": False,
+            "meta": {"views": info.get("view_count"), "likes": info.get("digg_count"),
+                     "site_search": True, "detail": "html"},
+        })
+    if not items and d.get("data") is None:
+        raise FetchError("bad_content", f"掘金返回结构变化：{list(d)[:6]}", url)
+    return items
+
+
+SEARCHERS = {"rss": search_rss, "arxiv": search_arxiv, "hn": search_hn, "github": search_github,
+             "juejin": search_juejin}
 
 
 def search(source_id: str, query: str, limit: int = 15, terms: list[str] | None = None) -> list[dict]:

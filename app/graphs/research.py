@@ -118,8 +118,11 @@ def _prev_research(topic: str, exclude: str) -> dict | None:
 
 PLAN_PROMPT = """你是信息检索规划助手。用户想了解的主题：「{topic}」。
 {memory}
-请把主题拆成 3-5 个需要覆盖的子问题，并给出检索关键词。中文来源是 RSS（只能按关键词过滤最新文章），
+请把主题拆成 3-5 个需要覆盖的子问题，并给出检索关键词。
+中文来源：多家科技媒体 RSS（按关键词过滤最新文章）和掘金站内搜索。中文核心词要用中文媒体实际常用的说法，
+短（2-5 字）、常见，例如“长上下文”“上下文窗口”，不要自造“上下文测评”这类少见词组。
 英文来源是 arXiv、Hacker News、GitHub 搜索（关键词要短，2-4 个英文词）。
+子问题的 keywords 同时给中文和英文，因为资料有中有英。
 只输出 JSON：
 {{"core_terms_zh": ["主题核心词，2-4个，越短越好"],
   "aspects": [{{"name": "子问题", "keywords": ["判断资料是否覆盖该子问题的中英文关键词"]}}],
@@ -187,6 +190,10 @@ def plan(ctx):
         elif s["method"] == "rss" and lang == "zh":
             _push(st, _search_action(s["id"], " ".join(terms_zh), terms_zh,
                                      f"中文 RSS 按核心词 {terms_zh} 过滤最新文章"))
+        elif s["method"] == "api" and lang == "zh":
+            for t in terms_zh[:2]:
+                _push(st, _search_action(s["id"], t, terms_zh, f"中文站内搜索「{t}」（可检索历史文章）",
+                                         prio=55))
         elif lang == "en":
             if not queries_en:
                 continue
@@ -278,6 +285,12 @@ def decide(ctx):
                         q = t[-1]          # 站内搜索：用缺口关键词单独检索
                     added += _push(st, _search_action(s["id"], q, t,
                                                       f"补缺口 {names}：调整关键词为 {t}", prio=45))
+            elif s["method"] == "api" and lang == "zh":
+                for t in new_terms[:3]:
+                    t = t if isinstance(t, list) else [t]
+                    q = " ".join(t)
+                    added += _push(st, _search_action(s["id"], q, t,
+                                                      f"补缺口 {names}：调整关键词为 {t}", prio=45))
             elif lang == "en":
                 for q in new_en[:2]:
                     added += _push(st, _search_action(s["id"], q, None, f"补缺口 {names}：{q}", prio=45))
@@ -345,8 +358,9 @@ def _handle_failure(ctx, a: dict, e: FetchError):
     if a["type"] == "search":
         sid = a["source"]
         st["source_fail"][sid] = st["source_fail"].get(sid, 0) + 1
-        if e.kind in ("network", "timeout", "server", "rate_limit", "robots", "blocked") and \
-                (st["source_fail"][sid] >= 2 or e.kind in ("robots", "blocked", "network")):
+        # 明确拒绝/不可达/内容异常：直接停用；偶发错误（超时、5xx、限流）重试一次，仍失败再停用
+        if e.kind in ("robots", "blocked", "network", "not_found", "bad_content") or \
+                st["source_fail"][sid] >= 2 or a["key"].endswith(":retry"):
             st["disabled"].append(sid)
             rec["fallback"] = f"本任务停用 {sid}，由其他来源继续覆盖"
         else:
@@ -398,7 +412,7 @@ def act(ctx):
         for it in items:
             if it.get("relevance") is None:
                 it["relevance"] = _rel(st, it.get("title") or "", it.get("summary") or "")
-            r = _save(ctx, it, "api" if a["source"] in ("arxiv", "hn", "github") else "rss")
+            r = _save(ctx, it, "api" if a["source"] in ("arxiv", "hn", "github", "juejin") else "rss")
             counts[r["action"] + ("/" + r["novelty"] if r["action"] == "new" else "")] = \
                 counts.get(r["action"] + ("/" + r["novelty"] if r["action"] == "new" else ""), 0) + 1
             meta = it.get("meta") or {}

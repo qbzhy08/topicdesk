@@ -75,10 +75,12 @@ class Response:
 Transport = Callable[[str, dict, float], tuple]
 
 
-def _requests_transport(url: str, headers: dict, timeout: float):
+def _requests_transport(url: str, headers: dict, timeout: float, method: str = "GET",
+                        json_body=None):
     import requests
     try:
-        r = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+        r = requests.request(method, url, headers=headers, timeout=timeout, allow_redirects=True,
+                             json=json_body)
     except requests.exceptions.Timeout as e:
         raise FetchError("timeout", f"请求超时 {timeout}s", url) from e
     except requests.exceptions.SSLError as e:
@@ -126,10 +128,10 @@ class Fetcher:
         body = (config.CACHE_DIR / d["body"]).read_bytes() if d.get("body") else b""
         return Response(url, d["final_url"], d["status"], d["headers"], body, from_cache=True)
 
-    def _cache_put(self, r: Response):
+    def _cache_put(self, r: Response, key: str | None = None):
         body_name = hashlib.sha256(r.content).hexdigest()[:32] + ".bin"
         (config.CACHE_DIR / body_name).write_bytes(r.content)
-        self._cache_path(r.url).write_text(json.dumps({
+        self._cache_path(key or r.url).write_text(json.dumps({
             "t": time.time(), "final_url": r.final_url, "status": r.status,
             "headers": {k: v for k, v in r.headers.items()
                         if k in ("content-type", "last-modified", "etag")},
@@ -162,12 +164,18 @@ class Fetcher:
         return True if rp is None else rp.can_fetch(BOT_NAME, url)
 
     # ---------------------------------------------------------------- 主入口
+    def post_json(self, url: str, body: dict, **kw) -> Response:
+        """POST JSON（部分站内搜索接口只支持 POST）。缓存键包含请求体。"""
+        return self.get(url, _method="POST", _json=body, **kw)
+
     def get(self, url: str, *, respect_robots: bool = True, cache_ttl: float | None = None,
-            headers: dict | None = None, timeout: float | None = None) -> Response:
+            headers: dict | None = None, timeout: float | None = None,
+            _method: str = "GET", _json: dict | None = None) -> Response:
         if not url.startswith(("http://", "https://")):
             raise FetchError("bad_content", "只支持 http/https 链接", url)
         ttl = self.cache_ttl if cache_ttl is None else cache_ttl
-        hit = self._cache_get(url, ttl)
+        ckey = url if _method == "GET" else f"{_method} {url} {json.dumps(_json, sort_keys=True, ensure_ascii=False)}"
+        hit = self._cache_get(ckey, ttl)
         if hit and not _looks_like_challenge(hit):     # 旧版本缓存过验证页，不能复用
             return hit
         if respect_robots and not self.robots_allowed(url):
@@ -180,7 +188,11 @@ class Fetcher:
             self._throttle(host)
             t0 = time.time()
             try:
-                status, rh, content, final = _transport(url, h, timeout or self.timeout)
+                if _method == "GET":
+                    status, rh, content, final = _transport(url, h, timeout or self.timeout)
+                else:
+                    status, rh, content, final = _transport(url, h, timeout or self.timeout,
+                                                            method=_method, json_body=_json)
             except FetchError as e:
                 last_err = e
                 if e.kind in ("timeout", "network") and attempt < self.retries:
@@ -206,7 +218,7 @@ class Fetcher:
             if _looks_like_challenge(r):
                 raise FetchError("blocked", "返回了 WAF/反爬验证页（需要执行 JavaScript）", url, status)
             if ttl > 0:
-                self._cache_put(r)
+                self._cache_put(r, ckey)
             return r
         raise last_err or FetchError("network", "未知错误", url)
 
