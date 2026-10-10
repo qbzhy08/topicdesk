@@ -1,4 +1,6 @@
 """后台执行器：每个任务一个线程，防止重复运行；服务启动时处理上次中断的任务。"""
+from __future__ import annotations
+
 import threading
 
 from .. import db

@@ -6,6 +6,8 @@
 - 证据链：documents → claims ← evidence，文章段落通过 citations 指向 claim，
   记忆通过 derived_from 指向上游记忆 / claim，删除时可级联失效。
 """
+from __future__ import annotations
+
 import json
 import sqlite3
 import threading

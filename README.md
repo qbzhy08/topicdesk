@@ -2,16 +2,20 @@
 
 面向主题的信息收集与高价值内容创作 Agent。
 
-## 启动
+## 启动（macOS）
+
+1. 安装 Python 3.12：到 https://www.python.org/downloads/macos/ 下载 macOS 安装包，双击安装。
+2. 打开“终端”，进入解压后的目录并运行启动脚本：
 
 ```bash
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-python -m playwright install chromium                # 动态页面采集需要（Lv1 起使用）
-python run.py --port 8000                            # 打开 http://127.0.0.1:8000
+cd ~/Downloads/topicdesk      # 换成你解压的位置
+bash start.command
 ```
 
-`--auto-resume`：启动时自动从检查点恢复上次被中断的任务。
+首次运行会自动创建虚拟环境、安装依赖（官方源失败会自动切换清华镜像），然后打开
+http://127.0.0.1:8000 。之后每次只需再运行 `bash start.command`。
+
+脚本带 `--auto-resume`：上次被中断的任务会从检查点自动继续。
 
 ### 配置 LLM（可选，后续关卡使用）
 

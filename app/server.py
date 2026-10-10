@@ -2,6 +2,8 @@
 
 前端用轮询读取轨迹（/trace?after=seq），刷新页面后从数据库重建全部进度。
 """
+from __future__ import annotations
+
 from flask import Flask, abort, jsonify, request, send_from_directory
 
 from . import db, graphs  # noqa: F401  导入即注册编排图
