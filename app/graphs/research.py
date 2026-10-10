@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 from .. import db, llm
@@ -64,8 +65,20 @@ def _task_docs(task_id: str) -> list[dict]:
                     "meta LIKE ?", (f"%{task_id}%",))
 
 
+def _rel(st: dict, *texts: str) -> float:
+    """中英文分别计算相关度取最大：中文看核心词，英文看任一检索式的词覆盖率。"""
+    plan = st.get("plan") or {}
+    best = relevance(plan.get("terms_zh") or [], *texts) if plan.get("terms_zh") else 0.0
+    for q in plan.get("queries_en") or []:
+        words = [w for w in re.split(r"\W+", q) if len(w) > 2]
+        if words:
+            best = max(best, relevance(words, *texts))
+    return best
+
+
 def _coverage(ctx) -> dict:
-    docs = [d for d in _task_docs(ctx.task_id) if not d["duplicate_of"]]
+    docs = [d for d in _task_docs(ctx.task_id) if not d["duplicate_of"] and
+            ((d["meta"] or {}).get("relevance") is None or (d["meta"] or {}).get("relevance") >= 0.3)]
     cov = {}
     for a in ctx.state["aspects"]:
         hits = [d["id"] for d in docs if _doc_hits(d, a)]
@@ -167,7 +180,11 @@ def plan(ctx):
     srcs = [s for s in list_sources() if s["id"] in allowed and s["id"] != "web"]
     for s in srcs:
         lang = (s["config"] or {}).get("lang", "zh")
-        if s["method"] == "rss" and lang == "zh":
+        if s["method"] == "rss" and lang == "zh" and (s["config"] or {}).get("search_feed"):
+            for t in terms_zh[:2]:
+                _push(st, _search_action(s["id"], t, terms_zh, f"站内搜索「{t}」（可检索历史文章）",
+                                         prio=55))
+        elif s["method"] == "rss" and lang == "zh":
             _push(st, _search_action(s["id"], " ".join(terms_zh), terms_zh,
                                      f"中文 RSS 按核心词 {terms_zh} 过滤最新文章"))
         elif lang == "en":
@@ -203,8 +220,9 @@ def decide(ctx):
     gaps = _gaps(cov)
     cov_txt = "；".join(f"{v['name']} {v['have']}/{v['need']}" for v in cov.values())
 
-    if n_docs >= max_docs and not gaps:
-        ctx.think(f"已收集 {n_docs} 篇（上限 {max_docs}），覆盖矩阵：{cov_txt}。覆盖足够，停止检索")
+    pending_fetch = any(a["type"] == "fetch" for a in st["queue"]) and st["fetches"] < p.get("max_fetch", 15)
+    if n_docs >= max_docs and not gaps and not pending_fetch:
+        ctx.think(f"已收集 {n_docs} 篇（上限 {max_docs}），覆盖矩阵：{cov_txt}。覆盖足够、全文补抓完成，停止检索")
         return "images"
 
     queue = [a for a in st["queue"] if not (a["type"] == "search" and a["source"] in st["disabled"])]
@@ -255,7 +273,10 @@ def decide(ctx):
             if s["method"] == "rss" and lang == "zh":
                 for t in new_terms[:3]:
                     t = t if isinstance(t, list) else [t]
-                    added += _push(st, _search_action(s["id"], " ".join(t), t,
+                    q = " ".join(t)
+                    if (s["config"] or {}).get("search_feed"):
+                        q = t[-1]          # 站内搜索：用缺口关键词单独检索
+                    added += _push(st, _search_action(s["id"], q, t,
                                                       f"补缺口 {names}：调整关键词为 {t}", prio=45))
             elif lang == "en":
                 for q in new_en[:2]:
@@ -281,15 +302,34 @@ def _save(ctx, item: dict, how: str) -> dict:
     return res
 
 
-def _follow_primary(ctx, doc_id: str, links: list[dict]):
-    """正文里引用的论文/仓库/官方页面：追踪原始来源。"""
+_SPECIFIC = [
+    re.compile(r"arxiv\.org/(abs|pdf)/\d{4}\.\d{4,5}"),
+    re.compile(r"github\.com/(?!(features|about|pricing|login|topics|orgs|sponsors|marketplace|"
+               r"collections|trending|enterprise|site|security|customer-stories|readme)\b)"
+               r"[\w.-]+/[\w.-]+/?($|[?#]|/(tree|blob)/)"),
+    re.compile(r"huggingface\.co/(papers/\d|(?!(docs|spaces|blog|pricing|login|join|models|datasets|"
+               r"tasks|learn|enterprise)\b)[\w.-]+/[\w.-]+/?$|spaces/[\w.-]+/[\w.-]+)"),
+    re.compile(r"openreview\.net/(forum|pdf)\?id="),
+    re.compile(r"aclanthology\.org/[\w.-]+\.\d+"),
+]
+
+
+def _specific_primary(url: str) -> bool:
+    return any(p.search(url) for p in _SPECIFIC)
+
+
+def _follow_primary(ctx, doc_id: str, links: list[dict], from_primary: bool = False):
+    """二手报道里引用的具体论文/仓库/模型页：追踪原始来源。
+    一手页面本身（论文页、仓库页）的导航链接不追，避免跑到 arXiv Labs、HF 首页之类的无关页面。"""
+    if from_primary:
+        return
     st = ctx.state
     n = st["follow_count"].get(doc_id, 0)
     for l in links or []:
         if n >= MAX_FOLLOW_PER_DOC:
             break
         u = l["url"]
-        if not is_primary(u) or "/login" in u or u.endswith((".png", ".jpg")):
+        if not _specific_primary(u):
             continue
         if _push(st, _fetch_action(u, f"追踪原始来源（{doc_id} 引用：{l.get('text') or u}）",
                                    prio=60, base={"source_id": "web", "primary": True,
@@ -356,6 +396,8 @@ def act(ctx):
             return "decide"
         counts = {}
         for it in items:
+            if it.get("relevance") is None:
+                it["relevance"] = _rel(st, it.get("title") or "", it.get("summary") or "")
             r = _save(ctx, it, "api" if a["source"] in ("arxiv", "hn", "github") else "rss")
             counts[r["action"] + ("/" + r["novelty"] if r["action"] == "new" else "")] = \
                 counts.get(r["action"] + ("/" + r["novelty"] if r["action"] == "new" else ""), 0) + 1
@@ -372,7 +414,7 @@ def act(ctx):
                                         prio=30 + int((it.get("relevance") or 0) * 10), mode=mode,
                                         base=it, doc_id=r["doc_id"]))
             if r["action"] == "new" and meta.get("out_links"):
-                _follow_primary(ctx, r["doc_id"], meta["out_links"])
+                _follow_primary(ctx, r["doc_id"], meta["out_links"], from_primary=it.get("primary"))
         ctx.observe(f"{a['source']}「{a['query']}」返回 {len(items)} 条 → {counts}")
         return "decide"
 
@@ -384,13 +426,12 @@ def act(ctx):
         _handle_failure(ctx, a, e)
         return "decide"
     item = article_to_item(art, a["url"], base=a.get("base"))
-    terms = st["plan"]["terms_zh"] + st["plan"]["queries_en"]
-    rel = relevance(terms, item.get("title") or "", item.get("text") or "")
-    if not a.get("base") or a["base"].get("relevance") is None:
-        item["relevance"] = rel
+    rel = _rel(st, item.get("title") or "", item.get("text") or "")
+    item["relevance"] = max(rel, (a.get("base") or {}).get("relevance") or 0)   # 全文到手后重新判断相关度
     how = "browser" if art.get("via_browser") else "html"
     r = _save(ctx, item, how)
-    _follow_primary(ctx, r["doc_id"], art.get("links"))
+    _follow_primary(ctx, r["doc_id"], art.get("links"),
+                    from_primary=bool(item.get("primary")) or is_primary(art.get("final_url") or a["url"]))
     ctx.observe(f"抓取 {art.get('final_url', a['url'])}：{art['content_kind']}，{len(art['text'])} 字，"
                 f"{'浏览器渲染' if art.get('via_browser') else '静态 HTML'}，候选图片 {len(art.get('images', []))} 张"
                 f" → {r['action']}" + (f"（{r['relation']}）" if r.get("relation") else ""))

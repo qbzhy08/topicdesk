@@ -133,10 +133,30 @@ GH_PAGE = ("<html><head><title>example/longeval</title></head><body><article cla
            "</article></body></html>")
 
 
+def qbitai_search():
+    # 站内搜索结果：标题里没有关键词，但正文命中（真实情况常见）
+    return rss([item("字节找到了大模型时强时弱的原因", "https://www.qbitai.com/2026/10/502364.html",
+                     "答不答得对，得看 Token 站位", NOW - timedelta(days=1))])
+
+
+QBIT_PAGE = ("<html><head><title>字节找到了大模型时强时弱的原因 | 量子位</title></head><body>"
+             "<div class='article'><h1>字节找到了大模型时强时弱的原因</h1>"
+             + "".join(f"<p>第{i}段：研究发现，长上下文里关键信息所处的位置会显著影响大模型的回答准确率，"
+                       f"放在中间时最容易被忽略。</p>" for i in range(16)) +
+             "<p>论文地址：<a href='https://arxiv.org/abs/2410.01234'>arxiv.org/abs/2410.01234</a></p>"
+             "<p>导航：<a href='https://huggingface.co/docs'>HF 文档</a> <a href='https://github.com/features'>GitHub</a></p>"
+             "</div></body></html>")
+
+WAF_PAGE = ("<!DOCTYPE html><html><head><meta charset='UTF-8'></head><body><div class='card'>"
+            "火山引擎 正在进行安全检测... 为保障您的访问安全，系统正在检测当前网络环境</div>"
+            "<script>var waf_verification_challenge=1;</script></body></html>")
+
+
 class FakeWeb:
     def __init__(self):
         self.calls = []
-        self.state = {"corrected": False, "extra": False, "hn_down": False, "rate_limit_once": set()}
+        self.state = {"corrected": False, "extra": False, "hn_down": False, "rate_limit_once": set(),
+                      "waf_36kr": False}
         self.images = {
             "https://img.ithome.com/a/chart.png": png(900, 500),
             "https://cdn.sspai.com/p/test-1.png": png(1200, 700, (200, 80, 40)),
@@ -160,7 +180,13 @@ class FakeWeb:
         if url == "https://www.ithome.com/rss/":
             return 200, X, ithome_feed(self.state["corrected"], self.state["extra"]).encode(), url
         if url == "https://36kr.com/feed":
+            if self.state["waf_36kr"]:
+                return 200, {"content-type": "text/html"}, WAF_PAGE.encode(), url
             return 200, X, kr_feed().encode(), url
+        if url.startswith("https://www.qbitai.com/?s="):
+            return 200, X, qbitai_search().encode(), url
+        if url == "https://www.qbitai.com/2026/10/502364.html":
+            return 200, H, QBIT_PAGE.encode(), url
         if url == "https://sspai.com/feed":
             return 200, X, sspai_feed().encode(), url
         if url == "https://sspai.com/post/1001":
@@ -193,3 +219,10 @@ def fake_render(url, wait_selector=None, timeout=25):
         return {"html": SSPAI_RENDERED, "final_url": url, "title": "x", "status": 200,
                 "browser": "fake-chrome", "elapsed_ms": 900}
     raise fetch.FetchError("blocked", "模拟：浏览器也被拦截", url)
+
+
+def fake_fetch_raw(url, timeout=30):
+    if url == "https://36kr.com/feed":
+        return {"content": kr_feed().encode(), "content_type": "application/xml", "status": 200,
+                "browser": "fake-chrome", "elapsed_ms": 3000}
+    raise fetch.FetchError("blocked", "模拟：浏览器仍在验证页", url)

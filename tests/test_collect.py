@@ -27,13 +27,13 @@ class CollectBase(DBTestCase):
         fetch.fetcher.host_interval.clear()
         fetch.fetcher._robots.clear()
         fetch.fetcher._last.clear()
-        self._render = browser.render
-        browser.render = fixtures.fake_render
+        self._render, self._raw = browser.render, browser.fetch_raw
+        browser.render, browser.fetch_raw = fixtures.fake_render, fixtures.fake_fetch_raw
         sources.seed_sources()
 
     def tearDown(self):
         fetch.set_transport(None)
-        browser.render = self._render
+        browser.render, browser.fetch_raw = self._render, self._raw
         config.DATA_DIR, config.IMAGE_DIR, config.CACHE_DIR = self._old
         self._dirs.cleanup()
         super().tearDown()
@@ -150,7 +150,13 @@ class ResearchGraphTest(CollectBase):
         rep = task["state"]["report"]
         tools = db.query("SELECT tool, input, status FROM tool_calls WHERE task_id=?", (tid,))
         searched = {t["input"]["source_id"] for t in tools if t["tool"] == "source_search"}
-        self.assertEqual(searched, {"ithome", "36kr", "sspai", "arxiv", "hn", "github"})
+        self.assertEqual(searched, {"ithome", "36kr", "sspai", "qbitai", "arxiv", "hn", "github"})
+        # 站内搜索：标题不含关键词，抓全文后确认相关，并且只追正文里的论文链接，不追导航链接
+        qb = db.query_one("SELECT * FROM documents WHERE url='https://www.qbitai.com/2026/10/502364.html'")
+        self.assertEqual(qb["content_kind"], "full")
+        fetched = [t["input"]["url"] for t in tools if t["tool"] == "page_fetch"]
+        self.assertNotIn("https://huggingface.co/docs", fetched)
+        self.assertNotIn("https://github.com/features", fetched)
 
         docs = db.query("SELECT * FROM documents WHERE status='active'")
         by_url = {d["canonical_url"]: d for d in docs}
@@ -228,6 +234,17 @@ class ResearchGraphTest(CollectBase):
         self.assertEqual(status, "done")
         self.assertIn("36kr", task["state"]["disabled"])
         self.assertGreater(task["state"]["report"]["unique_docs"], 5)
+
+
+class WafTest(CollectBase):
+    def test_waf_feed_falls_back_to_browser(self):
+        self.web.state["waf_36kr"] = True
+        items = sources.search("36kr", "长上下文 大模型", terms=["长上下文", "大模型"])
+        self.assertTrue(items)
+        self.assertEqual(items[0]["meta"]["feed_via"], "browser")
+        with self.assertRaises(fetch.FetchError) as cm:
+            fetch.fetcher.get("https://36kr.com/feed", cache_ttl=0)
+        self.assertEqual(cm.exception.kind, "blocked")
 
 
 class ImportGraphTest(CollectBase):

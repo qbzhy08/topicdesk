@@ -71,7 +71,7 @@ async function refreshList() {
   const rows = await api("/api/tasks");
   $("#task-list").innerHTML = rows.map((t) => `
     <li><a href="#/task/${t.id}" class="${current?.id === t.id ? "active" : ""}">
-      <span class="t">${esc(t.topic)}</span>
+      <span class="t">${esc(t.topic === "*" ? "全部主题" : t.topic)}</span>
       <span class="s">${esc(STATUS[t.status] || t.status)} · ${esc(GRAPH_NAME[t.graph] || t.graph)} · ${fmtTime(t.created_at)}</span>
     </a></li>`).join("") || `<li class="s">暂无任务</li>`;
 }
@@ -146,7 +146,7 @@ async function poll() {
 function renderTask(t) {
   const d = $("#detail");
   $("[data-f=graph]", d).textContent = `${GRAPH_NAME[t.graph] || t.graph} · ${t.id}`;
-  $("[data-f=topic]", d).textContent = t.topic;
+  $("[data-f=topic]", d).textContent = t.topic === "*" ? "全部主题" : t.topic;
   const b = $("[data-f=status]", d);
   b.textContent = STATUS[t.status] || t.status;
   b.className = `badge ${t.status}`;

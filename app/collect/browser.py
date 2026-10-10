@@ -69,3 +69,35 @@ def render(url: str, wait_selector: str | None = None, timeout: float = 25) -> d
                     "elapsed_ms": int((time.time() - t0) * 1000)}
         finally:
             browser.close()
+
+
+def fetch_raw(url: str, timeout: float = 30) -> dict:
+    """备用入口：用真实浏览器打开 URL，等反爬 JS 验证通过（写入 cookie）后，
+    用同一浏览器会话重新请求，拿到原始响应（RSS/XML/JSON）。"""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as e:
+        raise FetchError("network", "未安装 playwright") from e
+    t0 = time.time()
+    with sync_playwright() as p:
+        browser, name = _launch(p)
+        try:
+            ctx = browser.new_context(user_agent=UA, locale="zh-CN")
+            page = ctx.new_page()
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+            except Exception as e:
+                raise FetchError("network", f"浏览器打开失败：{str(e)[:160]}", url) from e
+            body, ctype, status = b"", "", 0
+            for _ in range(8):                      # 验证页通常几秒内自动跳转
+                page.wait_for_timeout(1500)
+                r = ctx.request.get(url, timeout=timeout * 1000)
+                body, ctype, status = r.body(), r.headers.get("content-type", ""), r.status
+                head = body[:3000].decode("utf-8", "ignore").lower()
+                if status < 400 and ("<rss" in head or "<feed" in head or "json" in ctype
+                                     or ("<html" not in head and "<!doctype html" not in head)):
+                    return {"content": body, "content_type": ctype, "status": status,
+                            "browser": name, "elapsed_ms": int((time.time() - t0) * 1000)}
+            raise FetchError("blocked", "浏览器等待后仍停留在验证页", url, status)
+        finally:
+            browser.close()

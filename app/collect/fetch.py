@@ -204,7 +204,7 @@ class Fetcher:
             if status >= 400:
                 raise FetchError("blocked", f"HTTP {status}", url, status)
             if _looks_like_challenge(r):
-                raise FetchError("blocked", "返回了验证/反爬页面", url, status)
+                raise FetchError("blocked", "返回了 WAF/反爬验证页（需要执行 JavaScript）", url, status)
             if ttl > 0:
                 self._cache_put(r)
             return r
@@ -217,7 +217,8 @@ def _looks_like_challenge(r: Response) -> bool:
         return False
     low = r.content[:60_000].decode("utf-8", "ignore").lower()
     marks = ("captcha", "cf-challenge", "verify you are human", "安全验证", "访问验证",
-             "请完成验证", "just a moment...")
+             "请完成验证", "just a moment...", "安全检测", "waf_verification", "wafchallenge",
+             "_wafchallengeid", "acw_sc__v2", "滑动验证", "人机验证")
     return any(m in low for m in marks)
 
 

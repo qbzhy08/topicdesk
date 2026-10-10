@@ -38,6 +38,10 @@ BUILTIN = [
          config={"feed": "https://36kr.com/feed", "full_text": True}),
     dict(id="sspai", name="少数派", method="rss", lang="zh", base_url="https://sspai.com",
          config={"feed": "https://sspai.com/feed", "full_text": False, "detail": "browser"}),
+    dict(id="qbitai", name="量子位", method="rss", lang="zh", base_url="https://www.qbitai.com",
+         config={"feed": "https://www.qbitai.com/feed",
+                 "search_feed": "https://www.qbitai.com/?s={q}&feed=rss2", "full_text": False,
+                 "note": "WordPress 站内搜索 RSS，可按主题检索历史文章"}),
     dict(id="arxiv", name="arXiv", method="api", lang="en", base_url="https://arxiv.org",
          config={"note": "官方开放 API，按其使用条款每 3 秒 1 次"}),
     dict(id="hn", name="Hacker News", method="api", lang="en",
@@ -150,31 +154,51 @@ def parse_feed(xml: str, base_url: str = "") -> list[dict]:
     return [o for o in out if o["url"]]
 
 
+def _get_feed(url: str) -> tuple[str, str]:
+    """取 RSS 原文。被 WAF/JS 验证拦截时，改用浏览器通过验证后再取（备用入口）。"""
+    try:
+        return fetcher.get(url, cache_ttl=20 * 60).text, "http"
+    except FetchError as e:
+        if e.kind != "blocked":
+            raise
+        from .browser import fetch_raw
+        try:
+            r = fetch_raw(url)
+        except FetchError as e2:
+            raise FetchError("blocked", f"{e.reason}；浏览器备用入口也失败：{e2.reason}", url) from e2
+        return r["content"].decode("utf-8", "replace"), "browser"
+
+
 def search_rss(source: dict, query: str, limit: int = 20, terms: list[str] | None = None) -> list[dict]:
     cfg = source["config"]
-    r = fetcher.get(cfg["feed"], cache_ttl=20 * 60)
-    entries = parse_feed(r.text)
-    if not entries:
-        raise FetchError("bad_content", "RSS 中没有条目", cfg["feed"])
+    use_search = bool(cfg.get("search_feed") and query)
+    url = cfg["search_feed"].replace("{q}", quote(query)) if use_search else cfg["feed"]
+    text, via = _get_feed(url)
+    entries = parse_feed(text)
+    if not entries and not use_search:
+        raise FetchError("bad_content", "RSS 中没有条目（可能返回了网页而不是 RSS）", url)
     terms = terms or topic_terms(query)
+    # 站内搜索已按关键词匹配过（常常匹配的是正文），标题里不一定出现关键词，所以不再按相关度过滤
+    min_rel = 0.0 if use_search else 0.5
     items = []
     for e in entries:
         art = extract_article(e["content_html"], e["url"], is_fragment=True)
-        text = art["text"]
-        rel = relevance(terms, e["title"], text)
-        if query and rel < 0.5:
+        text_ = art["text"]
+        rel = relevance(terms, e["title"], text_)
+        if query and rel < min_rel:
             continue
         kind = art["content_kind"] if cfg.get("full_text") else "summary"
         items.append({
             "url": e["url"], "title": e["title"], "author": e["author"],
             "published_at": iso(e["published_at"]) or e["published_at"],
-            "summary": text[:300], "text": text if cfg.get("full_text") else None,
+            "summary": text_[:300], "text": text_ if cfg.get("full_text") else None,
             "content_kind": kind, "images": art["images"] if cfg.get("full_text") else [],
             "source_id": source["id"], "primary": False, "relevance": rel,
-            "meta": {"feed": cfg["feed"], "detail": cfg.get("detail", "html"),
-                     "out_links": art["links"][:20]},
+            "meta": {"feed": url, "feed_via": via, "site_search": use_search,
+                     "detail": cfg.get("detail", "html"), "out_links": art["links"][:20]},
         })
-    items.sort(key=lambda x: -x["relevance"])
+    if not use_search:
+        items.sort(key=lambda x: -x["relevance"])
     return items[:limit]
 
 
