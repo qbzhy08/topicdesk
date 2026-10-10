@@ -168,7 +168,7 @@ class Fetcher:
             raise FetchError("bad_content", "只支持 http/https 链接", url)
         ttl = self.cache_ttl if cache_ttl is None else cache_ttl
         hit = self._cache_get(url, ttl)
-        if hit:
+        if hit and not _looks_like_challenge(hit):     # 旧版本缓存过验证页，不能复用
             return hit
         if respect_robots and not self.robots_allowed(url):
             raise FetchError("robots", "robots.txt 不允许抓取该路径", url)
