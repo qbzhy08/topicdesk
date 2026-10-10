@@ -156,6 +156,7 @@ class ResearchGraphTest(CollectBase):
         jj = db.query_one("SELECT * FROM documents WHERE url='https://juejin.cn/post/7001'")
         self.assertEqual((jj["content_kind"], jj["author"]), ("full", "掘金作者"))   # 站内搜索 → 抓全文
         self.assertIn("leiphone", task["state"]["disabled"])        # 不存在的 RSS：记录并停用，不死循环
+
         # 站内搜索：标题不含关键词，抓全文后确认相关，并且只追正文里的论文链接，不追导航链接
         qb = db.query_one("SELECT * FROM documents WHERE url='https://www.qbitai.com/2026/10/502364.html'")
         self.assertEqual(qb["content_kind"], "full")
@@ -202,6 +203,15 @@ class ResearchGraphTest(CollectBase):
         thoughts = [s["thought"] or "" for s in db.query("SELECT thought FROM steps WHERE task_id=?", (tid,))]
         self.assertTrue(any("追踪原始来源" in t for t in thoughts))
         self.assertTrue(any("浏览器" in t for t in thoughts))
+
+    def test_source_diversity_when_cap_reached(self):
+        # 资料上限很小：第一个来源就能占满，但其他来源仍各检索一次
+        tid, status, task = self._run(dict(self.PARAMS, max_docs=3, per_source=2))
+        self.assertEqual(status, "done", task["error"])
+        searched = {t["input"]["source_id"] for t in db.query(
+            "SELECT input FROM tool_calls WHERE task_id=? AND tool='source_search'", (tid,))}
+        self.assertTrue({"arxiv", "hn", "github", "juejin", "ithome"} <= searched)
+        self.assertGreaterEqual(len(task["state"]["report"]["by_source"]), 4)
 
     def test_incremental_second_run_and_source_down(self):
         self._run()

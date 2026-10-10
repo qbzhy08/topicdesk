@@ -26,15 +26,19 @@ async function init() {
   graphs = await api("/api/graphs");
   const sel = $("#new-task [name=graph]");
   sel.innerHTML = graphs.map((g) => `<option value="${esc(g.name)}" ${g.name === "research" ? "selected" : ""}>${esc(GRAPH_NAME[g.name] || g.name)}</option>`).join("");
-  sourcesCache = await api("/api/sources");
-  $("#src-checks").innerHTML = "<small>信息源</small>" + sourcesCache.filter((s) => s.id !== "web").map((s) =>
-    `<label class="opt"><input type="checkbox" name="src" value="${esc(s.id)}" ${s.enabled ? "checked" : ""}> ${esc(s.name)} <i>${esc(s.method)}</i></label>`).join("");
+  await loadSourceChecks();
   $("#new-task").addEventListener("submit", submitTask);
   $("#import-form").addEventListener("submit", submitImport);
   window.addEventListener("hashchange", route);
   route();
   refreshList();
   setInterval(refreshList, 5000);
+}
+
+async function loadSourceChecks() {
+  sourcesCache = await api("/api/sources");
+  $("#src-checks").innerHTML = "<small>信息源（全选时自动包含之后新增的来源）</small>" + sourcesCache.filter((s) => s.id !== "web").map((s) =>
+    `<label class="opt"><input type="checkbox" name="src" value="${esc(s.id)}" ${s.enabled ? "checked" : ""}> ${esc(s.name)} <i>${esc(s.method)}</i></label>`).join("");
 }
 
 async function submitTask(e) {
@@ -47,13 +51,18 @@ async function submitTask(e) {
   const graph = f.get("graph");
   const params = graph === "research" ? {
     keywords: split(f.get("keywords")), en_keywords: split(f.get("en_keywords")),
-    sources: f.getAll("src"), max_docs: Number(f.get("max_docs")), max_fetch: Number(f.get("max_fetch")),
+    sources: allChecked() ? undefined : f.getAll("src"), max_docs: Number(f.get("max_docs")), max_fetch: Number(f.get("max_fetch")),
     hitl_on_block: !!f.get("hitl_on_block"), ...extra } : extra;
   try {
     const { id } = await api("/api/tasks", { method: "POST", body: { topic: f.get("topic"), graph, params, budget } });
     location.hash = `#/task/${id}`;
     refreshList();
   } catch (err) { alert(err.message); }
+}
+
+function allChecked() {
+  const boxes = $$("#src-checks input[name=src]");
+  return boxes.every((b) => b.checked);
 }
 
 async function submitImport(e) {
@@ -86,6 +95,7 @@ function route() {
   $$("#nav a").forEach((a) => a.classList.toggle("on", a.dataset.nav === view));
   $("#app").classList.toggle("wide", view !== "tasks");
   const m = h.match(/^#\/task\/(\w+)/);
+  if (view === "tasks") loadSourceChecks();
   if (m) return showTask(m[1]);
   if (h.startsWith("#/library")) return showLibrary(new URLSearchParams(h.split("?")[1] || ""));
   const d = h.match(/^#\/doc\/(\w+)/);

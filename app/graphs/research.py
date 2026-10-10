@@ -205,6 +205,9 @@ def plan(ctx):
         ctx.think("没有英文关键词：英文来源本轮跳过，会在覆盖报告中列为可能遗漏")
     for u in p.get("urls") or []:
         _push(st, _fetch_action(u, "用户指定的链接", prio=90, base={"source_id": "web"}))
+    for a in st["queue"]:
+        a["initial"] = True        # 初始检索：保证每个来源至少查一次，不因资料数量提前达标而跳过
+    st["per_source"] = {}
     ctx.observe(f"子问题 {len(aspects)} 个；初始行动 {len(st['queue'])} 个；"
                 f"中文词 {terms_zh}；英文检索式 {queries_en}")
     return "decide"
@@ -227,14 +230,15 @@ def decide(ctx):
     gaps = _gaps(cov)
     cov_txt = "；".join(f"{v['name']} {v['have']}/{v['need']}" for v in cov.values())
 
-    pending_fetch = any(a["type"] == "fetch" for a in st["queue"]) and st["fetches"] < p.get("max_fetch", 15)
-    if n_docs >= max_docs and not gaps and not pending_fetch:
+    queue = [a for a in st["queue"] if not (a["type"] == "search" and a["source"] in st["disabled"])]
+    pending_fetch = any(a["type"] == "fetch" for a in queue) and st["fetches"] < p.get("max_fetch", 15)
+    pending_initial = any(a.get("initial") and a["type"] == "search" for a in queue)
+    if n_docs >= max_docs and not gaps and not pending_fetch and not pending_initial:
         ctx.think(f"已收集 {n_docs} 篇（上限 {max_docs}），覆盖矩阵：{cov_txt}。覆盖足够、全文补抓完成，停止检索")
         return "images"
-
-    queue = [a for a in st["queue"] if not (a["type"] == "search" and a["source"] in st["disabled"])]
     if n_docs >= max_docs:
-        queue = [a for a in queue if a["type"] == "fetch"]       # 达到上限后只补全文，不再扩量
+        # 达到上限后不再扩量：只补全文，以及还没轮到的来源各查一次（保证来源多样性）
+        queue = [a for a in queue if a["type"] == "fetch" or a.get("initial")]
     if p.get("max_fetch", 15) <= st["fetches"]:
         queue = [a for a in queue if a["type"] != "fetch"]
     st["queue"] = queue
@@ -408,6 +412,12 @@ def act(ctx):
             st["zero"].append(a["key"])
             ctx.observe(f"{a['source']}「{a['query']}」无相关结果")
             return "decide"
+        # 单来源配额：避免某个来源（如站内搜索一次返回很多条）占满资料上限、挤掉其他来源
+        quota = p.get("per_source", max(6, p.get("max_docs", 40) // 4))
+        used = st.setdefault("per_source", {}).get(a["source"], 0)
+        skipped = max(0, len(items) - max(0, quota - used))
+        items = items[:max(0, quota - used)]
+        st["per_source"][a["source"]] = used + len(items)
         counts = {}
         for it in items:
             if it.get("relevance") is None:
@@ -429,7 +439,8 @@ def act(ctx):
                                         base=it, doc_id=r["doc_id"]))
             if r["action"] == "new" and meta.get("out_links"):
                 _follow_primary(ctx, r["doc_id"], meta["out_links"], from_primary=it.get("primary"))
-        ctx.observe(f"{a['source']}「{a['query']}」返回 {len(items)} 条 → {counts}")
+        ctx.observe(f"{a['source']}「{a['query']}」入库 {len(items)} 条 → {counts}" +
+                    (f"；另有 {skipped} 条超出单来源配额 {quota}，未入库" if skipped else ""))
         return "decide"
 
     # fetch
