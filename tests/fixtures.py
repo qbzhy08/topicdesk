@@ -167,6 +167,23 @@ JUEJIN_PAGE = ("<html><head><title>长上下文大模型评测踩坑记录 - 掘
                "</article></body></html>")
 
 
+WALLSTCN_JSON = json.dumps({"code": 20000, "message": "OK", "data": {"count": 1, "next_cursor": "", "items": [
+    {"id": 1, "title": "<em>股票</em>趋势模型回测：动量策略今年回撤加大", "content": "<p>" +
+     "多家机构对动量类股票趋势策略进行回测，发现今年以来最大回撤达到 18%，高于过去五年均值。" * 20 + "</p>",
+     "content_short": "", "display_time": int(NOW.timestamp()) - 3600,
+     "uri": "https://wallstreetcn.com/articles/3783332", "author": {"display_name": "见闻作者"},
+     "image": {"uri": "https://img.wallstcn.com/x.png"}, "is_paid": False, "is_priced": False}]}},
+    ensure_ascii=False)
+
+OPENALEX_JSON = json.dumps({"results": [
+    {"id": "https://openalex.org/W1", "doi": "https://doi.org/10.1000/xyz", "display_name":
+     "Evaluating stock trend prediction models", "publication_date": "2026-08-01",
+     "authorships": [{"author": {"display_name": "A. Author"}}],
+     "primary_location": {"landing_page_url": "https://doi.org/10.1000/xyz", "source": {"display_name": "J. Finance"}},
+     "abstract_inverted_index": {"We": [0], "evaluate": [1], "stock": [2], "trend": [3], "prediction": [4], "models": [5]},
+     "cited_by_count": 3}]})
+
+
 class FakeWeb:
     def __init__(self):
         self.calls = []
@@ -202,6 +219,10 @@ class FakeWeb:
             return 200, J, JUEJIN_JSON.encode(), url
         if url == "https://juejin.cn/post/7001":
             return 200, H, JUEJIN_PAGE.encode(), url
+        if url.startswith("https://api-one.wallstcn.com/apiv1/search/article"):
+            return 200, J, WALLSTCN_JSON.encode(), url
+        if url.startswith("https://api.openalex.org/works"):
+            return 200, J, OPENALEX_JSON.encode(), url
         if url.startswith("https://www.qbitai.com/?s="):
             return 200, X, qbitai_search().encode(), url
         if url == "https://www.qbitai.com/2026/10/502364.html":

@@ -179,3 +179,7 @@ code { font-family: var(--mono); font-size: 12px; background: var(--paper); padd
 .mem-box { margin: 6px 0; }
 .mem-box summary { color: var(--ink); }
 .card h3 { margin: 0 0 8px; font-size: 16px; }
+
+.domain-pick { margin: 6px 0 10px; }
+.domain-pick .opt { display: inline-flex; margin-right: 10px; }
+.pref-form select { padding: 7px 9px; background: var(--paper); border: 1px solid var(--line); border-radius: 4px; }

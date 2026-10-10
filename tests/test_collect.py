@@ -254,6 +254,25 @@ class ResearchGraphTest(CollectBase):
         self.assertGreater(task["state"]["report"]["unique_docs"], 5)
 
 
+class DomainTest(CollectBase):
+    def test_finance_topic_selects_finance_sources(self):
+        tid = create_task("research", "股票趋势测评", params={"no_llm": True, "en_keywords": ["stock trend prediction"],
+                                                          "max_docs": 20}, budget={"max_tool_calls": 200})
+        self.assertEqual(run_task(tid), "done")
+        task = db.query_one("SELECT * FROM tasks WHERE id=?", (tid,))
+        self.assertEqual(task["state"]["domains"], ["finance"])
+        ids = task["state"]["source_ids"]
+        self.assertIn("wallstcn", ids)
+        self.assertIn("openalex", ids)
+        self.assertNotIn("ithome", ids)          # 科技媒体与金融主题不匹配
+        self.assertNotIn("juejin", ids)
+        wd = db.query_one("SELECT * FROM documents WHERE source_id='wallstcn'")
+        self.assertEqual(wd["content_kind"], "full")
+        oa = db.query_one("SELECT * FROM documents WHERE source_id='openalex'")
+        self.assertIn("evaluate stock trend", oa["text"])   # 倒排索引还原摘要
+        self.assertTrue(oa["meta"]["primary"])
+
+
 class WafTest(CollectBase):
     def test_waf_feed_falls_back_to_browser(self):
         self.web.state["waf_36kr"] = True

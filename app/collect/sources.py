@@ -26,44 +26,96 @@ from .dedup import iso
 from .extract import extract_article, html_to_text
 from .fetch import FetchError, fetcher
 
-PRIMARY_DOMAINS = ("arxiv.org", "github.com", "huggingface.co", "openreview.net",
-                   "aclanthology.org", "paperswithcode.com", "gov.cn", "openai.com",
-                   "anthropic.com", "deepmind.google", "ai.meta.com", "qwenlm.github.io",
-                   "deepseek.com", "moonshot.cn", "zhipuai.cn", "blog.google")
+PRIMARY_DOMAINS = (
+    # 科技/AI
+    "arxiv.org", "github.com", "huggingface.co", "openreview.net", "aclanthology.org",
+    "paperswithcode.com", "openai.com", "anthropic.com", "deepmind.google", "ai.meta.com",
+    "qwenlm.github.io", "deepseek.com", "moonshot.cn", "zhipuai.cn", "blog.google",
+    # 政府与监管、金融一手披露
+    "gov.cn", "pbc.gov.cn", "stats.gov.cn", "csrc.gov.cn", "cninfo.com.cn", "sse.com.cn",
+    "szse.cn", "bse.cn", "hkexnews.hk", "sec.gov", "federalreserve.gov", "imf.org", "worldbank.org",
+    # 学术与医学
+    "doi.org", "openalex.org", "pubmed.ncbi.nlm.nih.gov", "ncbi.nlm.nih.gov", "nature.com",
+    "science.org", "cell.com", "thelancet.com", "nejm.org", "who.int", "biorxiv.org", "medrxiv.org",
+    "ssrn.com", "nber.org")
+
+# 领域：决定一个主题用哪些来源。general 为综合新闻，任何领域都可兜底。
+DOMAINS = {"tech": "科技 / AI / 软件", "finance": "金融 / 经济 / 公司", "science": "学术 / 医学 / 科研",
+           "general": "综合新闻 / 政策 / 社会"}
+DOMAIN_HINTS = {
+    "finance": ["股票", "股市", "基金", "证券", "金融", "经济", "财报", "上市", "利率", "汇率", "通胀", "央行",
+                "债券", "期货", "投资", "量化", "A股", "港股", "美股", "估值", "营收", "stock", "market", "finance",
+                "econom", "inflation", "bond", "fund", "trading", "earnings"],
+    "science": ["医学", "药", "疾病", "临床", "基因", "蛋白", "细胞", "疫苗", "癌", "健康", "物理", "化学", "生物",
+                "气候", "材料", "论文", "研究", "clinical", "disease", "drug", "gene", "protein", "climate",
+                "physics", "biology", "medical", "health"],
+    "tech": ["大模型", "人工智能", "AI", "模型", "算法", "芯片", "编程", "软件", "开源", "互联网", "手机", "机器人",
+             "自动驾驶", "云", "数据库", "LLM", "GPU", "agent", "software", "chip", "robot", "代码", "框架"],
+    "general": ["政策", "法规", "社会", "教育", "国际", "外交", "城市", "就业", "消费", "文化", "体育", "policy"],
+}
+
+
+def guess_domains(text: str) -> list[str]:
+    low = (text or "").lower()
+    hits = [d for d, kws in DOMAIN_HINTS.items() if any(k.lower() in low for k in kws)]
+    return hits or ["general", "tech"]
+
+
+def source_domains(src: dict) -> list[str]:
+    return (src.get("config") or {}).get("domains") or ["tech"]
 
 BUILTIN = [
     dict(id="ithome", name="IT之家", method="rss", lang="zh", base_url="https://www.ithome.com",
-         config={"feed": "https://www.ithome.com/rss/", "full_text": True}),
+         config={"domains": ['tech'], "feed": "https://www.ithome.com/rss/", "full_text": True}),
     dict(id="36kr", name="36氪", method="rss", lang="zh", base_url="https://36kr.com",
-         config={"feed": "https://36kr.com/feed", "full_text": True}),
+         config={"domains": ['tech', 'finance'], "feed": "https://36kr.com/feed", "full_text": True}),
     dict(id="sspai", name="少数派", method="rss", lang="zh", base_url="https://sspai.com",
-         config={"feed": "https://sspai.com/feed", "full_text": False, "detail": "browser"}),
+         config={"domains": ['tech'], "feed": "https://sspai.com/feed", "full_text": False, "detail": "browser"}),
     dict(id="leiphone", name="雷锋网", method="rss", lang="zh", base_url="https://www.leiphone.com",
-         config={"feed": "https://www.leiphone.com/feed", "full_text": "auto"}),
+         config={"domains": ['tech'], "feed": "https://www.leiphone.com/feed", "full_text": "auto"}),
     dict(id="ifanr", name="爱范儿", method="rss", lang="zh", base_url="https://www.ifanr.com",
-         config={"feed": "https://www.ifanr.com/feed", "full_text": "auto"}),
+         config={"domains": ['tech'], "feed": "https://www.ifanr.com/feed", "full_text": "auto"}),
     dict(id="infoq", name="InfoQ 中文", method="rss", lang="zh", base_url="https://www.infoq.cn",
-         config={"feed": "https://www.infoq.cn/feed", "full_text": False, "detail": "browser",
+         config={"domains": ['tech'], "feed": "https://www.infoq.cn/feed", "full_text": False, "detail": "browser",
                  "note": "RSS 只有链接，正文页为前端渲染"}),
     dict(id="geekpark", name="极客公园", method="rss", lang="zh", base_url="https://www.geekpark.net",
-         config={"feed": "https://www.geekpark.net/rss", "full_text": "auto"}),
+         config={"domains": ['tech'], "feed": "https://www.geekpark.net/rss", "full_text": "auto"}),
     dict(id="huxiu", name="虎嗅", method="rss", lang="zh", base_url="https://www.huxiu.com",
-         config={"feed": "https://www.huxiu.com/rss/0.xml", "full_text": "auto"}),
+         config={"domains": ['tech', 'finance'], "feed": "https://www.huxiu.com/rss/0.xml", "full_text": "auto"}),
     dict(id="oschina", name="开源中国", method="rss", lang="zh", base_url="https://www.oschina.net",
-         config={"feed": "https://www.oschina.net/news/rss", "full_text": "auto"}),
+         config={"domains": ['tech'], "feed": "https://www.oschina.net/news/rss", "full_text": "auto"}),
     dict(id="juejin", name="掘金", method="api", lang="zh", base_url="https://juejin.cn",
-         config={"note": "站内搜索接口（POST JSON），可按关键词检索历史技术文章"}),
+         config={"domains": ['tech'], "note": "站内搜索接口（POST JSON），可按关键词检索历史技术文章"}),
     dict(id="qbitai", name="量子位", method="rss", lang="zh", base_url="https://www.qbitai.com",
-         config={"feed": "https://www.qbitai.com/feed",
+         config={"domains": ['tech'], "feed": "https://www.qbitai.com/feed",
                  "search_feed": "https://www.qbitai.com/?s={q}&feed=rss2", "full_text": False,
                  "note": "WordPress 站内搜索 RSS，可按主题检索历史文章"}),
     dict(id="arxiv", name="arXiv", method="api", lang="en", base_url="https://arxiv.org",
-         config={"note": "官方开放 API，按其使用条款每 3 秒 1 次"}),
+         config={"domains": ['tech', 'science', 'finance'], "note": "官方开放 API，按其使用条款每 3 秒 1 次"}),
     dict(id="hn", name="Hacker News", method="api", lang="en",
-         base_url="https://news.ycombinator.com", config={}),
+         base_url="https://news.ycombinator.com", config={"domains": ['tech'], }),
     dict(id="github", name="GitHub", method="api", lang="en", base_url="https://github.com",
-         config={}),
-    dict(id="web", name="通用网页", method="html", lang="any", base_url="", config={}),
+         config={"domains": ['tech'], }),
+    # ---- 金融
+    dict(id="wallstcn", name="华尔街见闻", method="api", lang="zh", base_url="https://wallstreetcn.com",
+         config={"domains": ["finance"], "note": "站内搜索接口，返回全文"}),
+    dict(id="chinanews_fin", name="中新网财经", method="rss", lang="zh", base_url="https://www.chinanews.com.cn",
+         config={"domains": ["finance"], "feed": "https://www.chinanews.com.cn/rss/finance.xml",
+                 "full_text": False}),
+    dict(id="ftchinese", name="FT中文网", method="rss", lang="zh", base_url="https://www.ftchinese.com",
+         config={"domains": ["finance", "general"], "feed": "https://www.ftchinese.com/rss/news",
+                 "full_text": "auto"}),
+    # ---- 综合新闻
+    dict(id="chinanews", name="中新网滚动新闻", method="rss", lang="zh", base_url="https://www.chinanews.com.cn",
+         config={"domains": ["general"], "feed": "https://www.chinanews.com.cn/rss/scroll-news.xml",
+                 "full_text": False}),
+    # ---- 学术 / 医学
+    dict(id="openalex", name="OpenAlex 学术", method="api", lang="en", base_url="https://openalex.org",
+         config={"domains": ["science", "finance", "tech", "general"],
+                 "note": "开放学术数据库，覆盖各学科，按相关度检索论文摘要"}),
+    dict(id="pubmed", name="PubMed", method="api", lang="en", base_url="https://pubmed.ncbi.nlm.nih.gov",
+         config={"domains": ["science"], "note": "NCBI 官方 E-utilities 接口（按其条款限速）"}),
+    dict(id="web", name="通用网页", method="html", lang="any", base_url="", config={"domains": ['tech', 'finance', 'science', 'general'], }),
 ]
 
 
@@ -74,7 +126,11 @@ def is_primary(url: str) -> bool:
 
 def seed_sources():
     for s in BUILTIN:
-        if not db.query_one("SELECT id FROM sources WHERE id=?", (s["id"],)):
+        row = db.query_one("SELECT id, config FROM sources WHERE id=?", (s["id"],))
+        if row and "domains" not in (row["config"] or {}):
+            db.update("sources", "id", s["id"], {"config": {**(row["config"] or {}),
+                                                            "domains": s["config"].get("domains", ["tech"])}})
+        if not row:
             db.insert("sources", dict(id=s["id"], name=s["name"], method=s["method"],
                                       base_url=s["base_url"],
                                       config={**s["config"], "lang": s["lang"]}, enabled=1,
@@ -335,8 +391,97 @@ def search_juejin(source: dict, query: str, limit: int = 15, **_) -> list[dict]:
     return items
 
 
+# ---------------------------------------------------------------- 华尔街见闻
+
+def search_wallstcn(source: dict, query: str, limit: int = 15, **_) -> list[dict]:
+    url = ("https://api-one.wallstcn.com/apiv1/search/article?cursor=&limit=" + str(limit) +
+           "&query=" + quote(query))
+    r = fetcher.get(url, cache_ttl=1800, headers={"Referer": "https://wallstreetcn.com/"})
+    d = r.json()
+    if d.get("code") not in (20000, 0, None):
+        raise FetchError("blocked", f"华尔街见闻接口错误 {d.get('code')}：{d.get('message')}", url)
+    items = []
+    for it in ((d.get("data") or {}).get("items") or []):
+        link = it.get("uri") or ""
+        if not link.startswith("http"):
+            continue
+        art = extract_article(it.get("content") or "", link, is_fragment=True)
+        paid = bool(it.get("is_paid") or it.get("is_priced"))
+        full = art["content_kind"] in ("full", "excerpt") and not paid
+        img = (it.get("image") or {}).get("uri")
+        items.append({
+            "url": link, "title": html_to_text(it.get("title") or ""),
+            "author": (it.get("author") or {}).get("display_name"),
+            "published_at": iso(it.get("display_time")) if it.get("display_time") else None,
+            "summary": html_to_text(it.get("content_short") or "") or art["text"][:300],
+            "text": art["text"] if full else None, "content_kind": art["content_kind"] if full else "summary",
+            "images": (art["images"] + ([{"url": img, "caption": None, "position": 0, "reject_reason": None,
+                                         "alt": None}] if img else [])) if full else [],
+            "source_id": "wallstcn", "primary": False,
+            "meta": {"paid": paid, "comments": it.get("comment_count"), "site_search": True,
+                     "original_source": it.get("source_name") or None, "detail": "html"},
+        })
+    return items
+
+
+# ---------------------------------------------------------------- OpenAlex（全学科学术）
+
+def _openalex_abstract(inv: dict | None) -> str:
+    if not inv:
+        return ""
+    pos = sorted((i, w) for w, idx in inv.items() for i in idx)
+    return " ".join(w for _, w in pos)
+
+
+def search_openalex(source: dict, query: str, limit: int = 10, **_) -> list[dict]:
+    url = ("https://api.openalex.org/works?per_page=" + str(limit) + "&search=" + quote(query) +
+           "&filter=has_abstract:true&mailto=topicdesk@example.com")
+    r = fetcher.get(url, respect_robots=False, cache_ttl=6 * 3600)
+    items = []
+    for w in r.json().get("results") or []:
+        land = ((w.get("primary_location") or {}).get("landing_page_url") or w.get("doi") or w.get("id"))
+        abstract = _openalex_abstract(w.get("abstract_inverted_index"))
+        items.append({
+            "url": land, "title": w.get("display_name") or w.get("title") or "",
+            "author": ", ".join((a.get("author") or {}).get("display_name", "") for a in (w.get("authorships") or [])[:5]),
+            "published_at": w.get("publication_date"), "summary": abstract[:600], "text": abstract,
+            "content_kind": "summary", "images": [], "source_id": "openalex", "primary": True,
+            "meta": {"doi": w.get("doi"), "cited_by": w.get("cited_by_count"), "doc_type": "论文摘要",
+                     "venue": ((w.get("primary_location") or {}).get("source") or {}).get("display_name")},
+        })
+    return items
+
+
+# ---------------------------------------------------------------- PubMed
+
+def search_pubmed(source: dict, query: str, limit: int = 10, **_) -> list[dict]:
+    base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
+    r = fetcher.get(base + "esearch.fcgi?db=pubmed&retmode=json&sort=relevance&retmax=" + str(limit) +
+                    "&term=" + quote(query), respect_robots=False, cache_ttl=6 * 3600)
+    ids = (r.json().get("esearchresult") or {}).get("idlist") or []
+    if not ids:
+        return []
+    r2 = fetcher.get(base + "esummary.fcgi?db=pubmed&retmode=json&id=" + ",".join(ids),
+                     respect_robots=False, cache_ttl=6 * 3600)
+    res = r2.json().get("result") or {}
+    items = []
+    for pid in ids:
+        x = res.get(pid) or {}
+        title = x.get("title") or ""
+        items.append({
+            "url": f"https://pubmed.ncbi.nlm.nih.gov/{pid}/", "title": title,
+            "author": ", ".join(a.get("name", "") for a in (x.get("authors") or [])[:5]),
+            "published_at": x.get("sortpubdate") or x.get("pubdate"),
+            "summary": f"{x.get('fulljournalname', '')} {x.get('pubdate', '')}：{title}",
+            "text": None, "content_kind": "summary", "images": [], "source_id": "pubmed", "primary": True,
+            "meta": {"journal": x.get("fulljournalname"), "doc_type": "医学论文", "detail": "html"},
+        })
+    return items
+
+
 SEARCHERS = {"rss": search_rss, "arxiv": search_arxiv, "hn": search_hn, "github": search_github,
-             "juejin": search_juejin}
+             "juejin": search_juejin, "wallstcn": search_wallstcn, "openalex": search_openalex,
+             "pubmed": search_pubmed}
 
 
 def search(source_id: str, query: str, limit: int = 15, terms: list[str] | None = None) -> list[dict]:

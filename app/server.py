@@ -256,6 +256,8 @@ def add_source():
     db.insert("sources", dict(id=sid, name=name, method="rss", base_url=feed,
                               config={"feed": feed, "full_text": bool(b.get("full_text")),
                                       "lang": b.get("lang", "zh"),
+                                      "domains": b.get("domains") or ["general"],
+                                      **({"search_feed": b["search_feed"]} if "{q}" in (b.get("search_feed") or "") else {}),
                                       "detail": "browser" if b.get("browser") else "html"},
                               enabled=1, health={}))
     return jsonify(id=sid), 201

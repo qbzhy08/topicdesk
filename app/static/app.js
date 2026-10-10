@@ -37,8 +37,8 @@ async function init() {
 
 async function loadSourceChecks() {
   sourcesCache = await api("/api/sources");
-  $("#src-checks").innerHTML = "<small>信息源（全选时自动包含之后新增的来源）</small>" + sourcesCache.filter((s) => s.id !== "web").map((s) =>
-    `<label class="opt"><input type="checkbox" name="src" value="${esc(s.id)}" ${s.enabled ? "checked" : ""}> ${esc(s.name)} <i>${esc(s.method)}</i></label>`).join("");
+  $("#src-checks").innerHTML = "<small>信息源（全部勾选 = 按领域自动挑选；取消勾选某些 = 只用勾选的来源）</small>" + sourcesCache.filter((s) => s.id !== "web").map((s) =>
+    `<label class="opt"><input type="checkbox" name="src" value="${esc(s.id)}" ${s.enabled ? "checked" : ""}> ${esc(s.name)} <i>${esc(s.method)} · ${(s.config?.domains || []).map((d) => DOMAIN_NAME[d] || d).join("/")}</i></label>`).join("");
 }
 
 async function submitTask(e) {
@@ -57,6 +57,7 @@ async function submitTask(e) {
   }
   const params = graph === "research" ? {
     this_time: f.get("tt_save") ? {} : thisTime,
+    domains: f.getAll("domain").length ? f.getAll("domain") : undefined,
     keywords: split(f.get("keywords")), en_keywords: split(f.get("en_keywords")),
     sources: allChecked() ? undefined : f.getAll("src"), max_docs: Number(f.get("max_docs")), max_fetch: Number(f.get("max_fetch")),
     hitl_on_block: !!f.get("hitl_on_block"), ...extra } : extra;
@@ -217,6 +218,7 @@ function renderReport(rep, state) {
       <p class="chips">${chips(rep.by_source, Object.fromEntries(sourcesCache.map((s) => [s.id, s.name])))}</p>
       <p class="chips">${chips(rep.by_kind, KIND)}</p>
       ${rep.memory ? memoryReport(rep.memory) : ""}
+      ${rep.domains ? `<p class="small">主题领域：${rep.domains.map((d) => DOMAIN_NAME[d] || d).join("、")}；选用来源 ${rep.source_ids?.length || 0} 个：${(rep.source_ids || []).map((id) => esc(sourcesCache.find((x) => x.id === id)?.name || id)).join("、")}</p>` : ""}
       <h4>覆盖矩阵</h4>${covTable(rep.coverage)}
       <h4>检索计划</h4><p class="small">中文词：${esc((rep.plan?.terms_zh || []).join("、"))}；英文检索式：${esc((rep.plan?.queries_en || []).join("；") || "无")}；由 ${rep.plan?.by === "llm" ? "大模型" : "规则"} 生成；关键词调整 ${rep.refine_rounds} 次</p>
       ${rep.failures?.length ? `<h4>失败与降级</h4><table class="tbl"><tr><th>对象</th><th>原因</th><th>处理</th></tr>${rep.failures.map((f) => `
@@ -396,6 +398,7 @@ async function showDoc(id) {
 }
 
 // ---------------------------------------------------------------- 记忆
+const DOMAIN_NAME = { tech: "科技", finance: "金融", science: "学术", general: "综合" };
 const PREF_TYPES = { reading_minutes: "阅读时间（分钟）", background: "知识背景", focus: "关注重点",
   exclude: "不想看的内容", source_prefer: "来源偏好", style: "写作要求" };
 
@@ -427,11 +430,12 @@ async function showMemoryHome(qs) {
       <p class="meta">每条记忆都记录来源、适用范围、更新时间和使用次数；可以查看证据、更正或删除，失效会同步到派生条目。</p></div></div>
     <div class="card"><h3>用户偏好（长期）</h3>
       ${prefs.map(memRow).join("") || '<p class="small">还没有长期偏好。任务里的“本次要求”默认不会保存，勾选“同时保存为长期偏好”或在这里添加才会生效。</p>'}
-      <form id="pref-form" class="row" style="margin-top:10px">
+      <form id="pref-form" class="row pref-form" style="margin-top:10px">
         <select name="type">${Object.entries(PREF_TYPES).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select>
-        <input name="value" placeholder="内容，多个用逗号分隔" required>
+        <input name="value" required>
         <input name="applies_to" placeholder="适用范围（可空=全部，如 topic:主题名）">
         <button>保存为长期偏好</button></form>
+      <p class="small">同一类型再次保存会更正旧值（旧值保留在变化记录里）。</p>
     </div>
     <div class="filters">
       <select id="mem-topic">${topics.map((t) => `<option ${t.topic === topic ? "selected" : ""}>${esc(t.topic)}</option>`).join("") || "<option>暂无主题记忆</option>"}</select>
@@ -444,11 +448,27 @@ async function showMemoryHome(qs) {
     <details class="card"><summary>下一次任务会召回什么（预览，约 ${preview.tokens} token，预算外舍弃 ${preview.dropped} 条）</summary><pre>${esc(preview.text || "（无）")}</pre></details>` : ""}`;
   $("#mem-topic").onchange = (e) => location.hash = `#/memory?topic=${encodeURIComponent(e.target.value)}${showDead ? "&all=1" : ""}`;
   $("#mem-dead").onchange = (e) => location.hash = `#/memory?topic=${encodeURIComponent(topic)}${e.target.checked ? "&all=1" : ""}`;
+  const PH = { reading_minutes: "分钟数，如 5", background: "如：程序员，熟悉机器学习", focus: "多个用逗号分隔，如：复现, 开源",
+    exclude: "多个用逗号分隔，如：融资, 手机", source_prefer: "来源 ID，逗号分隔，如：arxiv, wallstcn", style: "如：先结论后细节，少用形容词" };
+  const pf = $("#pref-form"), sel = pf.querySelector("[name=type]"), inp = pf.querySelector("[name=value]");
+  const syncInput = () => {
+    inp.type = sel.value === "reading_minutes" ? "number" : "text";
+    if (sel.value === "reading_minutes") { inp.min = 1; inp.max = 240; }
+    inp.placeholder = PH[sel.value] || "";
+    const cur = prefs.find((p) => p.meta?.type === sel.value);
+    inp.value = cur ? (Array.isArray(cur.meta.value) ? cur.meta.value.join(", ") : cur.meta.value ?? "") : "";
+  };
+  sel.onchange = syncInput;
+  syncInput();
   $("#pref-form").onsubmit = async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
     const type = f.get("type");
-    const value = type === "reading_minutes" ? Number(f.get("value")) : (["focus", "exclude", "source_prefer"].includes(type) ? split(f.get("value")) : f.get("value"));
+    let value;
+    if (type === "reading_minutes") {
+      value = parseInt(String(f.get("value")).replace(/[^\d]/g, ""), 10);
+      if (!value) return alert("请输入分钟数，例如 5");
+    } else value = ["focus", "exclude", "source_prefer"].includes(type) ? split(f.get("value")) : f.get("value");
     try { await api("/api/preferences", { method: "POST", body: { type, value, applies_to: f.get("applies_to") || "all" } }); showMemoryHome(qs); }
     catch (err) { alert(err.message); }
   };
@@ -514,7 +534,7 @@ async function showSources() {
       const err = h.last_error;
       const okRecent = h.last_ok && (!h.last_fail || h.last_ok > h.last_fail);
       return `<tr><td><b>${esc(s.name)}</b><br><small>${esc(s.config?.feed || s.base_url || "")}</small></td>
-        <td><span class="tag">${esc(s.method)}</span></td><td>${s.docs}</td>
+        <td><span class="tag">${esc(s.method)}</span><br>${(s.config?.domains || []).map((d) => `<span class="tag">${DOMAIN_NAME[d] || d}</span>`).join(" ")}</td><td>${s.docs}</td>
         <td>${h.calls ? (okRecent ? `<span class="ok">正常</span> ${fmtTime(h.last_ok)}` : `<span class="gap">失败</span> ${esc(err?.kind || "")} ${esc(err?.reason || "")}<br><small>${fmtTime(h.last_fail)}，连续 ${h.consecutive_fail} 次</small>`) : "<small>未使用</small>"}</td>
         <td class="nowrap">${s.id !== "web" ? `<button class="ghost sm" data-test="${s.id}">测试</button>` : ""}
           <button class="ghost sm" data-toggle="${s.id}" data-on="${s.enabled}">${s.enabled ? "停用" : "启用"}</button></td></tr>
@@ -524,6 +544,8 @@ async function showSources() {
       <div class="row"><input name="name" placeholder="名称" required><input name="feed" placeholder="RSS 地址" required></div>
       <label class="opt"><input type="checkbox" name="full_text"> RSS 内含全文</label>
       <label class="opt"><input type="checkbox" name="browser"> 文章页需要浏览器渲染</label>
+      <input name="search_feed" placeholder="可选：站内搜索 RSS 模板，用 {q} 表示关键词，如 https://example.com/?s={q}&feed=rss2" style="width:100%;padding:6px;margin:4px 0">
+      <div class="row"><small>领域：</small>${Object.entries(DOMAIN_NAME).map(([k, v]) => `<label class="opt"><input type="checkbox" name="domains" value="${k}" ${k === "general" ? "checked" : ""}> ${v}</label>`).join("")}</div>
       <select name="lang"><option value="zh">中文</option><option value="en">英文</option></select>
       <button>添加</button></form>`;
   $$("[data-test]").forEach((b) => b.onclick = async () => {
@@ -544,7 +566,8 @@ async function showSources() {
     const f = new FormData(e.target);
     try {
       await api("/api/sources", { method: "POST", body: { name: f.get("name"), feed: f.get("feed"),
-        full_text: !!f.get("full_text"), browser: !!f.get("browser"), lang: f.get("lang") } });
+        full_text: !!f.get("full_text"), browser: !!f.get("browser"), lang: f.get("lang"),
+        domains: f.getAll("domains"), search_feed: f.get("search_feed") } });
       showSources();
     } catch (err) { alert(err.message); }
   };

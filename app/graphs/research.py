@@ -27,7 +27,8 @@ from ..collect import tools as _tools  # noqa: F401  注册工具
 from ..collect.dedup import canonical_url, parse_date
 from ..collect.fetch import FetchError
 from ..collect.images import store_images
-from ..collect.sources import is_primary, list_sources, relevance, topic_terms
+from ..collect.sources import (DOMAINS, guess_domains, is_primary, list_sources, relevance,
+                                source_domains, topic_terms)
 from ..collect.store import article_to_item, topic_last_run, upsert_document
 from ..harness import END, Graph, register_graph
 
@@ -43,6 +44,7 @@ DEFAULT_ASPECTS = [
     {"id": "recent", "name": "最新进展（14 天内）", "kind": "recent", "need": 2, "keywords": []},
 ]
 MAX_FOLLOW_PER_DOC = 2
+API_SOURCES = ("arxiv", "hn", "github", "juejin", "wallstcn", "openalex", "pubmed")
 
 
 # ---------------------------------------------------------------- 工具函数
@@ -120,13 +122,16 @@ def _prev_research(topic: str, exclude: str) -> dict | None:
 
 PLAN_PROMPT = """你是信息检索规划助手。用户想了解的主题：「{topic}」。
 {memory}
-请把主题拆成 3-5 个需要覆盖的子问题，并给出检索关键词。
-中文来源：多家科技媒体 RSS（按关键词过滤最新文章）和掘金站内搜索。中文核心词要用中文媒体实际常用的说法，
-短（2-5 字）、常见，例如“长上下文”“上下文窗口”，不要自造“上下文测评”这类少见词组。
-英文来源是 arXiv、Hacker News、GitHub 搜索（关键词要短，2-4 个英文词）。
+先判断主题属于哪些领域（可多选）：tech=科技/AI/软件，finance=金融/经济/公司，science=学术/医学/科研，
+general=综合新闻/政策/社会。系统会按领域选择信息源。
+再把主题拆成 3-5 个需要覆盖的子问题，并给出检索关键词。
+中文来源是各领域媒体 RSS（按关键词过滤最新文章）和站内搜索（掘金、华尔街见闻等）。中文核心词要用中文媒体
+实际常用的说法，短（2-5 字）、常见，不要自造少见词组。
+英文来源是 arXiv、OpenAlex、PubMed、Hacker News、GitHub 等（检索式要短，2-4 个英文词）。
 子问题的 keywords 同时给中文和英文，因为资料有中有英。
 只输出 JSON：
-{{"core_terms_zh": ["主题核心词，2-4个，越短越好"],
+{{"domains": ["finance"],
+  "core_terms_zh": ["主题核心词，2-4个，越短越好"],
   "aspects": [{{"name": "子问题", "keywords": ["判断资料是否覆盖该子问题的中英文关键词"]}}],
   "queries_en": ["英文检索式，2-4 条"],
   "notes": "一句话说明检索策略"}}"""
@@ -171,6 +176,7 @@ def plan(ctx):
     queries_en = list(p.get("en_keywords") or [])
     aspects = [dict(a) for a in DEFAULT_ASPECTS]
     prefs = eff["prefs"]
+    llm_domains = []
 
     def _vals(v):
         return [x.strip() for x in (re.split(r"[,，、;；]", v) if isinstance(v, str) else v or []) if str(x).strip()]
@@ -181,6 +187,7 @@ def plan(ctx):
                 {"role": "system", "content": "你只输出 JSON。"},
                 {"role": "user", "content": PLAN_PROMPT.format(topic=ctx.topic, memory=memory_note)}])
             d = res["data"]
+            llm_domains = [x for x in (d.get("domains") or []) if x in DOMAINS]
             terms_zh = list(dict.fromkeys((d.get("core_terms_zh") or []) + list(p.get("keywords") or []))) or terms_zh
             queries_en = list(dict.fromkeys(queries_en + (d.get("queries_en") or [])))[:4]
             for i, a in enumerate(d.get("aspects") or []):
@@ -216,8 +223,23 @@ def plan(ctx):
     st["aspects"] = aspects
     st["plan"] = {"terms_zh": terms_zh, "queries_en": queries_en, "by": plan_src}
 
-    allowed = set(p.get("sources") or [s["id"] for s in list_sources()])
-    srcs = [s for s in list_sources() if s["id"] in allowed and s["id"] != "web"]
+    # ---- 按领域选来源：用户明确指定 > 用户选择的领域 > 大模型判断 > 关键词规则
+    domains = list(p.get("domains") or llm_domains or guess_domains(" ".join([ctx.topic] + terms_zh + queries_en)))
+    st["domains"] = domains
+    enabled = [s for s in list_sources() if s["id"] != "web"]
+    if p.get("sources"):
+        srcs = [s for s in enabled if s["id"] in set(p["sources"])]
+        ctx.think(f"使用用户指定的 {len(srcs)} 个来源")
+    else:
+        srcs = [s for s in enabled if set(source_domains(s)) & set(domains)]
+        if len(srcs) < 4:     # 来源太少时用综合新闻和跨学科学术库兜底
+            srcs += [s for s in enabled if s not in srcs and set(source_domains(s)) & {"general"}]
+        skipped = [s["name"] for s in enabled if s not in srcs]
+        ctx.think(f"主题领域：{'、'.join(DOMAINS.get(x, x) for x in domains)}"
+                  f"（{'用户指定' if p.get('domains') else '大模型判断' if llm_domains else '关键词规则'}）。"
+                  f"选用 {len(srcs)} 个来源：{'、'.join(s['name'] for s in srcs)}"
+                  + (f"；领域不匹配未用：{'、'.join(skipped)}" if skipped else ""))
+    st["source_ids"] = [s["id"] for s in srcs]
     for s in srcs:
         lang = (s["config"] or {}).get("lang", "zh")
         if s["method"] == "rss" and lang == "zh" and (s["config"] or {}).get("search_feed"):
@@ -332,7 +354,7 @@ def decide(ctx):
         for s in list_sources():
             if s["id"] in st["disabled"] or s["id"] == "web":
                 continue
-            if p.get("sources") and s["id"] not in p["sources"]:
+            if s["id"] not in st.get("source_ids", [s["id"]]):
                 continue
             lang = (s["config"] or {}).get("lang")
             if s["method"] == "rss" and lang == "zh":
@@ -482,7 +504,7 @@ def act(ctx):
         for it in items:
             if it.get("relevance") is None:
                 it["relevance"] = _rel(st, it.get("title") or "", it.get("summary") or "")
-            r = _save(ctx, it, "api" if a["source"] in ("arxiv", "hn", "github", "juejin") else "rss")
+            r = _save(ctx, it, "api" if a["source"] in API_SOURCES else "rss")
             counts[r["action"] + ("/" + r["novelty"] if r["action"] == "new" else "")] = \
                 counts.get(r["action"] + ("/" + r["novelty"] if r["action"] == "new" else ""), 0) + 1
             meta = it.get("meta") or {}
@@ -491,7 +513,7 @@ def act(ctx):
                     _push(st, _fetch_action(it["url"], f"聚合站只有标题（{meta.get('points')} 分），追踪原文",
                                             prio=35 + min((meta.get("points") or 0) // 50, 20),
                                             base=it, doc_id=r["doc_id"]))
-            elif it["content_kind"] != "full" and a["source"] not in ("arxiv", "github"):
+            elif it["content_kind"] != "full" and a["source"] not in ("arxiv", "github", "openalex"):
                 mode = "browser" if meta.get("detail") == "browser" else "auto"
                 _push(st, _fetch_action(it["url"], "RSS 只有摘要，抓取全文" +
                                         ("（前端渲染页面，用浏览器）" if mode == "browser" else ""),
@@ -679,6 +701,7 @@ def report(ctx):
                   for f in (mem.get(i) for i in fact_ids) if f][:30],
     }
     st["report"] = {
+        "domains": st.get("domains"), "source_ids": st.get("source_ids"),
         "memory": memory_report,
         "total_docs": len(docs),
         "unique_docs": sum(1 for d in docs if not d["duplicate_of"]),

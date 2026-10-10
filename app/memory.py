@@ -176,7 +176,7 @@ def _render(m: dict) -> str:
     if m["kind"] == "delivery":
         return f"[历史交付 {time.strftime('%m-%d %H:%M', time.localtime(m['created_at']))}] {m['content']}"
     if m["kind"] == "preference":
-        return f"[偏好·{meta.get('type', '通用')}] {m['content']}"
+        return f"[长期偏好] {m['content']}"
     return f"[{m['kind']}] {m['content']}"
 
 
@@ -252,7 +252,12 @@ PREF_TYPES = {
 def set_preference(user_id: str, ptype: str, value, *, applies_to: str = "all", actor: str = "user",
                    task_id=None) -> str:
     """长期偏好：只在用户明确确认“长期保存”时调用。同类型同范围的旧偏好被更正取代。"""
-    text = value if isinstance(value, str) else "、".join(map(str, value))
+    if isinstance(value, (list, tuple)):
+        text = "、".join(map(str, value))
+    else:
+        text = str(value)
+    if ptype == "reading_minutes":
+        text = f"{value} 分钟"
     label = PREF_TYPES.get(ptype, ptype)
     mkey = f"{ptype}@{applies_to}"
     old = find("user", "preference", mkey, user_id=user_id)

@@ -153,3 +153,15 @@ class FactLogicTest(CollectBase):
         rec = mem.recall(topic="T", record_use=False)
         self.assertNotIn(fa, rec["used"])          # 被否定的说法不再被当作事实召回
         self.assertIn(fb, rec["used"])
+
+
+class PreferenceApiTest(CollectBase):
+    def test_reading_minutes_can_be_set_and_changed(self):
+        from app.server import create_app
+        c = create_app().test_client()
+        self.assertEqual(c.post("/api/preferences", json={"type": "reading_minutes", "value": 5}).status_code, 201)
+        self.assertEqual(c.post("/api/preferences", json={"type": "reading_minutes", "value": 10}).status_code, 201)
+        alive = mem.list_memories(scope="user", kind="preference", status="alive")
+        self.assertEqual([p["content"] for p in alive], ["阅读时间（分钟）：10 分钟"])
+        dead = mem.list_memories(scope="user", kind="preference", status="superseded")
+        self.assertEqual(dead[0]["content"], "阅读时间（分钟）：5 分钟")
