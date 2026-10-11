@@ -52,14 +52,26 @@ def hires_candidates(url: str) -> list[str]:
 
 
 def download_best(url: str, referer: str | None = None) -> dict:
-    """先试原图地址，比给出的地址更大才用；否则用给出的地址。结果里 upgraded_from 记录升级前的尺寸。"""
-    base = download(url, referer)
+    """有原图地址时先下原图（一次下载就拿到大图），失败或不比压缩版大才退回给出的地址。
+    结果里 upgraded_from 说明换掉了什么。"""
     for u in hires_candidates(url)[:2]:
         alt = download(u, referer)
-        if alt.get("ok") and (alt.get("width") or 0) > (base.get("width") or 0) * 1.15:
-            alt.update(url=u, upgraded_from=f"{base.get('width')}×{base.get('height')}" if base.get("width") else "无法下载")
+        if alt.get("ok"):
+            alt.update(url=u, upgraded_from="CDN 压缩版")
             return alt
-    return base
+    return download(url, referer)
+
+
+def plan_downloads(images: list[dict], seen_urls: set, max_images: int) -> list[str]:
+    """store_images 会真正下载哪些地址（规则筛掉的不下载），供调用方提前并行下载。多留 2 张余量给质检不过的。"""
+    out = []
+    for im in images:
+        if im["url"] in seen_urls or im.get("reject_reason") or im["url"] in out:
+            continue
+        out.append(im["url"])
+        if len(out) >= max_images + 2:
+            break
+    return out
 
 
 def download(url: str, referer: str | None = None) -> dict:

@@ -13,6 +13,7 @@ load → select → outline ⇄ gap → draft → check ⇄ fix → save
 from __future__ import annotations
 
 import re
+import time
 
 from .. import db, illustrate as ill, llm, writing
 from .. import memory as mem
@@ -500,7 +501,8 @@ def _names_short(sid):
 
 
 def _download_doc_images(ctx, order):
-    """引用过的资料里还没下载过配图的，先下载（最多 4 篇）。"""
+    """引用过的资料里还没下载过配图的，先下载（最多 4 篇）。所有图片并行下载，再落库。"""
+    from ..collect.images import plan_downloads, store_images
     have = {r["doc_id"] for r in db.query(
         f"SELECT DISTINCT doc_id FROM images WHERE doc_id IN ({','.join('?' * len(order))})", [d["id"] for d in order])}
     todo = []
@@ -509,52 +511,61 @@ def _download_doc_images(ctx, order):
         if d["id"] not in have and (row["meta"] or {}).get("image_candidates") and len(todo) < 4:
             todo.append((d["id"], row["url"], row["meta"]["image_candidates"]))
     if not todo:
-        return
-    from ..collect.images import store_images
+        return 0
+    jobs = [(u, page) for did, page, cands in todo for u in plan_downloads(cands, set(), 6)]
+    res = ctx.tool_parallel([("image_download", {"url": u, "referer": page}) for u, page in jobs], max_workers=8)
+    got = {u: (out if st == "ok" else {"ok": False, "reason": f"下载异常：{str(out)[:80]}"})
+           for (u, _), (st, out) in zip(jobs, res)}
+    for did, page, cands in todo:
+        store_images(did, page, cands, max_images=6,
+                     download_fn=lambda u, referer=None: got.get(u) or {"ok": False, "reason": "未下载"})
+    return len(jobs)
 
-    def dl(u, referer=None):
+
+def _match_messages(figs, pool, sections):
+    items = []
+    for k, f in enumerate(figs, 1):
+        sec = next(x for x in sections if x["id"] == f["section"])
+        para = ill.paragraphs(sec["md"])[f["para"]]
+        im = next(c for c in pool if c["id"] == f["image_id"])
+        items.append(f"{k}. 图注：{(im.get('caption') or '（无）')[:80]}；图片上下文：{(im.get('context_text') or '（无）')[:160]}\n"
+                     f"   段落：{writing.CITE.sub('', para)[:220]}")
+    return [{"role": "system", "content": "你只输出 JSON。"},
+            {"role": "user", "content": MATCH_PROMPT.format(items="\n".join(items))}]
+
+
+def _apply_match(figs, res, rejected):
+    """把大模型的图文相符判断落到 figs 上，返回被否决的。"""
+    bad = []
+    for r in (res or {}).get("results") or []:
         try:
-            return ctx.tool("image_download", url=u, referer=referer)
-        except Exception as e:  # noqa: BLE001
-            return {"ok": False, "reason": f"下载异常：{str(e)[:80]}"}
-    for did, url, cands in todo:
-        store_images(did, url, cands, max_images=6, download_fn=dl)
+            f = figs[int(r.get("i")) - 1]
+        except (TypeError, ValueError, IndexError):
+            continue
+        if r.get("match") is False:
+            bad.append(f)
+            rejected.append({"image": f["image_id"], "url": f["url"], "doc": f["doc_title"],
+                             "why": f"大模型判断图文不符：{str(r.get('reason') or '')[:30]}"})
+        else:
+            f["why"] += f"；大模型确认相符：{str(r.get('reason') or '')[:30]}"
+    return bad
 
 
-def _place_confirmed(ctx, pool, sections, docs, need, rejected):
+def _place_confirmed(ctx, pool, sections, docs, need, rejected, banned=None):
     """按相似度放置，配置了大模型时再确认图文相符；被否决的换下一张（最多重试 2 轮）。"""
-    banned, figs = set(), []
+    banned, figs = set(banned or ()), []
     for _ in range(3):
         figs, rej = ill.place([c for c in pool if c["id"] not in banned], sections, docs, need)
         if not figs or not _use_llm(ctx):
             rejected += rej
             return figs
-        items = []
-        for k, f in enumerate(figs, 1):
-            sec = next(x for x in sections if x["id"] == f["section"])
-            para = ill.paragraphs(sec["md"])[f["para"]]
-            im = next(c for c in pool if c["id"] == f["image_id"])
-            items.append(f"{k}. 图注：{(im.get('caption') or '（无）')[:80]}；图片上下文：{(im.get('context_text') or '（无）')[:160]}\n"
-                         f"   段落：{writing.CITE.sub('', para)[:220]}")
         try:
-            res = ctx.tool("llm", messages=[{"role": "system", "content": "你只输出 JSON。"},
-                                            {"role": "user", "content": MATCH_PROMPT.format(items="\n".join(items))}])["data"]
+            res = ctx.tool("llm", messages=_match_messages(figs, pool, sections))["data"]
         except Exception as e:  # noqa: BLE001
             ctx.think(f"图文相符确认失败（{str(e)[:60]}），按相似度结果放置")
             rejected += rej
             return figs
-        bad = []
-        for r in res.get("results") or []:
-            try:
-                f = figs[int(r.get("i")) - 1]
-            except (TypeError, ValueError, IndexError):
-                continue
-            if r.get("match") is False:
-                bad.append(f)
-                rejected.append({"image": f["image_id"], "url": f["url"], "doc": f["doc_title"],
-                                 "why": f"大模型判断图文不符：{str(r.get('reason') or '')[:30]}"})
-            else:
-                f["why"] += f"；大模型确认相符：{str(r.get('reason') or '')[:30]}"
+        bad = _apply_match(figs, res, rejected)
         if not bad:
             rejected += rej
             return figs
@@ -584,7 +595,10 @@ def illustrate(ctx):
     need = int(sk["images"].get("body_min") or 2)
     used_n = set(st["check"]["used"])
     order = [d for d in docs if d["n"] in used_n] + [d for d in docs if d["n"] not in used_n]
-    _download_doc_images(ctx, order)
+    timing, t0 = {}, time.time()
+    n_dl = _download_doc_images(ctx, order)
+    timing["下载图片"] = round(time.time() - t0, 1)
+    t0 = time.time()
     cands = ill.candidates([d["id"] for d in order])
     rejected = []
     info, photos = [], []
@@ -594,8 +608,33 @@ def illustrate(ctx):
         if not c["quality"]["ok"]:
             continue
         (info if c["cls"]["info"] else photos).append(c)
-    # ---- 1. 原文信息图
-    figs = _place_confirmed(ctx, info, st["sections"], docs, min(need, 2), rejected) if info else []
+    timing["质检分类"] = round(time.time() - t0, 1)
+    t0 = time.time()
+    # ---- 1. 原文信息图：先按相似度放；“图文是否相符”和“找图表数据”两次大模型调用同时发出
+    figs, first_rej = (ill.place(info, st["sections"], docs, min(need, 2)) if info else ([], []))
+    calls, lines = [], ""
+    if _use_llm(ctx) and figs:
+        calls.append(("match", ("llm", {"messages": _match_messages(figs, info, st["sections"])})))
+    if _use_llm(ctx):
+        lines = ill.numeric_lines(docs, st["check"]["items"])
+        if lines:
+            calls.append(("charts", ("llm", {"messages": [{"role": "system", "content": "你只输出 JSON。"}, {
+                "role": "user", "content": ill.CHARTS_PROMPT.format(lines=lines, sections="、".join(x["id"] for x in st["sections"]))}],
+                "max_tokens": 1500})))
+    par = dict(zip([k for k, _ in calls], ctx.tool_parallel([c for _, c in calls]))) if calls else {}
+    if "match" in par:
+        stt, out = par["match"]
+        bad = _apply_match(figs, out.get("data") if stt == "ok" else None, rejected)
+        if bad:      # 少数情况：有图被否决，换下一张（这时再单独确认）
+            keep = [f for f in figs if f not in bad]
+            more = _place_confirmed(ctx, [c for c in info if c["id"] not in {f["image_id"] for f in figs}],
+                                    [x for x in st["sections"] if x["id"] not in {f["section"] for f in keep}] or st["sections"],
+                                    docs, min(need, 2) - len(keep), rejected)
+            figs = keep + more
+        else:
+            rejected += first_rej
+    else:
+        rejected += first_rej
     for f in figs:
         f["info"] = True
         f["why"] = "信息图（" + next(c for c in cands if c["id"] == f["image_id"])["cls"]["why"] + "）；" + f["why"]
@@ -607,21 +646,17 @@ def illustrate(ctx):
         chart_log.append("未配置大模型：不自动找图表数据")
     specs = []
     if _use_llm(ctx):
-        lines = ill.numeric_lines(docs, st["check"]["items"])
         if not lines:
             chart_log.append("资料里带数字的句子太少，没法画图")
         else:
-            try:
-                d = ctx.tool("llm", messages=[{"role": "system", "content": "你只输出 JSON。"}, {
-                    "role": "user", "content": ill.CHARTS_PROMPT.format(lines=lines, sections="、".join(x["id"] for x in st["sections"]))}],
-                    max_tokens=1500)["data"]
-                specs = (d.get("charts") or [])[:2]
+            stt, out = par.get("charts", ("error", "未调用"))
+            if stt == "ok" and isinstance(out, dict) and isinstance(out.get("data"), dict):
+                specs = (out["data"].get("charts") or [])[:2]
                 if not specs:
                     chart_log.append("大模型认为资料里没有适合画柱状图/折线图的同类数字（需要 3 个以上单位相同、可比较的数值）")
-            except Exception as e:  # noqa: BLE001
-                ctx.think(f"找图表数据失败（{str(e)[:60]}）")
-                chart_log.append(f"找图表数据失败：{str(e)[:60]}")
-                specs = []
+            else:
+                ctx.think(f"找图表数据失败（{str(out)[:60]}）")
+                chart_log.append(f"找图表数据失败：{str(out)[:60]}")
     for spec in specs:
         kind = spec.get("kind")
         if kind not in ("bar", "line"):
@@ -698,8 +733,21 @@ def illustrate(ctx):
                                             "sha256": res["sha256"], "phash": res["phash"]})
             return res
         return None
+    timing["选图与作图"] = round(time.time() - t0, 1)
+    t0 = time.time()
+    # 已选中的旧图（检索阶段存的压缩版）并行换原图
+    olds = [(f, db.query_one("SELECT * FROM images WHERE id=?", (f["image_id"],))) for f in figs]
+    olds = [(f, row) for f, row in olds if row and hires_candidates(row["url"])]
+    ups = ctx.tool_parallel([("image_download", {"url": row["url"], "referer": row["url"]}) for _, row in olds]) if olds else []
+    upmap = {}
+    for (f, row), (stt, res) in zip(olds, ups):
+        if stt == "ok" and res.get("ok") and res.get("upgraded_from") and (res.get("width") or 0) > (row["width"] or 0):
+            db.update("images", "id", row["id"], {"local_path": res["local_path"], "width": res["width"], "height": res["height"],
+                                                  "sha256": res["sha256"], "phash": res["phash"]})
+            res["upgraded_from"] = f"{row['width']}×{row['height']}"
+            upmap[f["image_id"]] = res
     for f in figs:
-        up = upgrade(f)
+        up = upmap.get(f["image_id"])
         if up:
             f.update(src="/media/" + up["local_path"], w=up["width"], h=up["height"])
             f["warn"] = [w for w in f.get("warn") or [] if "像素" not in w and "分辨率" not in w]
@@ -724,12 +772,15 @@ def illustrate(ctx):
         st["cover"] = {"kind": "diagram", "src": "/media/" + ill._save_svg(ill.cover_svg(st["title"], f"{sk['name']} · {ctx.topic}")),
                        "alt": "示意封面", "caption": "示意封面：素材中没有合适的横版原图，按标题生成",
                        "why": "没有满足封面要求（横版照片类、宽 ≥ 960、清晰）的原始图片"}
+    timing["换原图与封面"] = round(time.time() - t0, 1)
     st["image_rejected"] = rejected
     st["chart_log"] = chart_log
+    st["image_timing"] = timing
     n_info = sum(1 for f in figs if f.get("info"))
     ctx.observe(f"配图：候选 {len(cands)} 张（信息图 {len(info)}、照片 {len(photos)}）；正文放原文信息图 {n_info} 张、"
                 f"数据图/时间线/数字卡片 {len(diagrams)} 张、照片补位 {len(filler)} 张（要求至少 {need} 张）；"
-                f"封面{'用原图' if st['cover']['kind'] == 'photo' else '为示意封面'}；数据图：" + ("；".join(chart_log) or "无"))
+                f"封面{'用原图' if st['cover']['kind'] == 'photo' else '为示意封面'}；数据图：" + ("；".join(chart_log) or "无") +
+                f"。耗时：" + "，".join(f"{k} {v}s" for k, v in timing.items()) + f"（并行下载 {n_dl} 张）")
     return "save"
 
 

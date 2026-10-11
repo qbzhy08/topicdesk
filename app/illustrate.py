@@ -30,7 +30,20 @@ PLACEHOLDER = re.compile(r"\{\{img:[^}]*\}\}|【?(此处|这里)(插入|放|配)
 
 # ---------------------------------------------------------------- 质检
 
+_QCACHE: dict = {}
+
+
 def quality(local_path: str, width: int | None, height: int | None, url: str = "") -> dict:
+    """带缓存：同一个本地文件只分析一次（文件名是内容哈希，内容不变结果就不变）。"""
+    key = (local_path, url)
+    if key not in _QCACHE:
+        if len(_QCACHE) > 2000:
+            _QCACHE.clear()
+        _QCACHE[key] = _quality(local_path, width, height, url)
+    return {k: (list(v) if isinstance(v, list) else v) for k, v in _QCACHE[key].items()}   # 列表也复制，调用方改了不影响缓存
+
+
+def _quality(local_path: str, width: int | None, height: int | None, url: str = "") -> dict:
     """返回 {ok, sharpness, issues: [...], warn: [...]}。"""
     from PIL import Image, ImageFilter, ImageStat
     issues, warn = [], []

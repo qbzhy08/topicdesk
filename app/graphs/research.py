@@ -1083,7 +1083,16 @@ def images(ctx):
         if len(picked) >= max_docs:
             break
 
+    # 所有资料的候选图片一起并行下载（不同站点互不等待），再逐篇落库、去重
+    from ..collect.images import plan_downloads
+    jobs = [(u, d["url"]) for d in picked for u in plan_downloads(d["meta"]["image_candidates"], set(), per_doc)]
+    res_all = ctx.tool_parallel([("image_download", {"url": u, "referer": ref}) for u, ref in jobs], max_workers=8) if jobs else []
+    got = {u: (out if st_ == "ok" else {"ok": False, "reason": f"下载异常：{str(out)[:100]}"})
+           for (u, _), (st_, out) in zip(jobs, res_all)}
+
     def dl(u, referer=None):
+        if u in got:
+            return got[u]
         try:
             return ctx.tool("image_download", url=u, referer=referer)
         except Exception as e:
