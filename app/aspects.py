@@ -59,6 +59,7 @@ REFINE_PROMPT = """主题：「{topic}」（问题类型：{qtype}）。初步�
 1. 对每个由大模型拆出的子问题（id 以 llm 开头）判断资料里是否有相关讨论：supported 或 unsupported。
 2. 资料里集中出现、但现有子问题没有覆盖的重要方向，新增 0-2 个子问题，必须给出支撑它的资料编号（至少 2 篇）。
 只输出 JSON：
+notes 里用子问题的名称，不要写 id。
 {{"assessment": [{{"id": "llm0", "status": "supported", "evidence": [1, 4]}}],
   "add": [{{"name": "具体问题", "why": "一句话", "keywords": ["..."], "search_zh": "...", "search_en": "...", "evidence": [2, 5]}}],
   "notes": "一句话"}}"""
@@ -127,7 +128,7 @@ def parse_llm(items: list, start: int = 0, origin: str = "llm") -> list[dict]:
     return out
 
 
-def apply_refine(aspects: list[dict], cov: dict, res: dict, n_docs: int, max_total: int = 11) -> list[dict]:
+def apply_refine(aspects: list[dict], cov: dict, res: dict, n_docs: int, max_total: int = 14) -> list[dict]:
     """按资料修订：unsupported 且没有覆盖的普通优先级子问题降为可选；新增有依据的子问题。返回变更记录。"""
     changes = []
     by_id = {a["id"]: a for a in aspects}
@@ -145,11 +146,23 @@ def apply_refine(aspects: list[dict], cov: dict, res: dict, n_docs: int, max_tot
                                 "why": "初步检索没有发现这方面的讨论，降为可选，不再追着补"})
     added = 0
     for x in res.get("add") or []:
-        ev = [int(i) for i in x.get("evidence") or [] if str(i).isdigit() and int(i) < n_docs]
-        if len(ev) < 2 or len(aspects) >= max_total:
+        if not isinstance(x, dict) or not x.get("name"):
             continue
+        ev = sorted({int(str(i).strip()) for i in x.get("evidence") or []
+                     if str(i).strip().isdigit() and int(str(i).strip()) < n_docs})
+        active = [a for a in aspects if not a.get("optional")]      # 降为可选的不占名额
+        reason = None
+        if len(ev) < 2:
+            reason = f"只给出 {len(ev)} 篇依据资料（至少需要 2 篇），未采纳"
+        elif len(active) >= max_total:
+            reason = f"子问题已达上限 {max_total} 个，未采纳"
         new = parse_llm([x], start=added, origin="data")[0]
-        if any(overlaps(new, b) for b in aspects):
+        dup = next((b for b in aspects if overlaps(new, b)), None)
+        if not reason and dup:
+            dup["keywords"] = list(dict.fromkeys(list(dup.get("keywords") or []) + new["keywords"]))[:30]
+            reason = f"与已有子问题「{dup['name']}」重复，合并关键词"
+        if reason:
+            changes.append({"op": "add_rejected", "name": x["name"], "why": reason, "evidence": ev})
             continue
         new["evidence"] = ev
         aspects.append(new)

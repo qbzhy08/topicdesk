@@ -553,7 +553,7 @@ def _refine_aspects(ctx, cov: dict):
     st["aspect_plan"]["changes"] += [dict(c, phase="refine") for c in changes]
     st["aspect_plan"]["refine_notes"] = res.get("notes", "")
     ctx.think("按初步检索到的资料修订子问题：" + ("；".join(
-        f"{ {'optional': '降为可选', 'add': '新增', 'keep_high': '保留'}[c['op']] }「{c['name']}」——{c['why']}"
+        f"{ {'optional': '降为可选', 'add': '新增', 'keep_high': '保留', 'add_rejected': '未新增'}[c['op']] }「{c['name']}」——{c['why']}"
         for c in changes) or "拆分与资料吻合，不需要调整"))
 
 

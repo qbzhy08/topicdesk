@@ -347,7 +347,7 @@ function covTable(cov) {
 
 function aspectPlanReport(ap) {
   if (!ap) return "";
-  const OP = { drop_default: "去掉通用子问题", merge: "合并重复", optional: "降为可选", add: "按资料新增", keep_high: "保留必需项",
+  const OP = { drop_default: "去掉通用子问题", merge: "合并重复", optional: "降为可选", add: "按资料新增", keep_high: "保留必需项", add_rejected: "建议新增但未采纳",
     user_remove: "你删除", user_add: "你新增" };
   const ch = ap.changes || [];
   return `<h4>子问题拆分</h4><p class="small">问题类型：${esc(ap.type_name || "未判断（未配置大模型时只用通用子问题）")}

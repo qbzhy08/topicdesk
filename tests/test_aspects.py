@@ -38,7 +38,17 @@ class UnitTest(CollectBase):
         self.assertTrue(aspects[0]["optional"])                  # 普通优先级、没讨论 → 可选
         self.assertFalse(aspects[1].get("optional"))             # 必需的保留
         self.assertEqual([a["origin"] for a in aspects].count("data"), 1)   # 只有 1 篇依据的不新增
-        self.assertEqual({c["op"] for c in ch}, {"optional", "keep_high", "add"})
+        self.assertEqual({c["op"] for c in ch}, {"optional", "keep_high", "add", "add_rejected"})
+
+    def test_refine_add_not_blocked_by_full_list(self):
+        """通用 5 个 + 按类型拆出 6 个 = 11 个时，仍能按资料新增（之前的上限是 11，导致新增全被挡掉）。"""
+        base = [dict(a) for a in DEFAULT_ASPECTS] + A.parse_llm(
+            [{"name": f"问题{i}", "keywords": [f"词{i}a", f"词{i}b"]} for i in range(6)])
+        res = {"add": [{"name": "压缩记忆方法", "keywords": ["compaction", "压缩记忆"], "evidence": ["2", 5]},
+                       {"name": "稀疏与线性注意力", "keywords": ["sparse attention", "线性注意力"], "evidence": [1, 3]}]}
+        ch = A.apply_refine(base, {}, res, n_docs=10)
+        self.assertEqual([c["op"] for c in ch], ["add", "add"])
+        self.assertEqual(sum(a.get("origin") == "data" for a in base), 2)
 
 
 class FlowTest(CollectBase):
