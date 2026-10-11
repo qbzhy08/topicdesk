@@ -669,6 +669,31 @@ def suggest_keywords():
         return jsonify(error=str(e)[:200]), 500
 
 
+# ---------------------------------------------------------------- 记忆验证演示（回放模式）
+
+@app.get("/api/demo/memory")
+def memory_demo_status():
+    from . import memory_demo
+    return jsonify(memory_demo.status())
+
+
+@app.post("/api/demo/memory/<action>")
+def memory_demo_action(action):
+    from . import memory_demo
+    try:
+        if action in ("run1", "run2"):
+            tid = memory_demo.start_run(1 if action == "run1" else 2)
+            runner.start(tid)
+            return jsonify(id=tid)
+        if action == "sample":
+            return jsonify(memory_demo.apply_sample())
+        if action == "reset":
+            return jsonify(memory_demo.reset())
+    except (RuntimeError, ValueError) as e:
+        return jsonify(error=str(e)), 400
+    abort(404)
+
+
 @app.get("/api/replay")
 def replay_info():
     from . import replay

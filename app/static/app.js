@@ -190,6 +190,7 @@ function route() {
   if (d) return showDoc(d[1]);
   const mm = h.match(/^#\/memory\/(m_\w+)/);
   if (mm) return showMemory(mm[1]);
+  if (h.startsWith("#/memory/demo")) return showMemoryDemo();
   if (h.startsWith("#/memory")) return showMemoryHome(new URLSearchParams(h.split("?")[1] || ""));
   if (h.startsWith("#/sources")) return showSources();
   if (h.startsWith("#/settings")) return showSettings();
@@ -380,7 +381,7 @@ function renderReport(rep, state) {
     return;
   }
   const chips = (obj, map = {}) => Object.entries(obj || {}).map(([k, v]) => `<span class="chip">${esc(map[k] || k)} <b>${v}</b></span>`).join("");
-  box.innerHTML = `
+  box.innerHTML = `${rep.compare ? compareCard(rep.compare) : ""}
     <div class="card report">
       <h3>采集报告</h3>
       <div class="stats">
@@ -430,6 +431,47 @@ function memoryReport(m) {
     ${(m.disputes || []).map((d) => `<p class="small">${d.open ? `<span class="gap">未解争议</span> ${esc(d.content)}` : `争议已裁决：采信「${esc(d.winner)}」，否定「${esc(d.loser)}」`}（证据分 ${d.score?.join(" vs ")}）</p>`).join("")}
     ${m.facts?.length ? `<details class="mem-box"><summary>本次涉及的事实 ${m.facts.length} 条</summary><ul class="small">${m.facts.map((f) =>
       `<li><a href="#/memory/${f.id}">${esc(f.content)}</a> <span class="tag v-${f.verify}">${VERIFY[f.verify] || f.verify}</span> 独立来源 ${f.independent ?? 0}</li>`).join("")}</ul></details>` : ""}`;
+}
+
+// ---------------------------------------------------------------- 与上次相比（同一主题的两次独立任务）
+const PREF_FROM = { long_term: "长期偏好", this_time: "本次要求" };
+const PREF_OP = { added: "新增", changed: "修改", removed: "移除" };
+function compareCard(c, opts = {}) {
+  const prefs = (c.pref_effects || []).length ? `<div class="cmp-sec"><h4>偏好如何影响结果</h4><ul class="small">${c.pref_effects.map((e) => `
+      <li><b>${esc(e.name)}：${esc(e.value)}</b> <span class="tag">${PREF_FROM[e.from] || esc(e.from)}</span> → ${esc(e.effect)}
+      ${e.examples?.length ? `<br><small class="muted">被排除：${e.examples.map(esc).join("；")}</small>` : ""}</li>`).join("")}</ul>
+      ${(c.pref_changes || []).length ? `<p class="small muted">和上次相比：${c.pref_changes.map((x) => `${PREF_OP[x.op]}「${esc(x.name)}」${x.op === "changed" ? `${esc(x.before)} → ${esc(x.after)}` : esc(x.after || x.before || "")}`).join("；")}</p>` : ""}</div>` : "";
+  if (!c.prev) {
+    return `<div class="card cmp first"><h3>与上次相比</h3><p class="small">这是该主题的第一次任务。下次再查同一主题时，这里会列出重复资料、新进展、被更正的旧结论，以及删除或更正过的记忆是否还被召回。</p>${prefs}</div>`;
+  }
+  const d = c.docs || {};
+  const link = (x) => `<a href="#/doc/${x.id}">${esc(x.title)}</a>`;
+  const checks = (c.checks || []).map((k) => `<div class="cmp-check ${k.ok ? "ok" : "bad"}"><b>${k.ok ? "✓" : "✗"} ${esc(k.name)}</b><small>${esc(k.detail)}</small></div>`).join("");
+  return `<div class="card cmp">
+    <div class="cmp-head"><h3>与上次相比</h3>
+      <small>上次 ${fmtTime(c.prev.at)}（${c.prev.docs} 篇资料）${opts.noLink ? "" : ` · <a href="#/task/${c.prev.id}">打开上次任务</a>`}</small></div>
+    <div class="cmp-checks">${checks}</div>
+    <div class="cmp-grid">
+      <div class="cmp-sec"><h4>资料</h4>
+        <div class="cmp-nums"><div><b>${d.new ?? 0}</b><small>新进展</small></div><div><b>${d.updated ?? 0}</b><small>内容更新</small></div>
+          <div><b>${d.repeated ?? 0}</b><small>上次已有</small></div><div><b>${d.reprints ?? 0}</b><small>转载/重复报道</small></div></div>
+        ${d.new_items?.length ? `<p class="small"><span class="tag nv-new">新</span> ${d.new_items.map(link).join("；")}</p>` : ""}
+        ${d.updated_items?.length ? `<p class="small"><span class="tag nv-update">更新</span> ${d.updated_items.map(link).join("；")}</p>` : ""}
+        ${d.repeated_titles?.length ? `<details class="small"><summary>上次已有、只做比对的 ${d.repeated} 篇</summary>${d.repeated_titles.map(esc).join("；")}${d.repeated > d.repeated_titles.length ? " …" : ""}</details>` : ""}
+      </div>
+      <div class="cmp-sec"><h4>旧结论更正</h4>
+        ${(c.corrections || []).map((x) => `<p class="small"><s>${esc(x.old)}</s><br>→ <b>${esc(x.new)}</b></p>`).join("") || '<p class="small muted">本次没有来源更正</p>'}
+        ${c.prev.delivery_status && c.prev.delivery_status !== "active" ? `<p class="small">上次的交付：<span class="tag st-${c.prev.delivery_status}">${MSTATUS[c.prev.delivery_status] || c.prev.delivery_status}</span> ${esc((c.prev.delivery_note || "").replace(/（上游 m_\w+）/, ""))}</p>` : ""}
+      </div>
+      ${prefs}
+      <div class="cmp-sec"><h4>删除 / 更正过的记忆</h4>
+        ${(c.invalidated || []).map((x) => `<p class="small"><span class="tag">${esc(x.event)}</span> ${x.actor === "user" ? "你" : "系统"}：<s>${esc(x.content)}</s>${x.reason && x.actor === "user" ? `<br><small class="muted">原因：${esc(x.reason.replace(/（上游 m_\w+）/, ""))}</small>` : ""}
+          ${x.replacement ? `<br>接替为：${esc(x.replacement)}${x.replacement_recalled ? "（本次召回的是这条）" : ""}` : ""}
+          <br>${x.recalled ? '<span class="gap">✗ 本次仍被召回</span>' : '<span class="ok">✓ 本次没有召回</span>'}</p>`).join("") || '<p class="small muted">两次任务之间没有删除或更正记忆</p>'}
+      </div>
+    </div>
+    <details class="small"><summary>本次召回的 ${c.recalled} 条记忆</summary><ul>${(c.recalled_lines || []).map((l) => `<li>${esc(l)}</li>`).join("")}</ul></details>
+  </div>`;
 }
 
 const ORIGIN = { default: "通用", llm: "按类型拆分", data: "按资料新增", user: "你添加", community: "社区话题", memory: "沿用上次" };
@@ -869,7 +911,8 @@ async function showMemoryHome(qs) {
   const by = (k) => rows.filter((m) => m.kind === k);
   el.innerHTML = `
     <div class="detail-head"><div><p class="kicker">记忆</p><h1>下次再来，别从头开始</h1>
-      <p class="meta">每条记忆都记录来源、适用范围、更新时间和使用次数；可以查看证据、更正或删除，失效会同步到派生条目。</p></div></div>
+      <p class="meta">每条记忆都记录来源、适用范围、更新时间和使用次数；可以查看证据、更正或删除，失效会同步到派生条目。</p></div>
+      <a class="btn ghost" href="#/memory/demo">记忆验证演示 →</a></div>
     <div class="card"><h3>用户偏好（长期）</h3>
       ${prefs.map((p) => memRow(p) + (p.suggest ? `<div class="fix-row">这条偏好的类型选错了，所以没有生效。
         <button class="ghost sm" data-fix="${p.id}" data-type="${p.suggest.type}" data-value="${p.suggest.value}">${esc(p.suggest.label)}</button></div>` : "")).join("") || '<p class="small">还没有长期偏好。任务里的“本次要求”默认不会保存，勾选“同时保存为长期偏好”或在这里添加才会生效。</p>'}
@@ -923,6 +966,78 @@ async function showMemoryHome(qs) {
     try { await api("/api/preferences", { method: "POST", body: { type, value, applies_to: f.get("applies_to") || "all" } }); showMemoryHome(qs); }
     catch (err) { alert(err.message); }
   };
+}
+
+// ---------------------------------------------------------------- 记忆验证演示（固定样例回放）
+async function showMemoryDemo() {
+  const el = $("#detail");
+  const me = current = {};
+  const d = await api("/api/demo/memory");
+  if (current !== me) return;
+  const run = (r) => !r ? "" : r.status === "done" ? `<span class="ok">✓ 完成</span> <a href="#/task/${r.id}">查看任务</a>`
+    : r.status === "failed" ? `<span class="gap">失败：${esc(r.error || "")}</span>` : `<span class="spin"></span> 运行中…（约 10 秒）`;
+  const running = [d.run1, d.run2].some((r) => r && !["done", "failed", "cancelled", "interrupted"].includes(r.status));
+  const s1 = d.run1?.status === "done", s2 = d.run2?.status === "done";
+  const step = (n, title, on, body) => `<div class="card demo-step ${on ? "" : "dim"}"><div class="demo-n">${n}</div><div class="demo-b"><h3>${title}</h3>${body}</div></div>`;
+  el.innerHTML = `
+    <div class="detail-head"><div><p class="kicker">记忆 · 验证演示</p><h1>同一主题，两次独立任务</h1>
+      <p class="meta">主题「${esc(d.topic)}」。用固定样例回放（模拟网站、独立数据库），每次结果都一样，方便对照。
+      第 2 天的样例里：IT之家把 128K 更正为 64K，出现一篇 256K 新进展，Hacker News 不可用。</p></div>
+      ${d.enabled ? `<button class="ghost sm" id="demo-reset">从头再来</button>` : ""}</div>
+    ${!d.enabled ? `<div class="card warn-card"><h3>需要在回放模式下运行</h3>
+      <p class="small">为了不动你的真实资料和记忆，演示用独立的数据库和模拟网站。在项目文件夹里双击 <b>演示回放.command</b>（或在终端执行 <code>PORT=8001 bash start.command --replay</code>），浏览器会在 8001 端口打开回放版的这一页。不用关掉当前服务，两个可以同时开。</p></div>` : ""}
+    ${step(1, "第一次任务（第 1 天）", d.enabled, `<p class="small">检索、抽取事实、写入历史交付。此时还没有任何记忆。</p>
+      <div class="row">${s1 ? "" : `<button id="demo-run1" ${running || !d.enabled ? "disabled" : ""}>开始第一次任务</button>`} ${run(d.run1)}</div>`)}
+    ${step(2, "修改记忆", s1, `<p class="small">删除或更正一条事实，再设置几条长期偏好。可以自己点，也可以一键套用示例改动。</p>
+      ${s1 ? `<div class="demo-facts">${d.facts.map((f) => `<div class="demo-fact"><span>${esc(f.content)} <span class="tag v-${f.verify}">${VERIFY[f.verify] || esc(f.verify || "")}</span></span>
+        ${s2 ? "" : `<span class="nowrap"><button class="ghost sm" data-del="${f.id}">删除</button> <button class="ghost sm" data-fix="${f.id}">更正</button></span>`}</div>`).join("") || '<p class="small">没有事实</p>'}</div>
+        <p class="small">长期偏好：${d.prefs.map((p) => esc(p.content)).join("；") || "无"}（在 <a href="#/memory">记忆页</a> 可以添加）</p>
+        ${s2 ? "" : `<button class="ghost" id="demo-sample">一键套用示例改动</button><small class="muted"> 删除“64K 以上准确率下降”这条事实；偏好：关注“大海捞针”、排除“踩坑”、阅读时间 10 分钟</small>`}
+        ${d.edits.length ? `<ul class="small demo-edits">${d.edits.map((e) => `<li><span class="tag">${esc(e.op)}</span> ${esc(e.content)}</li>`).join("")}</ul>` : ""}` : ""}`)}
+    ${step(3, "第二次任务（第 2 天）", s1, `<p class="small">同一主题再跑一次。任务开始时会召回长期记忆，结束时和第一次对比。</p>
+      <div class="row">${s2 ? "" : `<button id="demo-run2" ${running || !s1 ? "disabled" : ""}>开始第二次任务</button>`} ${run(d.run2)}</div>`)}
+    ${step(4, "核对结果", s2, s2 && d.compare ? compareCard(d.compare) + recallNow(d.recall_now) : `<p class="small">第二次任务完成后，这里显示“与上次相比”，并重新召回一次，逐条确认删除和更正过的记忆不再出现。</p>`)}`;
+  const go = (path, body) => async (e) => {
+    e.target.disabled = true;
+    try { await api(`/api/demo/memory/${path}`, { method: "POST", body: body || {} }); } catch (err) { alertInline(e.target, err.message); }
+    showMemoryDemo();
+  };
+  $("#demo-run1") && ($("#demo-run1").onclick = go("run1"));
+  $("#demo-run2") && ($("#demo-run2").onclick = go("run2"));
+  $("#demo-sample") && ($("#demo-sample").onclick = go("sample"));
+  $("#demo-reset") && ($("#demo-reset").onclick = async (e) => {
+    if (e.target.dataset.sure !== "1") { e.target.dataset.sure = "1"; e.target.textContent = "确认清空演示数据？"; e.target.classList.add("danger"); return; }
+    await go("reset")(e);
+  });
+  $$("[data-del]", el).forEach((b) => b.onclick = async () => {
+    await api(`/api/memories/${b.dataset.del}`, { method: "DELETE", body: { reason: "演示：手动删除" } });
+    showMemoryDemo();
+  });
+  $$("[data-fix]", el).forEach((b) => b.onclick = () => {
+    const row = b.closest(".demo-fact");
+    if (row.querySelector("form")) return;
+    const old = row.querySelector("span").firstChild.textContent.trim();
+    row.insertAdjacentHTML("beforeend", `<form class="row demo-fix"><input name="c" value="${esc(old)}"><button>保存更正</button></form>`);
+    row.querySelector("form").onsubmit = async (e) => {
+      e.preventDefault();
+      await api(`/api/memories/${b.dataset.fix}/correct`, { method: "POST", body: { content: e.target.c.value, reason: "演示：手动更正" } });
+      showMemoryDemo();
+    };
+  });
+  if (running) me.timer = setTimeout(() => { if (current === me) showMemoryDemo(); }, 2000);
+}
+
+function alertInline(btn, msg) { btn.insertAdjacentHTML("afterend", ` <small class="gap">${esc(msg)}</small>`); }
+
+function recallNow(r) {
+  if (!r) return "";
+  const leaked = r.dead.filter((x) => x.recalled);
+  return `<div class="card"><h3>现在再召回一次</h3>
+    <p class="small">模拟“下一次任务开始”，召回该主题的记忆（不计入使用次数），逐条检查已删除、已更正、已失效的记忆：
+    ${leaked.length ? `<span class="gap">✗ 有 ${leaked.length} 条仍被召回</span>` : `<span class="ok">✓ ${r.dead.length} 条全部没有出现</span>`}</p>
+    <table class="tbl"><tr><th>失效的记忆</th><th>状态</th><th>召回中</th></tr>${r.dead.map((x) => `<tr><td class="small"><s>${esc(x.content)}</s></td>
+      <td><span class="tag st-${x.status}">${MSTATUS[x.status] || esc(x.status)}</span></td><td>${x.recalled ? '<span class="gap">出现</span>' : '<span class="ok">未出现</span>'}</td></tr>`).join("")}</table>
+    <details class="small"><summary>召回结果全文（${r.lines.length} 条）</summary><ul>${r.lines.map((l) => `<li>${esc(l)}</li>`).join("")}</ul></details></div>`;
 }
 
 async function showMemory(id) {
@@ -1117,9 +1232,10 @@ async function showSettings() {
   renderWebsearchForm();
   api("/api/replay").then((r) => {
     const c = $("#replay-card");
-    if (!r.enabled) { c.innerHTML = `<h3>固定样例回放</h3><p class="small">用 <code>bash start.command --replay</code> 启动可进入离线回放模式（模拟网站、独立数据库），用于演示长期记忆。</p>`; return; }
+    if (!r.enabled) { c.innerHTML = `<h3>固定样例回放</h3><p class="small">双击项目里的 <b>演示回放.command</b>（或 <code>bash start.command --replay</code>）进入离线回放模式（模拟网站、独立数据库），用于 <a href="#/memory/demo">记忆验证演示</a>。</p>`; return; }
     c.innerHTML = `<h3>固定样例回放（当前第 ${r.day} 天）</h3><p class="small">第 2 天：IT之家把 128K 更正为 64K，并出现一篇 256K 新进展；Hacker News 不可用。</p>
-      <div class="row"><button class="ghost" data-day="1">切到第 1 天</button><button class="ghost" data-day="2">切到第 2 天</button></div>`;
+      <div class="row"><button class="ghost" data-day="1">切到第 1 天</button><button class="ghost" data-day="2">切到第 2 天</button>
+      <a class="btn" href="#/memory/demo">打开记忆验证演示 →</a></div>`;
     $$("[data-day]", c).forEach((b) => b.onclick = async () => { await api("/api/replay/day", { method: "POST", body: { day: +b.dataset.day } }); showSettings(); });
   });
   $("#llm-form").onsubmit = async (e) => {

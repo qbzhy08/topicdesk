@@ -232,7 +232,8 @@ def merge_claim(topic: str, c: dict, task_id: str, stats: dict) -> str:
             verify(r["new"], task_id)
             stats["corrected"] = stats.get("corrected", 0) + 1
             stats.setdefault("corrections", []).append(
-                {"old": best["content"], "new": c["text"], "stale_deliveries": r["stale"]})
+                {"old": best["content"], "new": c["text"], "old_id": best["id"], "new_id": r["new"],
+                 "stale_deliveries": r["stale"]})
             return r["new"]
         # 不同来源说法不同：冲突
         nid = mem.add("topic", "fact", c["text"], topic=topic, mkey=sk[:40],

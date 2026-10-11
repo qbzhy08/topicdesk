@@ -822,6 +822,11 @@ def _save(ctx, item: dict, how: str) -> dict:
     res = upsert_document(item, ctx.topic, task_id=ctx.task_id, last_run_at=ctx.state["last_run_at"])
     st = ctx.state["stats"]
     st[res["action"]] = st.get(res["action"], 0) + 1
+    # 每篇资料本次的处理结果（与上次对比用）：updated > new > enriched > unchanged
+    acts = ctx.state.setdefault("doc_actions", {})
+    rank = {"updated": 3, "new": 2, "enriched": 1, "unchanged": 0}
+    if rank.get(res["action"], 0) >= rank.get(acts.get(res["doc_id"]), -1):
+        acts[res["doc_id"]] = res["action"]
     if res["action"] == "new":
         st["novelty_" + res["novelty"]] = st.get("novelty_" + res["novelty"], 0) + 1
     return res
@@ -936,6 +941,10 @@ def _after_search(ctx, a, status, res):
         items = [it for it in items if not any(x.lower() in f"{it.get('title')} {it.get('summary')}".lower()
                                                for x in st["exclude"])]
         if before - len(items):
+            ex = st.setdefault("excluded_by_pref", [])
+            kept = {id(it) for it in items}
+            ex += [(it.get("title") or it.get("url") or "")[:60] for it in res["items"] if id(it) not in kept][:10]
+            st["stats"]["excluded_by_pref"] = st["stats"].get("excluded_by_pref", 0) + before - len(items)
             ctx.observe(f"按偏好排除 {before - len(items)} 条（包含 {st['exclude']}）")
     # 单来源配额：避免某个来源（如站内搜索一次返回很多条）占满资料上限、挤掉其他来源
     quota = p.get("per_source", max(6, p.get("max_docs", 40) // 4))
@@ -1353,6 +1362,139 @@ def _dynamic_summary(docs: list[dict]) -> dict:
             "example": {"id": ex["id"], "title": ex["title"]} if ex else None}
 
 
+PREF_NAME = {"reading_minutes": "阅读时间", "background": "知识背景", "focus": "关注重点",
+             "exclude": "不想看的内容", "source_prefer": "来源偏好", "style": "写作要求"}
+INVALID_EVENTS = {"delete": "已删除", "supersede": "已更正", "invalidate": "依赖的记忆已删除",
+                  "archive": "设为不再参考"}
+
+
+def _pref_effects(st: dict, prefs: dict) -> list[dict]:
+    """每条生效的偏好具体改变了什么（可核对的数字，而不是“已考虑偏好”）。"""
+    out = []
+    for k, v in prefs.items():
+        val = v["value"]
+        shown = "、".join(map(str, val)) if isinstance(val, list) else str(val)
+        e = {"type": k, "name": PREF_NAME.get(k, k), "value": shown, "from": v["from"]}
+        if k == "exclude":
+            n = st["stats"].get("excluded_by_pref", 0)
+            e["effect"] = (f"检索结果中排除 {n} 条包含这些词的资料" if n else "本次检索结果里没有出现这些内容")
+            e["examples"] = st.get("excluded_by_pref", [])[:3]
+        elif k == "focus":
+            a = next((x for x in st.get("aspects", []) if x["id"] == "user_focus"), None)
+            cov = (st.get("report_cov") or {}).get("user_focus") or {}
+            e["effect"] = "新增子问题「" + (a["name"] if a else shown) + "」并加入检索词" + \
+                (f"，找到 {cov.get('have', 0)} 篇覆盖它的资料" if cov else "")
+        elif k == "reading_minutes":
+            e["effect"] = f"排序结果额外生成一份 {shown} 分钟阅读清单"
+        elif k == "source_prefer":
+            e["effect"] = "这些来源的检索提前执行"
+        else:
+            e["effect"] = "写作阶段使用（本阶段只记录）"
+        out.append(e)
+    return out
+
+
+def _compare(ctx, docs: list[dict], mrep: dict) -> dict:
+    """与同一主题上一次任务对比：重复资料、新进展、旧结论更正、偏好影响、失效记忆是否还被召回。"""
+    st = ctx.state
+    prev = _prev_research(ctx.topic, ctx.task_id)
+    st["report_cov"] = {k: {"have": v["have"]} for k, v in _coverage(ctx).items()}
+    prefs = (st.get("memory") or {}).get("prefs") or {}
+    out = {"prev": None, "pref_effects": _pref_effects(st, prefs)}
+    if not prev:
+        out["first"] = True
+        return out
+    pst = prev["state"] or {}
+    prev_doc_ids = {d["id"] for d in _task_docs(prev["id"])}
+    acts = st.get("doc_actions", {})
+    uniq = [d for d in docs if not d["duplicate_of"]]
+    title = lambda d: (d["title"] or d["url"])[:80]  # noqa: E731
+    repeated = [d for d in uniq if d["id"] in prev_doc_ids and acts.get(d["id"]) in ("unchanged", "enriched", None)]
+    updated = [d for d in uniq if acts.get(d["id"]) == "updated" or
+               (d["id"] in prev_doc_ids and d["novelty"] == "update" and acts.get(d["id"]) != "unchanged")]
+    new = [d for d in uniq if d["id"] not in prev_doc_ids and acts.get(d["id"]) == "new" and d["novelty"] == "new"]
+    reprints = [d for d in docs if d["duplicate_of"] and d["id"] not in prev_doc_ids]
+
+    # 偏好变化：和上次生效的偏好比较
+    prev_prefs = ((pst.get("memory") or {}).get("prefs")) or {}
+    fmt = lambda v: "、".join(map(str, v)) if isinstance(v, list) else str(v)  # noqa: E731
+    pref_changes = []
+    for k in sorted(set(prefs) | set(prev_prefs)):
+        a, b = prev_prefs.get(k), prefs.get(k)
+        if a and not b:
+            pref_changes.append({"name": PREF_NAME.get(k, k), "op": "removed", "before": fmt(a["value"])})
+        elif b and not a:
+            pref_changes.append({"name": PREF_NAME.get(k, k), "op": "added", "after": fmt(b["value"]),
+                                 "from": b["from"]})
+        elif a and b and a["value"] != b["value"]:
+            pref_changes.append({"name": PREF_NAME.get(k, k), "op": "changed", "before": fmt(a["value"]),
+                                 "after": fmt(b["value"]), "from": b["from"]})
+
+    # 两次任务之间被删除 / 更正 / 失效的记忆：本次召回里是否还出现
+    task = db.query_one("SELECT created_at FROM tasks WHERE id=?", (ctx.task_id,))
+    t0 = (task or {}).get("created_at") or db.now()
+    recalled_ids = set(mrep.get("recalled_ids") or [])
+    recalled_text = "\n".join(mrep.get("recalled") or [])
+    invalidated = []
+    seen = set()
+    for e in db.query("SELECT e.memory_id, e.event, e.actor, e.detail, e.created_at FROM memory_events e "
+                      "JOIN memories m ON m.id=e.memory_id WHERE e.created_at>? AND e.created_at<=? "
+                      "AND e.event IN ('delete','supersede','invalidate','archive') "
+                      "AND (m.topic=? OR m.scope='user') ORDER BY e.created_at", (prev["updated_at"], t0, ctx.topic)):
+        if e["memory_id"] in seen:
+            continue
+        seen.add(e["memory_id"])
+        m = mem.get(e["memory_id"])
+        if not m:
+            continue
+        det = e["detail"]
+        if isinstance(det, str):
+            try:
+                det = json.loads(det or "{}")
+            except ValueError:
+                det = {}
+        det = det if isinstance(det, dict) else {}
+        leaked = m["id"] in recalled_ids or (len(m["content"]) >= 8 and m["content"] in recalled_text)
+        invalidated.append({"id": m["id"], "kind": m["kind"], "content": m["content"][:120],
+                            "event": INVALID_EVENTS.get(e["event"], e["event"]), "actor": e["actor"],
+                            "reason": det.get("reason") or m.get("note"), "status": m["status"],
+                            "replacement": (mem.get(m["superseded_by"]) or {}).get("content", "")[:120]
+                            if m.get("superseded_by") else None,
+                            "replacement_recalled": bool(m.get("superseded_by") and m["superseded_by"] in recalled_ids),
+                            "recalled": leaked})
+    # 本次任务中被更正的旧结论：做一次不计数的召回，确认下次不会再出现
+    corr_leak = []
+    if mrep.get("corrections"):
+        after = mem.recall(ctx.user_id, ctx.topic, "research", 4000, record_use=False)
+        corr_leak = [c["old_id"] for c in mrep["corrections"] if c.get("old_id") in after["used"]]
+    prev_delivery = pst.get("delivery_id")
+    pd = mem.get(prev_delivery) if prev_delivery else None
+    out.update(
+        prev={"id": prev["id"], "at": prev["updated_at"],
+              "docs": len(prev_doc_ids), "delivery": prev_delivery,
+              "delivery_status": pd["status"] if pd else None, "delivery_note": pd.get("note") if pd else None},
+        docs={"repeated": len(repeated), "updated": len(updated), "new": len(new), "reprints": len(reprints),
+              "repeated_titles": [title(d) for d in repeated[:5]],
+              "updated_items": [{"id": d["id"], "title": title(d)} for d in updated[:5]],
+              "new_items": [{"id": d["id"], "title": title(d)} for d in new[:8]]},
+        corrections=mrep.get("corrections", []),
+        recalled=len(recalled_ids), recalled_lines=(mrep.get("recalled") or [])[:12],
+        pref_changes=pref_changes, invalidated=invalidated,
+        checks=[
+            {"name": "重复资料不重复入库", "ok": True,
+             "detail": f"上次已有的 {len(repeated)} 篇识别为重复，只做比对" if repeated else "本次没有和上次重复的资料"},
+            {"name": "旧结论被更正", "ok": not corr_leak,
+             "detail": (f"更正 {len(mrep.get('corrections') or [])} 条；重新召回一次核对："
+                        + ("旧结论不再出现，召回的是更正后的内容" if not corr_leak else f"仍召回到旧结论 {corr_leak}"))
+             if mrep.get("corrections") else "本次没有发现来源更正"},
+            {"name": "失效记忆不再召回", "ok": not any(x["recalled"] for x in invalidated),
+             "detail": (f"两次任务之间失效 {len(invalidated)} 条，"
+                        f"{'全部未被召回' if not any(x['recalled'] for x in invalidated) else '仍有被召回的，需要检查'}")
+             if invalidated else "两次任务之间没有删除或更正记忆"},
+        ])
+    return out
+
+
 def report(ctx):
     st = ctx.state
     docs = _task_docs(ctx.task_id)
@@ -1437,6 +1579,7 @@ def report(ctx):
         "covered_at": st.get("covered_at"), "dropped_after_cover": st.get("dropped_after_cover", 0),
         "domains": st.get("domains"), "source_ids": st.get("source_ids"),
         "memory": memory_report,
+        "compare": _compare(ctx, docs, memory_report),
         "total_docs": len(docs),
         "unique_docs": sum(1 for d in docs if not d["duplicate_of"]),
         "events": len({d["event_id"] for d in docs}),

@@ -215,3 +215,58 @@ class DeliveryArchiveTest(CollectBase):
         row = next(r for r in mem.list_memories("user", kind="preference") if r["id"] == m)
         self.assertTrue(row["invalid_value"])
         self.assertEqual(row["suggest"]["value"], 5)
+
+
+class CompareAndDemoTest(MemoryTest):
+    """“与上次相比”和记忆验证演示：两次任务之间删除、更正记忆，第二次任务核对结果。"""
+
+    def test_compare_report(self):
+        t1, task1 = self.run_research()
+        self.assertTrue(task1["state"]["report"]["compare"]["first"])
+        drop = next(f for f in self.facts() if "64K 以上" in f["content"])
+        mem.delete(drop["id"], reason="测试删除")
+        other = next(f for f in self.facts() if f["id"] != drop["id"] and "宣称支持" not in f["content"])
+        fixed = mem.correct(other["id"], "用户更正后的内容", reason="测试更正")
+        mem.set_preference("default", "exclude", ["踩坑"])
+        self.expire_cache()
+        self.web.state.update(corrected=True, extra=True)
+        t2, task2 = self.run_research()
+        c = task2["state"]["report"]["compare"]
+        self.assertEqual(c["prev"]["id"], t1)
+        self.assertEqual(c["docs"]["new"], 1)
+        self.assertGreaterEqual(c["docs"]["repeated"], 1)
+        self.assertEqual(len(c["corrections"]), 1)
+        self.assertTrue(all(k["ok"] for k in c["checks"]), c["checks"])
+        inv = {x["id"]: x for x in c["invalidated"]}
+        self.assertIn(drop["id"], inv)
+        self.assertIn(other["id"], inv)
+        self.assertFalse(any(x["recalled"] for x in inv.values()))
+        self.assertTrue(inv[other["id"]]["replacement_recalled"])
+        self.assertIn(fixed["new"], task2["state"]["memory"]["used"])
+        ex = next(e for e in c["pref_effects"] if e["type"] == "exclude")
+        self.assertIn("排除", ex["effect"])
+        self.assertEqual([x["op"] for x in c["pref_changes"]], ["added"])
+
+    def test_demo_api_flow(self):
+        from app import memory_demo, replay
+        from app.server import create_app
+        cl = create_app().test_client()
+        self.assertEqual(cl.post("/api/demo/memory/run1").status_code, 400)     # 非回放模式拒绝
+        replay.STATE.update(enabled=True, web=self.web)
+        try:
+            tid = memory_demo.start_run(1)
+            self.assertEqual(run_task(tid), "done")
+            self.assertEqual(cl.post("/api/demo/memory/sample").status_code, 200)
+            st = cl.get("/api/demo/memory").json
+            self.assertIn("删除", [e["op"] for e in st["edits"]])
+            tid2 = memory_demo.start_run(2)
+            self.assertEqual(run_task(tid2), "done")
+            st = cl.get("/api/demo/memory").json
+            self.assertTrue(all(k["ok"] for k in st["compare"]["checks"]))
+            self.assertTrue(st["recall_now"]["dead"])
+            self.assertFalse(any(x["recalled"] for x in st["recall_now"]["dead"]))
+            r = cl.post("/api/demo/memory/reset").json
+            self.assertEqual(r["tasks"], 2)
+            self.assertIsNone(cl.get("/api/demo/memory").json["run1"])
+        finally:
+            replay.STATE.update(enabled=False, web=None)

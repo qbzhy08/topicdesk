@@ -433,3 +433,36 @@ button.linkish { background: none; color: var(--info); padding: 0; font-size: 12
   .src-tbl td.nowrap { white-space: normal; }
   .m-only { display: inline; color: var(--muted); }
 }
+
+/* 与上次相比 */
+.cmp { border-left: 3px solid var(--accent); }
+.cmp-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.cmp-head h3 { margin: 0; }
+.cmp-checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin: 12px 0; }
+.cmp-check { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; display: flex; flex-direction: column; gap: 2px; }
+.cmp-check.ok b { color: var(--ok); } .cmp-check.bad b { color: var(--accent); }
+.cmp-check small { color: var(--muted); }
+.cmp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 22px; }
+.cmp-sec h4 { margin: 10px 0 6px; }
+.cmp-sec s { color: var(--muted); }
+.cmp-nums { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 6px; }
+.cmp-nums div { display: flex; flex-direction: column; } .cmp-nums b { font-size: 20px; } .cmp-nums small { color: var(--muted); font-size: 12px; }
+.cmp-sec p, .cmp-sec li { overflow-wrap: anywhere; }
+@media (max-width: 760px) { .cmp-grid { grid-template-columns: 1fr; } .cmp-nums { grid-template-columns: repeat(2, 1fr); } }
+
+/* 记忆验证演示 */
+.demo-step { display: flex; gap: 14px; }
+.demo-step.dim { opacity: .55; }
+.demo-n { flex: none; width: 28px; height: 28px; border-radius: 50%; background: var(--ink); color: var(--paper);
+  display: grid; place-items: center; font-weight: 600; }
+.demo-b { flex: 1; min-width: 0; }
+.demo-b h3 { margin-top: 2px; }
+.demo-b > .card { margin: 10px 0 0; }
+.demo-fact { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 13px; flex-wrap: wrap; }
+.demo-fact > span:first-child { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.demo-fix { width: 100%; } .demo-fix input { flex: 1; min-width: 0; }
+.warn-card { border-left: 3px solid var(--warn); }
+.spin { display: inline-block; width: 10px; height: 10px; border: 2px solid var(--line); border-top-color: var(--accent);
+  border-radius: 50%; animation: rot .8s linear infinite; vertical-align: -1px; }
+@keyframes rot { to { transform: rotate(360deg); } }
+.detail-head a.btn { white-space: nowrap; align-self: flex-start; }
