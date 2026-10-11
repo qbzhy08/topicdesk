@@ -93,6 +93,7 @@ async function submitTask(e) {
     keywords: split(f.get("keywords")), en_keywords: split(f.get("en_keywords")),
     auto_translate: !!f.get("auto_translate"),
     sources: allChecked() ? undefined : f.getAll("src"), max_docs: Number(f.get("max_docs")), max_fetch: Number(f.get("max_fetch")),
+    days: Number(f.get("days")), min_relevance: Number(f.get("min_relevance")),
     hitl_on_block: !!f.get("hitl_on_block"), ...extra } : extra;
   try {
     const { id } = await api("/api/tasks", { method: "POST", body: { topic: f.get("topic"), graph, params, budget } });
@@ -159,7 +160,7 @@ function showTask(id) {
   el.querySelector("[data-act=resume]").onclick = () => act("resume");
   el.querySelector("[data-act=cancel]").onclick = () => act("cancel");
   el.querySelector("[data-act=rewind]").onclick = doRewind;
-  $("[data-f=docs-link]", el).href = `#/library?task=${id}`;
+  $("[data-f=docs-link]", el).href = `#/library?task=${id}&min_rel=0.4&sort=relevance&hide_dup=1`;
   poll();
 }
 
@@ -252,6 +253,7 @@ function renderReport(rep, state) {
       <p class="chips">${chips(rep.by_kind, KIND)}</p>
       ${rep.memory ? memoryReport(rep.memory) : ""}
       ${rep.domains ? `<p class="small">主题领域：${rep.domains.map((d) => DOMAIN_NAME[d] || d).join("、")}；选用来源 ${rep.source_ids?.length || 0} 个：${(rep.source_ids || []).map((id) => esc(sourcesCache.find((x) => x.id === id)?.name || id)).join("、")}</p>` : ""}
+      ${rep.quality ? qualityReport(rep.quality) : ""}
       <h4>覆盖矩阵</h4>${covTable(rep.coverage)}
       ${rep.covered_at ? `<p class="small">在第 ${rep.covered_at.docs} 篇资料时覆盖了全部子问题，之后只做收尾${rep.dropped_after_cover ? `，放弃了 ${rep.dropped_after_cover} 个低价值行动` : ""}。</p>` : ""}
       ${rep.gaps?.length ? `<h4>缺口补检</h4><table class="tbl"><tr><th>子问题</th><th>结果</th><th>用时</th><th>做了什么</th></tr>${rep.gaps.map((g) => `
@@ -363,6 +365,7 @@ async function showLibrary(qs) {
       <select name="source_id"><option value="">全部来源</option>${sourcesCache.map((s) => `<option value="${s.id}" ${p.source_id === s.id ? "selected" : ""}>${esc(s.name)}</option>`).join("")}</select>
       <select name="content_kind"><option value="">全文/节选/摘要</option>${Object.entries(KIND).map(([k, v]) => `<option value="${k}" ${p.content_kind === k ? "selected" : ""}>${v}</option>`).join("")}</select>
       <select name="sort"><option value="time">按发布时间</option><option value="fetched" ${p.sort === "fetched" ? "selected" : ""}>按采集时间</option><option value="relevance" ${p.sort === "relevance" ? "selected" : ""}>按相关度</option></select>
+      <select name="min_rel"><option value="">全部相关度</option><option value="0.4" ${p.min_rel === "0.4" ? "selected" : ""}>相关度 ≥ 0.4</option><option value="0.7" ${p.min_rel === "0.7" ? "selected" : ""}>相关度 ≥ 0.7</option></select>
       <label class="opt"><input type="checkbox" name="hide_dup" value="1" ${p.hide_dup ? "checked" : ""}> 隐藏重复</label>
       <input name="q" placeholder="搜索标题/正文" value="${esc(p.q || "")}">
       ${p.task ? `<input type="hidden" name="task" value="${esc(p.task)}">` : ""}
@@ -382,6 +385,24 @@ async function showLibrary(qs) {
   $("#doc-list").innerHTML = rows.length ? `<p class="small">${rows.length} 条</p>` + rows.map(docRow).join("") : `<p class="empty">没有资料</p>`;
 }
 
+function qualityReport(q) {
+  const f = q.fresh || {}, r = q.relevance || {}, j = q.judge || {};
+  return `<h4>资料质量</h4>
+    <p class="small"><b>时效</b>（新闻/社区窗口 ${q.window_days} 天，论文/仓库 ${q.academic_days} 天）：
+      7 天内 ${f["7d"] || 0} · 30 天内 ${f["30d"] || 0} · 窗口内更早 ${f.window || 0} · 窗口外背景 ${f.older || 0} · 无日期 ${f.undated || 0}；
+      检索时已过滤超出窗口的 ${q.dropped_old || 0} 条</p>
+    <p class="small"><b>相关度</b>（门槛 ${q.min_relevance}，平均 ${q.avg_relevance ?? "—"}）：
+      高 ≥0.7 ${r.high || 0} · 中 ${r.mid || 0} · 低于门槛 ${r.low || 0}（不进交付列表）；交付 ${q.delivered} 篇。
+      ${j.by === "llm" ? `大模型复核 ${j.judged} 篇：${j.demoted} 篇判为关键词巧合被降级，${j.promoted} 篇被升级。` : "未配置大模型，仅用规则相关度。"}</p>`;
+}
+
+function relTag(d) {
+  if (d.relevance == null) return "";
+  const v = Number(d.relevance);
+  const cls = v >= 0.7 ? "rel-hi" : v >= 0.4 ? "rel-mid" : "rel-lo";
+  return `<span class="tag ${cls}" title="${esc(d.judge_reason || "规则相关度")}">相关 ${v.toFixed(2)}${d.judge_reason ? " · " + esc(d.judge_reason) : ""}</span>`;
+}
+
 function docRow(d) {
   const src = sourcesCache.find((s) => s.id === d.source_id);
   return `<a class="doc-row ${d.duplicate_of ? "dup" : ""}" href="#/doc/${d.id}">
@@ -389,6 +410,7 @@ function docRow(d) {
       <small>${esc(src?.name || d.source_id)} · ${esc(d.author || "")} · 发布 ${fmtTime(d.published_at)} · 采集 ${fmtTime(d.fetched_at)}</small></div>
     <div class="doc-tags">
       <span class="tag nv-${d.novelty}">${NOVELTY[d.novelty] || d.novelty}</span>
+      ${relTag(d)}
       <span class="tag">${KIND[d.content_kind] || d.content_kind} ${d.chars ?? 0} 字</span>
       ${d.version > 1 ? `<span class="tag">v${d.version}</span>` : ""}
       ${d.primary_src ? `<span class="tag pri">一手</span>` : ""}

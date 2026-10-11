@@ -46,6 +46,8 @@
         <summary>来源、预算与高级参数</summary>
         <div class="src-checks" id="src-checks"></div>
         <div class="grid2">
+          <label>时间范围<select name="days"><option value="7">近 7 天</option><option value="30">近 30 天</option><option value="90" selected>近 90 天</option><option value="180">近半年</option><option value="365">近一年</option></select></label>
+          <label>相关度门槛<select name="min_relevance"><option value="0.3">宽松 0.3</option><option value="0.4" selected>标准 0.4</option><option value="0.55">严格 0.55</option></select></label>
           <label>资料上限<input name="max_docs" type="number" value="40"></label>
           <label>抓全文上限<input name="max_fetch" type="number" value="15"></label>
           <label>最多步数<input name="max_steps" type="number" value="150"></label>

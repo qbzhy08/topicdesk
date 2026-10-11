@@ -186,3 +186,12 @@ code { font-family: var(--mono); font-size: 12px; background: var(--paper); padd
 
 .kw-bar { display: flex; justify-content: space-between; align-items: center; margin: -4px 0 2px; }
 .kw-note { margin: 0 0 10px; line-height: 1.5; }
+
+.tag.rel-hi { background: #e3f2e6; color: #1f6b33; }
+.tag.rel-mid { background: #fff4d6; color: #7a5a00; }
+.tag.rel-lo { background: #f6e0e0; color: #8a2a2a; }
+@media (prefers-color-scheme: dark) {
+  .tag.rel-hi { background: #1e3a25; color: #9bd8a8; }
+  .tag.rel-mid { background: #3d3216; color: #f0d27a; }
+  .tag.rel-lo { background: #3f2222; color: #f0a5a5; }
+}

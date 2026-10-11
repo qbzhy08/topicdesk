@@ -8,9 +8,12 @@ from . import sources
 
 
 @tool("source_search", "在指定信息源中按主题检索，返回统一结构的资料条目")
-def source_search(source_id: str, query: str, limit: int = 15, terms: list | None = None):
-    items = sources.search(source_id, query, limit=limit, terms=terms)
-    return {"source_id": source_id, "query": query, "count": len(items), "items": items}
+def source_search(source_id: str, query: str, limit: int = 15, terms: list | None = None,
+                  since: float | None = None):
+    stats = {}
+    items = sources.search(source_id, query, limit=limit, terms=terms, since=since, stats=stats)
+    return {"source_id": source_id, "query": query, "count": len(items), "items": items,
+            "dropped_old": stats.get("dropped_old", 0)}
 
 
 @tool("page_fetch", "抓取单个网页并抽取正文、元数据和候选配图；静态页正文不足时用浏览器渲染")

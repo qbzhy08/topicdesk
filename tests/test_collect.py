@@ -136,7 +136,7 @@ class StoreTest(CollectBase):
 
 class ResearchGraphTest(CollectBase):
     PARAMS = {"keywords": ["长上下文"], "en_keywords": ["long context LLM"], "no_llm": True,
-              "max_docs": 30,
+              "max_docs": 30, "days": 365,
               "sources": ["ithome", "36kr", "sspai", "qbitai", "juejin", "leiphone", "arxiv", "hn", "github"]}
 
     def _run(self, params=None):
@@ -449,3 +449,71 @@ class FetchCostTest(CollectBase):
         art = sources.fetch_page("https://huggingface.co/spaces/snap-stanford/stark-leaderboard")
         self.assertEqual(called, [])
         self.assertFalse(art["via_browser"])
+
+
+class QualityTest(CollectBase):
+    """时效：默认 90 天窗口过滤旧资料；相关性：短语匹配、泛词不计分、零散命中封顶。"""
+
+    def test_time_window_filters_old_items(self):
+        tid = create_task("research", "开源大模型 长上下文 评测",
+                          params={"no_llm": True, "max_docs": 30, "keywords": ["长上下文"],
+                                  "en_keywords": ["long context LLM"], "sources": ["36kr", "hn"]})
+        self.assertEqual(run_task(tid), "done")
+        task = db.query_one("SELECT * FROM tasks WHERE id=?", (tid,))
+        self.assertIsNone(db.query_one("SELECT id FROM documents WHERE canonical_url='https://36kr.com/p/8000'"))
+        q = task["state"]["report"]["quality"]
+        self.assertGreaterEqual(q["dropped_old"], 1)
+        self.assertEqual(q["window_days"], 90)
+        hn_calls = [c for c in self.web.calls if c.startswith("https://hn.algolia.com/")]
+        self.assertTrue(all("numericFilters=created_at_i" in c for c in hn_calls))
+
+    def test_relevance_v2(self):
+        from app.graphs.research import _rel
+        st = {"plan": {"terms_zh": ["长上下文", "大模型"], "queries_en": ["long context LLM"]}}
+        self.assertGreaterEqual(_rel(st, "Long-context evals for open LLMs are misleading"), 0.85)
+        # 只零散出现 long、context，讲的是别的事
+        scattered = _rel(st, "A long weekend", "The context of the policy debate was about trade and LLM chips.")
+        self.assertLess(scattered, 0.4)
+        # 只命中泛词“大模型”不算相关
+        self.assertLess(_rel(st, "大模型价格战再起", "多家厂商下调大模型 API 价格"), 0.4)
+        self.assertGreaterEqual(_rel(st, "长上下文评测踩坑", ""), 0.9)
+        self.assertGreaterEqual(_rel(st, "如何评测", "本文讨论长上下文能力"), 0.6)
+        st2 = {"plan": {"terms_zh": [], "queries_en": ["stock trend prediction"]}}
+        self.assertGreaterEqual(_rel(st2, "Predicting stock trends with transformers"), 0.4)
+
+    def test_llm_judge_demotes_keyword_coincidence(self):
+        from app import llm
+
+        def fake_chat(messages, **kw):
+            text = messages[-1]["content"]
+            if "逐条判断与主题的相关程度" not in text:
+                raise RuntimeError("only judge in this test")
+            scores = []
+            for line in text.splitlines():
+                m = __import__("re").match(r"\[(\d+)\] (.*)", line)
+                if m:
+                    bad = "Paywalled" in m.group(2)
+                    scores.append({"i": int(m.group(1)), "score": 0 if bad else 3,
+                                   "reason": "关键词巧合" if bad else "直接讨论长上下文评测"})
+            data = {"scores": scores}
+            return {"content": json.dumps(data), "data": data, "usage": {}, "_cost": 0}
+
+        old = (llm.available, llm.chat)
+        llm.available, llm.chat = (lambda: True), fake_chat
+        try:
+            tid = create_task("research", "开源大模型 长上下文 评测",
+                              params={"max_docs": 30, "keywords": ["长上下文"], "en_keywords": ["long context LLM"],
+                                      "sources": ["hn", "github", "arxiv"], "auto_translate": False})
+            self.assertEqual(run_task(tid), "done")
+        finally:
+            llm.available, llm.chat = old
+        rep = db.query_one("SELECT state FROM tasks WHERE id=?", (tid,))["state"]["report"]
+        q = rep["quality"]
+        self.assertEqual(q["judge"]["by"], "llm")
+        self.assertGreaterEqual(q["judge"]["judged"], 3)
+        pw = db.query_one("SELECT id, meta FROM documents WHERE url='https://paywall.example.com/a'")
+        self.assertEqual(pw["meta"]["judge"]["score"], 0)
+        self.assertLess(pw["meta"]["relevance"], 0.4)
+        self.assertNotIn(pw["id"], rep["delivered_docs"])
+        blog = db.query_one("SELECT meta FROM documents WHERE url='https://blog.example.com/long-context'")
+        self.assertGreaterEqual(blog["meta"]["relevance"], 0.7)

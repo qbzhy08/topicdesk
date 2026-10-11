@@ -30,8 +30,8 @@ from ..collect.dedup import canonical_url, parse_date
 from ..collect.fetch import FetchError
 from ..collect.images import store_images
 from ..keywords import is_english
-from ..collect.sources import (DOMAINS, guess_domains, is_primary, list_sources, relevance,
-                                source_domains, topic_terms)
+from ..collect.sources import (DOMAINS, guess_domains, in_window, is_primary, list_sources,
+                                source_domains, topic_terms, window_start)
 from ..collect.store import article_to_item, topic_last_run, upsert_document
 from ..harness import END, Graph, register_graph
 
@@ -48,6 +48,7 @@ DEFAULT_ASPECTS = [
 ]
 MAX_FOLLOW_PER_DOC = 2
 API_SOURCES = ("arxiv", "hn", "github", "juejin", "wallstcn", "openalex", "pubmed")
+ACADEMIC_SOURCES = ("arxiv", "openalex", "pubmed", "github")
 
 
 # ---------------------------------------------------------------- 工具函数
@@ -92,20 +93,75 @@ def _task_docs(task_id: str) -> list[dict]:
                     "meta LIKE ?", (f"%{task_id}%",))
 
 
-def _rel(st: dict, *texts: str) -> float:
-    """中英文分别计算相关度取最大：中文看核心词，英文看任一检索式的词覆盖率。"""
+GENERIC = {"llm", "llms", "ai", "model", "models", "language", "large", "open", "source", "new", "based",
+           "using", "learning", "deep", "neural", "network", "networks", "data", "system", "systems", "method",
+           "the", "and", "for", "with", "大模型", "模型", "人工智能", "开源", "技术", "方法", "研究", "最新", "进展"}
+
+
+def _norm(t: str) -> str:
+    return re.sub(r"[-_/]+", " ", (t or "").lower())
+
+
+def _rel_zh(terms: list[str], title: str, body: str) -> float:
+    strong = [x for x in terms if x.lower() not in GENERIC] or terms
+    if not strong:
+        return 0.0
+    score = 0.0
+    for t in strong:
+        tl = t.lower()
+        if tl in title:
+            score += 1
+        elif tl in body:
+            score += 0.7
+        elif len(tl) >= 4:
+            g = {tl[i:i + 2] for i in range(len(tl) - 1)}
+            cov = sum(x in title or x in body for x in g) / len(g)
+            score += 0.5 * cov if cov >= 0.6 else 0
+    return score / len(strong)
+
+
+def _rel_en(q: str, title: str, body: str) -> float:
+    words = [w for w in re.split(r"[^a-z0-9]+", _norm(q)) if len(w) > 1]
+    strong = [w for w in words if w not in GENERIC] or words
+    if not strong:
+        return 0.0
+    phrase = " ".join(words)
+    if phrase in title:
+        return 1.0
+    if phrase in body:
+        return 0.85
+    stem = lambda w: re.escape(w[:5] if len(w) > 5 else w)   # 词干：prediction/predicting、trend/trends
+    sc = 0.0
+    for w in strong:
+        pat = rf"\b{stem(w)}"
+        sc += 1 if re.search(pat, title) else 0.6 if re.search(pat, body) else 0
+    sc = 0.9 * sc / len(strong)
+    if len(strong) >= 2:
+        # 关键词只是零散出现、没有任何两个相邻（如 long ... context 出现在不相干的句子里）：判为低相关
+        adj = any(re.search(rf"\b{stem(a)}\w*\W+(\w+\W+)?{stem(b)}", title + " " + body)
+                  for a, b in zip(strong, strong[1:]))
+        if not adj:
+            sc = min(sc, 0.35)
+    return sc
+
+
+def _rel(st: dict, title: str, body: str = "") -> float:
+    """相关度 0-1：核心词按短语匹配，标题权重高于正文，泛词（LLM、大模型…）不计分，零散命中封顶。"""
     plan = st.get("plan") or {}
-    best = relevance(plan.get("terms_zh") or [], *texts) if plan.get("terms_zh") else 0.0
+    t, b = _norm(title), _norm((body or "")[:8000])
+    best = _rel_zh(plan.get("terms_zh") or [], t, b) if plan.get("terms_zh") else 0.0
     for q in plan.get("queries_en") or []:
-        words = [w for w in re.split(r"\W+", q) if len(w) > 2]
-        if words:
-            best = max(best, relevance(words, *texts))
-    return best
+        best = max(best, _rel_en(q, t, b))
+    return round(min(best, 1.0), 3)
+
+
+def _min_rel(st: dict) -> float:
+    return st.get("min_rel", 0.4)
 
 
 def _coverage(ctx) -> dict:
     docs = [d for d in _task_docs(ctx.task_id) if not d["duplicate_of"] and
-            ((d["meta"] or {}).get("relevance") is None or (d["meta"] or {}).get("relevance") >= 0.3)]
+            ((d["meta"] or {}).get("relevance") is None or (d["meta"] or {}).get("relevance") >= _min_rel(ctx.state))]
     cov = {}
     for a in ctx.state["aspects"]:
         hits = [d["id"] for d in docs if _doc_hits(d, a)]
@@ -168,6 +224,12 @@ def plan(ctx):
     st = ctx.state
     st.update(queue=[], done=[], failures=[], source_fail={}, disabled=[], zero=[],
               refine_round=0, fetches=0, follow_count={}, saved=[], stats={})
+    # 时间窗口：新闻/社区类来源默认 90 天；论文/仓库类默认放宽到 4 倍（至少 1 年），基础论文不至于被全部滤掉
+    days = int(p.get("days") or 90)
+    ac_days = int(p.get("academic_days") or max(365, days * 4))
+    st["window"] = {"days": days, "academic_days": ac_days,
+                    "since": window_start(days), "since_academic": window_start(ac_days)}
+    st["min_rel"] = float(p.get("min_relevance", 0.4))
     last_run = topic_last_run(ctx.topic, exclude_task=ctx.task_id)
     st["last_run_at"] = last_run
     known = db.query_one("SELECT COUNT(*) n FROM documents WHERE topic=? AND status='active'",
@@ -436,7 +498,7 @@ def decide(ctx):
     pending_initial = any(a.get("initial") and a["type"] == "search" for a in queue)
     if n_docs >= max_docs and not gaps and not pending_fetch and not pending_initial:
         ctx.think(f"已收集 {n_docs} 篇（上限 {max_docs}），覆盖矩阵：{cov_txt}。覆盖足够、全文补抓完成，停止检索")
-        return "images"
+        return "judge"
     if n_docs >= max_docs:
         # 达到上限后不再扩量：只补全文，以及还没轮到的来源各查一次（保证来源多样性）
         queue = [a for a in queue if a["type"] == "fetch" or a.get("initial") or a.get("gap")]
@@ -464,7 +526,7 @@ def decide(ctx):
             ctx.think(f"覆盖矩阵：{cov_txt}。所有子问题已覆盖，收尾补抓完成"
                       + (f"，放弃剩余 {st.get('dropped_after_cover', 0)} 个低价值行动" if st.get("dropped_after_cover") else "")
                       + "，停止检索")
-            return "images"
+            return "judge"
         if dropped > 0:
             ctx.think(f"所有子问题已覆盖，进入收尾：只保留 {len(initial)} 个未查来源和 {len(valuable)} 篇高价值全文补抓，"
                       f"放弃 {dropped} 个低价值行动")
@@ -564,6 +626,64 @@ def decide(ctx):
         gave_up.append(log["name"])
     ctx.think(f"覆盖：{cov_txt}。" + (f"缺口 {gave_up} 定向补检后仍无足够资料，不再重复检索，在报告中标注“暂无足够资料”"
                                      if gaps else "覆盖足够，停止检索"))
+    return "judge"
+
+
+# ---------------------------------------------------------------- 节点：judge（大模型复核相关度）
+
+JUDGE_PROMPT = """主题：「{topic}」。需要覆盖的子问题：{aspects}。
+下面是检索到的资料（编号、标题、来源、日期、开头）。请逐条判断与主题的相关程度：
+3=直接讨论该主题的核心内容；2=明显相关，涉及某个子问题；1=只是顺带提到；0=无关或只是关键词巧合。
+reason 用不超过 20 个字说明理由。只输出 JSON：{{"scores": [{{"i": 0, "score": 2, "reason": "..."}}]}}
+{items}"""
+
+
+def judge(ctx):
+    """规则相关度只看字面；配置了大模型时，对相关度靠前的资料做一次批量复核，修正“关键词巧合”。
+    最终相关度 = 0.4 × 规则分 + 0.6 × 大模型分/3。"""
+    st, p = ctx.state, ctx.params
+    st["judge"] = {"by": "rules", "judged": 0, "demoted": 0, "promoted": 0}
+    if not llm.available() or p.get("no_llm") or p.get("no_judge"):
+        return "images"
+    docs = [d for d in _task_docs(ctx.task_id) if not d["duplicate_of"] and
+            ((d["meta"] or {}).get("relevance") or 0) >= 0.2]
+    docs.sort(key=lambda d: -((d["meta"] or {}).get("relevance") or 0))
+    docs = docs[:p.get("judge_top", 30)]
+    names = "、".join(a["name"] for a in st["aspects"])
+    floor = _min_rel(st)
+    for i0 in range(0, len(docs), 15):
+        chunk = docs[i0:i0 + 15]
+        lines = []
+        for i, d in enumerate(chunk):
+            head = re.sub(r"\s+", " ", d["text"] or "")[:200]
+            lines.append(f"[{i}] {d['title'] or ''} | {d['source_id']} | {(d['published_at'] or '')[:10]} | {head}")
+        try:
+            res = ctx.tool("llm", messages=[{"role": "user", "content": JUDGE_PROMPT.format(
+                topic=ctx.topic, aspects=names, items="\n".join(lines))}])["data"]
+        except Exception as e:
+            ctx.think(f"大模型复核失败（{str(e)[:60]}），保留规则相关度")
+            break
+        for x in res.get("scores") or []:
+            try:
+                d = chunk[int(x["i"])]
+                sc = max(0, min(3, int(x["score"])))
+            except (KeyError, ValueError, IndexError, TypeError):
+                continue
+            meta = dict(d["meta"] or {})
+            lex = meta.get("relevance") or 0
+            final = round(0.4 * lex + 0.6 * sc / 3, 3)
+            meta.update(rel_lex=lex, relevance=final, judge={"score": sc, "reason": str(x.get("reason", ""))[:40],
+                                                               "task": ctx.task_id})
+            db.update("documents", "id", d["id"], {"meta": meta})
+            st["judge"]["judged"] += 1
+            if lex >= floor > final:
+                st["judge"]["demoted"] += 1
+            elif final >= floor > lex:
+                st["judge"]["promoted"] += 1
+    st["judge"]["by"] = "llm"
+    ctx.think(f"大模型复核 {st['judge']['judged']} 篇的相关度：{st['judge']['demoted']} 篇判为关键词巧合（降到门槛以下），"
+              f"{st['judge']['promoted']} 篇字面不像但实际相关（升到门槛以上）")
+    st["coverage"] = _coverage(ctx)
     return "images"
 
 
@@ -664,6 +784,9 @@ def _after_search(ctx, a, status, res):
             return
         raise res
     items = res["items"]
+    if res.get("dropped_old"):
+        st["stats"]["dropped_old"] = st["stats"].get("dropped_old", 0) + res["dropped_old"]
+        ctx.observe(f"{a['source']}「{a['query']}」有 {res['dropped_old']} 条超出时间窗口，已过滤")
     if not items:
         st["zero"].append(a["key"])
         ctx.observe(f"{a['source']}「{a['query']}」无相关结果")
@@ -691,8 +814,9 @@ def _after_search(ctx, a, status, res):
         if it.get("relevance") is None:
             it["relevance"] = _rel(st, it.get("title") or "", it.get("summary") or "")
             if gap_words:     # 定向检索的结果按该缺口的检索词判断相关度（主检索式的词未必出现）
-                it["relevance"] = max(it["relevance"],
-                                      relevance(gap_words, it.get("title") or "", it.get("summary") or ""))
+                t, b = _norm(it.get("title") or ""), _norm(it.get("summary") or "")
+                g = _rel_en(a["query"], t, b) if a["query"].isascii() else _rel_zh(gap_words, t, b)
+                it["relevance"] = max(it["relevance"], round(g, 3))
         r = _save(ctx, it, "api" if a["source"] in API_SOURCES else "rss")
         k = r["action"] + ("/" + r["novelty"] if r["action"] == "new" else "")
         counts[k] = counts.get(k, 0) + 1
@@ -761,8 +885,11 @@ def act(ctx):
     for a in batch:
         st["done"].append(a["key"])
         if a["type"] == "search":
+            w = st.get("window") or {}
+            since = w.get("since_academic") if a["source"] in ACADEMIC_SOURCES else w.get("since")
             calls.append(("source_search", dict(source_id=a["source"], query=a["query"],
-                                                limit=p.get("per_search", 15), terms=a.get("terms"))))
+                                                limit=p.get("per_search", 15), terms=a.get("terms"),
+                                                since=since)))
         else:
             st["fetches"] += 1
             calls.append(("page_fetch", dict(url=a["url"], mode=a.get("mode", "auto"))))
@@ -837,7 +964,7 @@ def remember(ctx):
     docs = [d for d in _task_docs(ctx.task_id) if not d["duplicate_of"] and d["id"] not in seen_docs
             and (d["content_kind"] in ("full", "excerpt") or
                  ((d["meta"] or {}).get("primary") and len(d["text"] or "") >= 150))   # 论文摘要也算
-            and ((d["meta"] or {}).get("relevance") or 0) >= 0.3]
+            and ((d["meta"] or {}).get("relevance") or 0) >= _min_rel(ctx.state)]
     # 更新过的资料优先，其次一手来源和相关度
     docs.sort(key=lambda d: (d["novelty"] != "update", not (d["meta"] or {}).get("primary"),
                              -((d["meta"] or {}).get("relevance") or 0)))
@@ -913,8 +1040,35 @@ def report(ctx):
         omissions.append(f"暂无足够资料的子问题（已定向补检，不再重复检索）：{gaps}")
     mstats = st.get("mem_stats", {})
     fact_ids = st.get("mem_facts", [])
-    top_docs = [d["id"] for d in sorted(docs, key=lambda d: -((d["meta"] or {}).get("relevance") or 0))
-                if not d["duplicate_of"]][:30]
+    floor = _min_rel(st)
+    rel_of = lambda d: (d["meta"] or {}).get("relevance")  # noqa: E731
+    top_docs = [d["id"] for d in sorted(docs, key=lambda d: -(rel_of(d) or 0))
+                if not d["duplicate_of"] and (rel_of(d) is None or rel_of(d) >= floor)][:30]
+    # ---- 资料质量：时效分布 + 相关度分布 + 过滤了多少
+    now = datetime.now(timezone.utc)
+    w = st.get("window") or {"days": 90, "academic_days": 365}
+    fresh = {"7d": 0, "30d": 0, "window": 0, "older": 0, "undated": 0}
+    uniq = [d for d in docs if not d["duplicate_of"]]
+    for d in uniq:
+        dt = parse_date(d["published_at"])
+        if not dt:
+            fresh["undated"] += 1
+            continue
+        age = (now - dt).days
+        fresh["7d" if age <= 7 else "30d" if age <= 30 else "window" if age <= w["days"] else "older"] += 1
+    rels = [rel_of(d) for d in uniq if rel_of(d) is not None]
+    quality = {
+        "window_days": w["days"], "academic_days": w["academic_days"],
+        "dropped_old": st["stats"].get("dropped_old", 0), "fresh": fresh,
+        "relevance": {"high": sum(r >= 0.7 for r in rels), "mid": sum(floor <= r < 0.7 for r in rels),
+                      "low": sum(r < floor for r in rels)},
+        "min_relevance": floor, "delivered": len(top_docs), "judge": st.get("judge"),
+        "avg_relevance": round(sum(rels) / len(rels), 3) if rels else None,
+    }
+    if quality["relevance"]["low"]:
+        omissions.append(f"{quality['relevance']['low']} 篇相关度低于 {floor}，已从交付列表剔除（资料库里仍可查看）")
+    if fresh["older"]:
+        omissions.append(f"{fresh['older']} 篇超出 {w['days']} 天窗口（论文/仓库或追溯的一手来源），作为背景资料")
     if not st.get("delivery_id"):
         summary = (f"检索交付 {len(docs)} 篇（新进展 {sum(1 for d in docs if d['novelty'] == 'new')}、"
                    f"更新 {sum(1 for d in docs if d['novelty'] == 'update')}），涉及事实 {len(fact_ids)} 条")
@@ -933,6 +1087,7 @@ def report(ctx):
                   for f in (mem.get(i) for i in fact_ids) if f][:30],
     }
     st["report"] = {
+        "quality": quality, "delivered_docs": top_docs,
         "covered_at": st.get("covered_at"), "dropped_after_cover": st.get("dropped_after_cover", 0),
         "domains": st.get("domains"), "source_ids": st.get("source_ids"),
         "memory": memory_report,
@@ -954,7 +1109,8 @@ def report(ctx):
 
 register_graph(Graph(
     name="research", start="plan", on_budget="images",
-    nodes=dict(plan=plan, decide=decide, act=act, images=images, remember=remember, report=report),
+    nodes=dict(plan=plan, decide=decide, act=act, judge=judge, images=images, remember=remember,
+               report=report),
 ))
 
 

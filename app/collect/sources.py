@@ -15,6 +15,7 @@ RSS 只能拿到最新几十条，按主题关键词过滤；这是覆盖范围�
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import os
 import re
 from urllib.parse import quote, urlsplit
@@ -22,7 +23,7 @@ from urllib.parse import quote, urlsplit
 from bs4 import BeautifulSoup
 
 from .. import db
-from .dedup import iso
+from .dedup import iso, parse_date
 from .extract import extract_article, html_to_text
 from .fetch import FetchError, fetcher
 
@@ -240,7 +241,7 @@ def _get_feed(url: str) -> tuple[str, str]:
         return r["content"].decode("utf-8", "replace"), "browser"
 
 
-def search_rss(source: dict, query: str, limit: int = 20, terms: list[str] | None = None) -> list[dict]:
+def search_rss(source: dict, query: str, limit: int = 20, terms: list[str] | None = None, **_) -> list[dict]:
     cfg = source["config"]
     use_search = bool(cfg.get("search_feed") and query)
     url = cfg["search_feed"].replace("{q}", quote(query)) if use_search else cfg["feed"]
@@ -307,9 +308,9 @@ def search_arxiv(source: dict, query: str, limit: int = 10, **_) -> list[dict]:
 
 # ---------------------------------------------------------------- Hacker News
 
-def search_hn(source: dict, query: str, limit: int = 15, **_) -> list[dict]:
+def search_hn(source: dict, query: str, limit: int = 15, since: float | None = None, **_) -> list[dict]:
     url = ("https://hn.algolia.com/api/v1/search?tags=story&hitsPerPage=" + str(limit) +
-           "&query=" + quote(query))
+           "&query=" + quote(query) + (f"&numericFilters=created_at_i>{int(since)}" if since else ""))
     r = fetcher.get(url, respect_robots=False, cache_ttl=1800)
     items = []
     for h in r.json().get("hits", []):
@@ -328,9 +329,10 @@ def search_hn(source: dict, query: str, limit: int = 15, **_) -> list[dict]:
 
 # ---------------------------------------------------------------- GitHub
 
-def search_github(source: dict, query: str, limit: int = 8, **_) -> list[dict]:
+def search_github(source: dict, query: str, limit: int = 8, since: float | None = None, **_) -> list[dict]:
+    q = query + (f" pushed:>{_day(since)}" if since else "")     # 只要窗口内仍在维护的仓库
     url = ("https://api.github.com/search/repositories?sort=stars&order=desc&per_page=" +
-           str(limit) + "&q=" + quote(query))
+           str(limit) + "&q=" + quote(q))
     headers = {"Accept": "application/vnd.github+json"}
     if os.environ.get("GITHUB_TOKEN"):
         headers["Authorization"] = "Bearer " + os.environ["GITHUB_TOKEN"]
@@ -341,10 +343,11 @@ def search_github(source: dict, query: str, limit: int = 8, **_) -> list[dict]:
         items.append({
             "url": repo["html_url"], "title": f"{repo['full_name']}: {desc}"[:200],
             "author": (repo.get("owner") or {}).get("login"),
-            "published_at": repo.get("created_at"),
+            "published_at": repo.get("pushed_at") or repo.get("created_at"),   # 时效看最近更新，而非创建时间
             "summary": desc, "text": desc, "content_kind": "summary", "images": [],
             "source_id": "github", "primary": True,
             "meta": {"stars": repo.get("stargazers_count"), "pushed_at": repo.get("pushed_at"),
+                     "created_at": repo.get("created_at"),
                      "license": (repo.get("license") or {}).get("spdx_id"),
                      "doc_type": "代码仓库"},
         })
@@ -433,9 +436,10 @@ def _openalex_abstract(inv: dict | None) -> str:
     return " ".join(w for _, w in pos)
 
 
-def search_openalex(source: dict, query: str, limit: int = 10, **_) -> list[dict]:
+def search_openalex(source: dict, query: str, limit: int = 10, since: float | None = None, **_) -> list[dict]:
     url = ("https://api.openalex.org/works?per_page=" + str(limit) + "&search=" + quote(query) +
-           "&filter=has_abstract:true&mailto=topicdesk@example.com")
+           "&filter=has_abstract:true" + (f",from_publication_date:{_day(since)}" if since else "") +
+           "&mailto=topicdesk@example.com")
     r = fetcher.get(url, respect_robots=False, cache_ttl=6 * 3600)
     items = []
     for w in r.json().get("results") or []:
@@ -454,10 +458,12 @@ def search_openalex(source: dict, query: str, limit: int = 10, **_) -> list[dict
 
 # ---------------------------------------------------------------- PubMed
 
-def search_pubmed(source: dict, query: str, limit: int = 10, **_) -> list[dict]:
+def search_pubmed(source: dict, query: str, limit: int = 10, since: float | None = None, **_) -> list[dict]:
     base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
     r = fetcher.get(base + "esearch.fcgi?db=pubmed&retmode=json&sort=relevance&retmax=" + str(limit) +
-                    "&term=" + quote(query), respect_robots=False, cache_ttl=6 * 3600)
+                    "&term=" + quote(query) +
+                    (f"&datetype=pdat&mindate={_day(since).replace('-', '/')}&maxdate=3000" if since else ""),
+                    respect_robots=False, cache_ttl=6 * 3600)
     ids = (r.json().get("esearchresult") or {}).get("idlist") or []
     if not ids:
         return []
@@ -497,7 +503,26 @@ SEARCHERS = {"rss": search_rss, "arxiv": search_arxiv, "hn": search_hn, "github"
              "pubmed": search_pubmed}
 
 
-def search(source_id: str, query: str, limit: int = 15, terms: list[str] | None = None) -> list[dict]:
+def _day(ts: float) -> str:
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
+
+
+def window_start(days: int) -> float:
+    """时间窗口起点，取整到当天 0 点（UTC），让同一天内的请求 URL 不变、能命中缓存。"""
+    d = datetime.now(timezone.utc) - timedelta(days=days)
+    return d.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+
+def in_window(published_at, since: float | None) -> bool:
+    """无日期的资料保留（无法判断），有日期的必须在窗口内。"""
+    if not since or not published_at:
+        return True
+    d = parse_date(published_at)
+    return d is None or d.timestamp() >= since
+
+
+def search(source_id: str, query: str, limit: int = 15, terms: list[str] | None = None,
+           since: float | None = None, stats: dict | None = None) -> list[dict]:
     src = db.query_one("SELECT * FROM sources WHERE id=?", (source_id,))
     if src is None:
         raise FetchError("bad_content", f"未知来源 {source_id}")
@@ -505,11 +530,16 @@ def search(source_id: str, query: str, limit: int = 15, terms: list[str] | None 
     if fn is None:
         raise FetchError("bad_content", f"来源 {source_id} 不支持搜索")
     try:
-        items = fn(src, query, limit, terms=terms)
+        items = fn(src, query, limit, terms=terms, since=since)
     except FetchError as e:
         record_health(source_id, False, e)
         raise
     record_health(source_id, True, n=len(items))
+    if since:     # 接口不支持时间过滤的来源（RSS、arXiv、掘金等）在这里统一过滤
+        kept = [it for it in items if in_window(it.get("published_at"), since)]
+        if stats is not None:
+            stats["dropped_old"] = len(items) - len(kept)
+        items = kept
     return items
 
 
