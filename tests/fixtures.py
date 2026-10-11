@@ -196,6 +196,46 @@ OPENALEX_JSON = json.dumps({"results": [
      "cited_by_count": 3}]})
 
 
+# ---------------------------------------------------------------- 社区平台（搜索 API / B站 / 搜狗微信）
+
+def _bocha_rows(site):
+    ts = (NOW - timedelta(days=1)).isoformat()
+    rows = {
+        "mp.weixin.qq.com": [
+            {"name": "极创工作室男娘成员公开访谈", "url": "https://mp.weixin.qq.com/s/aaa", "summary": "极创工作室在访谈中谈到男娘角色和成员分工", "siteName": "微信公众平台", "datePublished": ts},
+            {"name": "极创工作室男娘成员公开访谈全文", "url": "https://mp.weixin.qq.com/s/bbb", "summary": "转述极创工作室的男娘成员访谈", "siteName": "微信公众平台", "datePublished": ts}],
+        "xiaohongshu.com": [
+            {"name": "极创工作室男娘cos返图", "url": "https://www.xiaohongshu.com/explore/123", "summary": "极创工作室的男娘cos照片和粉丝讨论", "siteName": "小红书", "datePublished": ts}],
+        "douyin.com": [
+            {"name": "极创工作室男娘视频合集", "url": "https://www.douyin.com/video/456", "summary": "极创工作室男娘相关短视频", "siteName": "抖音", "datePublished": ts}],
+        "zhihu.com": [
+            {"name": "如何评价极创工作室的男娘角色？", "url": "https://www.zhihu.com/question/789", "summary": "知乎用户讨论极创工作室男娘角色设定", "siteName": "知乎", "datePublished": ts}],
+        "tieba.baidu.com": [],
+        None: [{"name": "极创工作室男娘话题汇总", "url": "https://fans.example.com/jichuang", "summary": "整理了极创工作室男娘话题的来龙去脉", "siteName": "粉丝站", "datePublished": ts}],
+    }
+    return rows.get(site, [])
+
+
+def wechat_page(acct, n):
+    return ("<html><head><meta property='og:title' content='极创工作室男娘成员公开访谈'></head><body>"
+            "<div class='rich_media_area_primary'><h1 id='activity-name'>极创工作室男娘成员公开访谈</h1>"
+            f"<a id='js_name'>{acct}</a><div id='js_content'>"
+            + "".join(f"<p>第{i}段：极创工作室在公开访谈里介绍了男娘角色的设定，以及成员各自负责的第{i + n}项工作。</p>" for i in range(14))
+            + "</div></div><script>var ct = \"" + str(int((NOW - timedelta(days=1)).timestamp())) + "\";</script></body></html>")
+
+
+BILI_SEARCH = {"code": 0, "message": "0", "data": {"result": [
+    {"type": "video", "bvid": "BV1xx411c7mD", "title": "<em class=\"keyword\">极创工作室</em>男娘幕后花絮",
+     "description": "极创工作室男娘角色的幕后制作和成员采访", "author": "极创工作室", "mid": 1,
+     "pubdate": int((NOW - timedelta(days=2)).timestamp()), "play": 52000, "like": 3100, "video_review": 800,
+     "tag": "极创工作室,男娘,幕后", "duration": "6:30", "pic": "//i0.hdslb.com/bfs/archive/cover.jpg"}]}}
+
+SOGOU_HTML = ("<html><body><ul class='news-list'><li><div class='txt-box'><h3><a href='/link?url=abc&amp;type=2'>"
+              "<em>极创工作室</em>男娘话题</a></h3><p class='txt-info'>公众号文章摘要：极创工作室男娘</p>"
+              "<div class='s-p'><span class='all-time-y2'>二次元观察</span><span class='s2'><script>document.write(timeConvert('"
+              + str(int((NOW - timedelta(days=3)).timestamp())) + "'))</script></span></div></div></li></ul></body></html>")
+
+
 class FakeWeb:
     def __init__(self):
         self.calls = []
@@ -227,6 +267,32 @@ class FakeWeb:
             if self.state["waf_36kr"]:
                 return 200, {"content-type": "text/html"}, WAF_PAGE.encode(), url
             return 200, X, kr_feed().encode(), url
+        if url == "https://api.bochaai.com/v1/web-search" and method == "POST":
+            if headers.get("Authorization") != "Bearer test-key":
+                return 401, J, b'{"code":401,"msg":"invalid key"}', url
+            rows = _bocha_rows((json_body or {}).get("include"))
+            return 200, J, json.dumps({"code": 200, "data": {"webPages": {"value": rows}}}, ensure_ascii=False).encode(), url
+        if url == "https://mp.weixin.qq.com/s/aaa":
+            return 200, H, wechat_page("某某动漫", 0).encode(), url
+        if url == "https://mp.weixin.qq.com/s/bbb":
+            return 200, H, wechat_page("二次元观察", 100).encode(), url
+        if url.startswith("https://www.xiaohongshu.com/") or url.startswith("https://www.douyin.com/"):
+            self.state.setdefault("login_wall_hits", []).append(url)
+            return 200, H, b"<html><body>login</body></html>", url
+        if url == "https://api.bilibili.com/x/frontend/finger/spi":
+            return 200, J, b'{"code":0,"data":{"b_3":"B3VAL","b_4":"B4VAL"}}', url
+        if url == "https://api.bilibili.com/x/web-interface/nav":
+            return 200, J, json.dumps({"code": -101, "data": {"wbi_img": {
+                "img_url": "https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png",
+                "sub_url": "https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png"}}}).encode(), url
+        if url.startswith("https://api.bilibili.com/x/web-interface/wbi/search/type"):
+            if "buvid3=B3VAL" not in headers.get("Cookie", "") or "w_rid=" not in url:
+                return 200, J, b'{"code":-412,"message":"request was banned"}', url
+            return 200, J, json.dumps(BILI_SEARCH, ensure_ascii=False).encode(), url
+        if url.startswith("https://weixin.sogou.com/weixin"):
+            if self.state.get("sogou_captcha"):
+                return 200, H, b"<html>antispider</html>", "https://weixin.sogou.com/antispider/?from=x"
+            return 200, H, SOGOU_HTML.encode(), url
         if url.startswith("https://api.juejin.cn/search_api/v1/search") and method == "POST":
             if "遭质疑" in json.dumps(json_body or {}, ensure_ascii=False) and self.state.get("corroborate"):
                 return 200, J, JUEJIN_CORROB.encode(), url

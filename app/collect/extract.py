@@ -313,6 +313,16 @@ def extract_article(html: str, url: str, *, is_fragment: bool = False) -> dict:
     cover = None if is_fragment else _meta(soup, "og:image", "twitter:image")
     author = None if is_fragment else _author_from(ld, soup)
     published = None if is_fragment else _published_from(ld, soup)
+    if not is_fragment and "mp.weixin.qq.com" in (url or ""):
+        # 公众号文章：发布时间在脚本变量 ct / create_time 里，账号名在 #js_name
+        m = re.search(r"""(?:var\s+ct\s*=\s*|create_time\s*[:=]\s*)["']?(\d{10})""", html)
+        if m and not published:
+            from datetime import datetime, timezone
+            published = datetime.fromtimestamp(int(m.group(1)), timezone.utc).isoformat()
+        acct = soup.select_one("#js_name")
+        if acct and acct.get_text(strip=True):
+            author = acct.get_text(strip=True)
+            site = site or "微信公众号"
     description = None if is_fragment else _meta(soup, "description", "og:description")
 
     # noscript 里常有懒加载图片的真实地址

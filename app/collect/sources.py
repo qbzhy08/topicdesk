@@ -18,7 +18,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import os
 import re
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urljoin, urlsplit
 
 from bs4 import BeautifulSoup
 
@@ -42,7 +42,7 @@ PRIMARY_DOMAINS = (
 
 # 领域：决定一个主题用哪些来源。general 为综合新闻，任何领域都可兜底。
 DOMAINS = {"tech": "科技 / AI / 软件", "finance": "金融 / 经济 / 公司", "science": "学术 / 医学 / 科研",
-           "general": "综合新闻 / 政策 / 社会"}
+           "general": "综合新闻 / 政策 / 社会", "community": "社区 / 小众 / 亚文化 / 生活经验"}
 DOMAIN_HINTS = {
     "finance": ["股票", "股市", "基金", "证券", "金融", "经济", "财报", "上市", "利率", "汇率", "通胀", "央行",
                 "债券", "期货", "投资", "量化", "A股", "港股", "美股", "估值", "营收", "stock", "market", "finance",
@@ -53,6 +53,9 @@ DOMAIN_HINTS = {
     "tech": ["大模型", "人工智能", "AI", "模型", "算法", "芯片", "编程", "软件", "开源", "互联网", "手机", "机器人",
              "自动驾驶", "云", "数据库", "LLM", "GPU", "agent", "software", "chip", "robot", "代码", "框架"],
     "general": ["政策", "法规", "社会", "教育", "国际", "外交", "城市", "就业", "消费", "文化", "体育", "policy"],
+    "community": ["工作室", "博主", "up主", "UP主", "网红", "主播", "粉丝", "圈", "二次元", "动漫", "游戏", "cos",
+                  "男娘", "伪娘", "女装", "饭圈", "八卦", "吐槽", "攻略", "避坑", "探店", "有男娘", "成员",
+                  "小红书", "抖音", "b站", "B站", "贴吧", "知乎", "公众号"],
 }
 
 
@@ -116,6 +119,26 @@ BUILTIN = [
                  "note": "开放学术数据库，覆盖各学科，按相关度检索论文摘要"}),
     dict(id="pubmed", name="PubMed", method="api", lang="en", base_url="https://pubmed.ncbi.nlm.nih.gov",
          config={"domains": ["science"], "note": "NCBI 官方 E-utilities 接口（按其条款限速）"}),
+    # ---- 社区 / 内容平台（小众话题、经验、亚文化）
+    dict(id="bilibili", name="B站", method="api", lang="zh", base_url="https://www.bilibili.com",
+         config={"domains": ["community", "general", "tech"], "fetch": False,
+                 "note": "公开搜索接口（WBI 签名），取视频标题、简介、标签、播放量"}),
+    dict(id="sogou_wechat", name="公众号（搜狗）", method="search", lang="zh", base_url="https://weixin.sogou.com",
+         config={"domains": ["community", "general", "tech", "finance"],
+                 "note": "搜狗微信搜索，无需 key；频繁访问会出验证码，只做低频补充"}),
+    dict(id="web_search", name="全网搜索", method="websearch", lang="zh", base_url="",
+         config={"domains": ["community", "general", "tech", "finance", "science"],
+                 "note": "通过搜索 API 检索全网（需在设置页填写 key），替代不允许抓取的百度搜索"}),
+    dict(id="wechat", name="微信公众号", method="websearch", lang="zh", base_url="https://mp.weixin.qq.com",
+         config={"domains": ["community", "general", "tech", "finance"], "note": "搜索 API 限定 mp.weixin.qq.com，文章页可抓全文"}),
+    dict(id="zhihu", name="知乎", method="websearch", lang="zh", base_url="https://www.zhihu.com",
+         config={"domains": ["community", "general", "tech"], "fetch": False, "note": "只保留搜索摘要（正文需登录）"}),
+    dict(id="tieba", name="百度贴吧", method="websearch", lang="zh", base_url="https://tieba.baidu.com",
+         config={"domains": ["community"], "fetch": False, "note": "只保留搜索摘要"}),
+    dict(id="xiaohongshu", name="小红书", method="websearch", lang="zh", base_url="https://www.xiaohongshu.com",
+         config={"domains": ["community"], "fetch": False, "note": "只保留搜索摘要（网页需登录，条款禁止抓取）"}),
+    dict(id="douyin", name="抖音", method="websearch", lang="zh", base_url="https://www.douyin.com",
+         config={"domains": ["community"], "fetch": False, "note": "只保留搜索摘要（网页需登录，条款禁止抓取）"}),
     dict(id="web", name="通用网页", method="html", lang="any", base_url="", config={"domains": ['tech', 'finance', 'science', 'general'], }),
 ]
 
@@ -128,9 +151,12 @@ def is_primary(url: str) -> bool:
 def seed_sources():
     for s in BUILTIN:
         row = db.query_one("SELECT id, config FROM sources WHERE id=?", (s["id"],))
-        if row and "domains" not in (row["config"] or {}):
+        if row and ((row["config"] or {}).get("domains") != s["config"].get("domains")
+                    or (row["config"] or {}).get("fetch") != s["config"].get("fetch")):
+            # 内置来源的领域和抓取策略随版本更新同步（新增了“社区”领域）
             db.update("sources", "id", s["id"], {"config": {**(row["config"] or {}),
-                                                            "domains": s["config"].get("domains", ["tech"])}})
+                                                            "domains": s["config"].get("domains", ["tech"]),
+                                                            "fetch": s["config"].get("fetch")}})
         if not row:
             db.insert("sources", dict(id=s["id"], name=s["name"], method=s["method"],
                                       base_url=s["base_url"],
@@ -498,9 +524,148 @@ def search_pubmed(source: dict, query: str, limit: int = 10, since: float | None
     return items
 
 
+# ---------------------------------------------------------------- 社区与内容平台
+
+# 通过搜索 API 按站点检索的平台：site=None 为全网搜索（替代百度等不允许抓取的搜索引擎）
+WEB_PLATFORMS = {
+    "web_search": (None, "全网搜索"),
+    "wechat": ("mp.weixin.qq.com", "微信公众号"),
+    "zhihu": ("zhihu.com", "知乎"),
+    "tieba": ("tieba.baidu.com", "百度贴吧"),
+    "xiaohongshu": ("xiaohongshu.com", "小红书"),
+    "douyin": ("douyin.com", "抖音"),
+}
+# 这些平台的网页需要登录或前端渲染且条款禁止抓取：只保留搜索结果的摘要和链接，正文请用户粘贴
+SUMMARY_ONLY = {"zhihu", "tieba", "xiaohongshu", "douyin"}
+
+
+def search_web(source: dict, query: str, limit: int = 10, since: float | None = None, **_) -> list[dict]:
+    from .. import websearch
+    site, platform = WEB_PLATFORMS.get(source["id"], (None, "全网搜索"))
+    rows = websearch.search(query, site=site, count=limit, since=since)
+    items = []
+    for x in rows:
+        snippet = re.sub(r"\s+", " ", x.get("snippet") or "").strip()
+        only = source["id"] in SUMMARY_ONLY
+        items.append({
+            "url": x["url"], "title": x.get("title") or x["url"], "author": x.get("site_name"),
+            "published_at": iso(x.get("published_at")) or x.get("published_at"),
+            "summary": snippet[:600], "text": snippet, "content_kind": "summary", "images": [],
+            "source_id": source["id"],
+            "meta": {"platform": platform if site else (x.get("site_name") or _host_of(x["url"])),
+                     "via": {"source": "websearch"}, "summary_only": only,
+                     **({"note": f"{platform}正文需要登录才能查看，这里只有搜索摘要；需要全文请在资料页粘贴"} if only else {})},
+        })
+    return items
+
+
+def _host_of(url: str) -> str:
+    h = urlsplit(url).netloc.lower()
+    return h[4:] if h.startswith("www.") else h
+
+
+# ---- 微信公众号（搜狗微信搜索，无需 key；访问稍频繁就会出验证码，只适合低频补充）
+
+def search_sogou_wechat(source: dict, query: str, limit: int = 10, **_) -> list[dict]:
+    url = "https://weixin.sogou.com/weixin?type=2&ie=utf8&query=" + quote(query)
+    r = fetcher.get(url, cache_ttl=3600, headers={"Referer": "https://weixin.sogou.com/"})
+    if "antispider" in r.final_url or "验证码" in r.text[:5000]:
+        raise FetchError("blocked", "搜狗微信搜索要求输入验证码（访问过于频繁），本次跳过", url)
+    soup = BeautifulSoup(r.text, "lxml")
+    items = []
+    for li in soup.select("ul.news-list > li")[:limit]:
+        a = li.select_one("h3 a")
+        if not a or not a.get("href"):
+            continue
+        title = re.sub(r"\s+", " ", a.get_text(" ", strip=True))
+        summ = li.select_one("p.txt-info")
+        acct = li.select_one(".all-time-y2, a.account, .s-p a")
+        ts = re.search(r"timeConvert\('(\d+)'\)", str(li))
+        link = urljoin("https://weixin.sogou.com", a["href"])
+        items.append({
+            "url": link, "title": title, "author": acct.get_text(strip=True) if acct else None,
+            "published_at": iso(int(ts.group(1))) if ts else None,
+            "summary": summ.get_text(" ", strip=True) if summ else "", "text": None, "content_kind": "summary",
+            "images": [], "source_id": source["id"],
+            "meta": {"platform": "微信公众号", "account": acct.get_text(strip=True) if acct else None,
+                     "detail": "browser", "via": {"source": "sogou_wechat"}},
+        })
+    return items
+
+
+# ---- B站（公开搜索接口；需要 buvid3 Cookie 和 WBI 签名）
+
+_MIXIN = [46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39,
+          12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63,
+          57, 62, 11, 36, 20, 34, 44, 52]
+_BILI = {"t": 0.0, "mixin": "", "cookie": ""}
+_BILI_H = {"Referer": "https://search.bilibili.com/", "Origin": "https://search.bilibili.com"}
+
+
+def _bili_prepare():
+    import time as _t
+    if _BILI["mixin"] and _t.time() - _BILI["t"] < 6 * 3600:
+        return
+    spi = fetcher.get("https://api.bilibili.com/x/frontend/finger/spi", respect_robots=False, cache_ttl=0,
+                      headers=_BILI_H).json().get("data") or {}
+    cookie = f"buvid3={spi.get('b_3', '')}; buvid4={spi.get('b_4', '')}"
+    nav = fetcher.get("https://api.bilibili.com/x/web-interface/nav", respect_robots=False, cache_ttl=0,
+                      headers={**_BILI_H, "Cookie": cookie}).json()
+    w = (nav.get("data") or {}).get("wbi_img") or {}
+    stem = lambda u: (u or "").rsplit("/", 1)[-1].split(".")[0]  # noqa: E731
+    raw = stem(w.get("img_url")) + stem(w.get("sub_url"))
+    if len(raw) < 64:
+        raise FetchError("bad_content", "B站接口没有返回签名密钥（wbi_img），接口可能已变化", "bilibili")
+    _BILI.update(t=_t.time(), mixin="".join(raw[i] for i in _MIXIN)[:32], cookie=cookie)
+
+
+def bili_sign(params: dict, mixin: str, wts: int | None = None) -> str:
+    """WBI 签名：参数加 wts → 按键排序 → 值去掉 !'()* → URL 编码拼接 → md5(查询串 + mixin_key)。"""
+    import hashlib
+    import time as _t
+    p = {**params, "wts": wts if wts is not None else int(_t.time())}
+    q = "&".join(f"{quote(str(k), safe='')}={quote(re.sub(r'[!()*' + chr(39) + ']', '', str(p[k])), safe='-_.~')}"
+                 for k in sorted(p))
+    return q + "&w_rid=" + hashlib.md5((q + mixin).encode()).hexdigest()
+
+
+def search_bilibili(source: dict, query: str, limit: int = 15, since: float | None = None, **_) -> list[dict]:
+    import html as _html
+    _bili_prepare()
+    qs = bili_sign({"search_type": "video", "keyword": query, "page": 1, "page_size": min(limit, 20)}, _BILI["mixin"])
+    url = "https://api.bilibili.com/x/web-interface/wbi/search/type?" + qs
+    r = fetcher.get(url, respect_robots=False, cache_ttl=0, headers={**_BILI_H, "Cookie": _BILI["cookie"]})
+    d = r.json()
+    if d.get("code") != 0:
+        _BILI["t"] = 0          # 下次重新取 Cookie 和密钥
+        raise FetchError("blocked" if d.get("code") in (-412, -352, -403) else "bad_content",
+                         f"B站接口返回 {d.get('code')}：{d.get('message')}", url)
+    items = []
+    for x in (d.get("data") or {}).get("result") or []:
+        if x.get("type") != "video" or not x.get("bvid"):
+            continue
+        clean = lambda s: _html.unescape(re.sub(r"<[^>]+>", "", s or "")).strip()  # noqa: E731
+        title, desc = clean(x.get("title")), clean(x.get("description"))
+        tags = x.get("tag") or ""
+        pic = x.get("pic") or ""
+        items.append({
+            "url": f"https://www.bilibili.com/video/{x['bvid']}", "title": title, "author": x.get("author"),
+            "published_at": iso(int(x["pubdate"])) if str(x.get("pubdate") or "").isdigit() else None,
+            "summary": desc[:600], "text": f"{title}\n{desc}\n标签：{tags}".strip(), "content_kind": "summary",
+            "images": [{"url": ("https:" + pic) if pic.startswith("//") else pic, "alt": title, "caption": "视频封面"}]
+            if pic else [],
+            "source_id": source["id"],
+            "meta": {"platform": "B站", "uploader": x.get("author"), "views": x.get("play"),
+                     "likes": x.get("like"), "danmaku": x.get("video_review"), "duration": x.get("duration"),
+                     "tags": tags, "doc_type": "视频"},
+        })
+    return items
+
+
 SEARCHERS = {"rss": search_rss, "arxiv": search_arxiv, "hn": search_hn, "github": search_github,
              "juejin": search_juejin, "wallstcn": search_wallstcn, "openalex": search_openalex,
-             "pubmed": search_pubmed}
+             "pubmed": search_pubmed, "bilibili": search_bilibili, "sogou_wechat": search_sogou_wechat,
+             "websearch": search_web}
 
 
 def _day(ts: float) -> str:
@@ -532,7 +697,8 @@ def search(source_id: str, query: str, limit: int = 15, terms: list[str] | None 
     try:
         items = fn(src, query, limit, terms=terms, since=since)
     except FetchError as e:
-        record_health(source_id, False, e)
+        if e.kind != "config":      # 未配置 key 不是来源故障，不计入健康度（配置后立即可用）
+            record_health(source_id, False, e)
         raise
     record_health(source_id, True, n=len(items))
     if since:     # 接口不支持时间过滤的来源（RSS、arXiv、掘金等）在这里统一过滤

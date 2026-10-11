@@ -11,7 +11,7 @@ from flask import Flask, abort, jsonify, request, send_from_directory
 
 from . import config, db, graphs, llm  # noqa: F401  导入即注册编排图
 from . import memory as mem
-from . import ranking
+from . import ranking, websearch
 from .collect import sources as sources_mod
 from .collect.dedup import canonical_url
 from .config import ROOT
@@ -397,6 +397,35 @@ def test_llm():
         return jsonify(ok=True, reply=r["content"][:200], usage=r["usage"])
     except Exception as e:
         return jsonify(ok=False, error=str(e)[:300])
+
+
+@app.get("/api/settings/websearch")
+def get_websearch():
+    return jsonify(websearch.public_settings())
+
+
+@app.post("/api/settings/websearch")
+def set_websearch():
+    b = request.get_json(force=True)
+    try:
+        websearch.save_settings(b.get("provider", ""), b.get("api_key", ""))
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    return jsonify(websearch.public_settings())
+
+
+@app.post("/api/settings/websearch/test")
+def test_websearch():
+    """用一个固定查询测试：全网一次、限定公众号一次，返回条数和第一条标题。"""
+    from .collect.fetch import FetchError
+    out = {}
+    for name, site in (("全网", None), ("公众号", "mp.weixin.qq.com")):
+        try:
+            rows = websearch.search("大模型 长上下文", site=site, count=5)
+            out[name] = {"ok": True, "count": len(rows), "first": (rows[0]["title"] if rows else None)}
+        except FetchError as e:
+            out[name] = {"ok": False, "error": f"{e.kind}：{e.reason}"}
+    return jsonify(ok=all(v["ok"] for v in out.values()), results=out)
 
 
 # ---------------------------------------------------------------- 记忆

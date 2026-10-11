@@ -22,7 +22,7 @@ import time
 from urllib.parse import urlsplit
 from datetime import datetime, timedelta, timezone
 
-from .. import db, llm, ranking
+from .. import db, llm, ranking, websearch
 from .. import memory as mem
 from .. import memory_facts as mf
 from ..collect import tools as _tools  # noqa: F401  注册工具
@@ -202,7 +202,8 @@ def _prev_research(topic: str, exclude: str) -> dict | None:
 PLAN_PROMPT = """你是信息检索规划助手。用户想了解的主题：「{topic}」。
 {memory}
 先判断主题属于哪些领域（可多选）：tech=科技/AI/软件，finance=金融/经济/公司，science=学术/医学/科研，
-general=综合新闻/政策/社会。系统会按领域选择信息源。
+general=综合新闻/政策/社会，community=社区/小众话题/亚文化/个人经验/具体博主或团队（资料主要在 B站、公众号、
+知乎、贴吧、小红书、抖音）。系统会按领域选择信息源。
 再把主题拆成 3-5 个需要覆盖的子问题，并给出检索关键词。
 中文来源是各领域媒体 RSS（按关键词过滤最新文章）和站内搜索（掘金、华尔街见闻等）。中文核心词要用中文媒体
 实际常用的说法，短（2-5 字）、常见，不要自造少见词组。
@@ -386,11 +387,19 @@ def plan(ctx):
             for t in terms_zh[:2]:
                 _push(st, _search_action(s["id"], t, terms_zh, f"中文站内搜索「{t}」（可检索历史文章）",
                                          prio=55))
+        elif s["method"] in ("websearch", "search"):
+            if s["method"] == "websearch" and not websearch.available():
+                st.setdefault("no_websearch", []).append(s["name"])
+                continue
+            q = " ".join(terms_zh[:2]) or ctx.topic
+            _push(st, _search_action(s["id"], q, terms_zh, f"{s['name']}检索「{q}」", prio=55))
         elif lang == "en":
             if not queries_en:
                 continue
             for q in queries_en[:2]:
                 _push(st, _search_action(s["id"], q, None, f"英文来源检索「{q}」"))
+    if st.get("no_websearch"):
+        ctx.think(f"未配置搜索 API，跳过 {'、'.join(st['no_websearch'])}（在“设置”页填写 key 后可用）")
     if not queries_en:
         st["failures"].append({"type": "plan", "kind": "missing_en_keywords",
                                "reason": "没有英文关键词（未配置 LLM 且未填写），跳过 arXiv/HN/GitHub"})
@@ -469,7 +478,8 @@ def _gap_actions(st: dict, a: dict) -> list[dict]:
         EN_GAP_SOURCES["science" if "science" in (st.get("domains") or []) else "default"]
     en_srcs = [s for s in pref if s in ok][:2]
     zh_srcs = [sid for sid in ok if (by_id[sid]["config"] or {}).get("lang", "zh") == "zh" and
-               (by_id[sid]["method"] == "api" or (by_id[sid]["config"] or {}).get("search_feed"))][:2]
+               (by_id[sid]["method"] in ("api", "search") or (by_id[sid]["config"] or {}).get("search_feed") or
+                (by_id[sid]["method"] == "websearch" and websearch.available()))][:2]
     why = f"定向补缺口「{a['name']}」"
     acts = []
     if en_q:
@@ -743,7 +753,7 @@ def _handle_failure(ctx, a: dict, e: FetchError):
         sid = a["source"]
         st["source_fail"][sid] = st["source_fail"].get(sid, 0) + 1
         # 明确拒绝/不可达/内容异常：直接停用；偶发错误（超时、5xx、限流）重试一次，仍失败再停用
-        if e.kind in ("robots", "blocked", "network", "not_found", "bad_content") or \
+        if e.kind in ("robots", "blocked", "network", "not_found", "bad_content", "config") or \
                 st["source_fail"][sid] >= 2 or a["key"].endswith(":retry"):
             st["disabled"].append(sid)
             rec["fallback"] = f"本任务停用 {sid}，由其他来源继续覆盖"
@@ -774,6 +784,15 @@ def _handle_failure(ctx, a: dict, e: FetchError):
             rec["fallback"] = "保留已有摘要，标记为摘要" if has_summary else "放弃该页面"
     st["failures"].append(rec)
     ctx.observe(f"失败：{e.kind} {e.reason} → {rec['fallback']}")
+
+
+def _fetchable(st: dict, source_id: str) -> bool:
+    """来源配置 fetch=False（需要登录的平台、B站视频）时不抓详情页，只用搜索结果里的摘要。"""
+    cache = st.setdefault("_fetchable", {})
+    if source_id not in cache:
+        row = db.query_one("SELECT config FROM sources WHERE id=?", (source_id,))
+        cache[source_id] = (row["config"] or {}).get("fetch") is not False if row else True
+    return cache[source_id]
 
 
 def _after_search(ctx, a, status, res):
@@ -826,7 +845,8 @@ def _after_search(ctx, a, status, res):
                 _push(st, _fetch_action(it["url"], f"聚合站只有标题（{meta.get('points')} 分），追踪原文",
                                         prio=35 + min((meta.get("points") or 0) // 50, 20),
                                         base=it, doc_id=r["doc_id"]))
-        elif it["content_kind"] != "full" and a["source"] not in ("arxiv", "github", "openalex", "pubmed"):
+        elif it["content_kind"] != "full" and a["source"] not in ("arxiv", "github", "openalex", "pubmed") \
+                and _fetchable(st, a["source"]):
             mode = "browser" if meta.get("detail") == "browser" else "auto"
             _push(st, _fetch_action(it["url"], "RSS 只有摘要，抓取全文" +
                                     ("（前端渲染页面，用浏览器）" if mode == "browser" else ""),
@@ -1059,9 +1079,9 @@ def _event_hosts(doc_id: str) -> set:
     d = db.query_one("SELECT event_id, topic FROM documents WHERE id=?", (doc_id,))
     if not d or not d["event_id"]:
         return set()
-    rows = db.query("SELECT url FROM documents WHERE event_id=? AND topic=? AND status='active' AND duplicate_of IS NULL",
-                    (d["event_id"], d["topic"]))
-    return {urlsplit(r["url"]).netloc.lower().removeprefix("www.") for r in rows}
+    rows = db.query("SELECT url, author FROM documents WHERE event_id=? AND topic=? AND status='active' "
+                    "AND duplicate_of IS NULL", (d["event_id"], d["topic"]))
+    return {ranking.source_key(r["url"], r["author"]) for r in rows}
 
 
 def corroborate(ctx, problems: list[dict], *, task_id: str, topic: str, source_ids: list, window: dict,
@@ -1072,7 +1092,8 @@ def corroborate(ctx, problems: list[dict], *, task_id: str, topic: str, source_i
     ok = [sid for sid in (source_ids or []) if sid in by_id]
     en_srcs = [s for s in ("hn", "openalex", "arxiv") if s in ok]
     zh_srcs = [sid for sid in ok if (by_id[sid]["config"] or {}).get("lang", "zh") == "zh" and
-               (by_id[sid]["method"] == "api" or (by_id[sid]["config"] or {}).get("search_feed"))]
+               (by_id[sid]["method"] in ("api", "search") or (by_id[sid]["config"] or {}).get("search_feed") or
+                (by_id[sid]["method"] == "websearch" and websearch.available()))]
     calls, meta, records = [], [], {}
     for pr in problems:
         q, lang = _corroborate_query(pr["title"])
@@ -1120,7 +1141,7 @@ def corroborate(ctx, problems: list[dict], *, task_id: str, topic: str, source_i
         gained = len(after) - len(rec["hosts_before"])
         if gained > 0:
             rec["outcome"] = "corroborated"
-            flags[pid] = {"note": f"补充核验：新找到 {gained} 个站点报道同一事件（{'、'.join(sorted(set(after) - set(rec['hosts_before'])))}）"}
+            flags[pid] = {"note": f"补充核验：新找到 {gained} 个独立来源报道同一事件（{'、'.join(sorted(set(after) - set(rec['hosts_before'])))}）"}
         else:
             rec["outcome"] = "unverified"
             flags[pid] = {"unverified": True,
@@ -1205,6 +1226,12 @@ def report(ctx):
         omissions.append(f"{b} 近期持续失败，本次未检索")
     if any(s["method"] == "rss" for s in srcs.values()):
         omissions.append("RSS 只包含各站最新几十篇，更早的中文报道需要站内搜索或链接导入")
+    if st.get("no_websearch"):
+        omissions.append(f"未配置搜索 API，没有检索：{'、'.join(st['no_websearch'])}（设置页填写 key 后可用）")
+    so = [d for d in docs if (d["meta"] or {}).get("summary_only") and not d["duplicate_of"]]
+    if so:
+        plats = sorted({(d["meta"] or {}).get("platform") or d["source_id"] for d in so})
+        omissions.append(f"{len(so)} 篇来自{'、'.join(plats)}，只有搜索摘要（正文需登录）；重要的可在资料页粘贴正文")
     gaps = [v["name"] for v in cov.values() if v["have"] < v["need"]]
     if gaps:
         omissions.append(f"暂无足够资料的子问题（已定向补检，不再重复检索）：{gaps}")

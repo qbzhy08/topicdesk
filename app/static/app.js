@@ -495,7 +495,7 @@ async function showDoc(id) {
 }
 
 // ---------------------------------------------------------------- 记忆
-const DOMAIN_NAME = { tech: "科技", finance: "金融", science: "学术", general: "综合" };
+const DOMAIN_NAME = { tech: "科技", finance: "金融", science: "学术", general: "综合", community: "社区" };
 const PREF_TYPES = { reading_minutes: "阅读时间（分钟）", background: "知识背景", focus: "关注重点",
   exclude: "不想看的内容", source_prefer: "来源偏好", style: "写作要求" };
 
@@ -687,7 +687,9 @@ async function showSettings() {
       <span class="${s.available ? "ok" : "gap"}">${s.available ? "已配置" : "未配置"}</span></div>
       <p id="llm-result" class="small"></p>
     </form>
+    <form class="card" id="ws-form"></form>
     <div class="card" id="replay-card"></div>`;
+  renderWebsearchForm();
   api("/api/replay").then((r) => {
     const c = $("#replay-card");
     if (!r.enabled) { c.innerHTML = `<h3>固定样例回放</h3><p class="small">用 <code>bash start.command --replay</code> 启动可进入离线回放模式（模拟网站、独立数据库），用于演示长期记忆。</p>`; return; }
@@ -705,6 +707,29 @@ async function showSettings() {
     $("#llm-result").textContent = "测试中…";
     const r = await api("/api/settings/llm/test", { method: "POST", body: {} });
     $("#llm-result").textContent = r.ok ? `连接成功：${r.reply}` : `失败：${r.error}`;
+  };
+}
+
+async function renderWebsearchForm() {
+  const f = $("#ws-form");
+  const w = await api("/api/settings/websearch");
+  f.innerHTML = `<h3>搜索 API（公众号 / 知乎 / 贴吧 / 小红书 / 抖音 / 全网）</h3>
+    <p class="small">这些平台没有开放搜索接口，或网页需要登录，所以通过正规搜索服务按站点检索：拿到标题、摘要和链接；公众号文章再抓全文，
+      需要登录的平台只保留摘要。B站和“公众号（搜狗）”不需要 key。中文内容推荐博查。</p>
+    <label>服务<select name="provider"><option value="">不使用</option>${Object.entries(w.providers).map(([k, n]) => `<option value="${k}" ${w.provider === k ? "selected" : ""}>${n}</option>`).join("")}</select></label>
+    <label>API Key<input name="api_key" type="password" value="${esc(w.api_key)}" placeholder="粘贴 key"></label>
+    <div class="row"><button>保存</button><button type="button" class="ghost" id="ws-test">测试</button>
+      <span class="${w.available ? "ok" : "gap"}">${w.available ? "已配置" : "未配置"}</span></div>
+    <p id="ws-result" class="small"></p>`;
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api("/api/settings/websearch", { method: "POST", body: Object.fromEntries(new FormData(f).entries()) }); renderWebsearchForm(); }
+    catch (err) { $("#ws-result").textContent = err.message; }
+  };
+  $("#ws-test").onclick = async () => {
+    $("#ws-result").textContent = "测试中…";
+    const r = await api("/api/settings/websearch/test", { method: "POST", body: {} });
+    $("#ws-result").innerHTML = Object.entries(r.results).map(([k, v]) => `${k}：${v.ok ? `成功，${v.count} 条${v.first ? "，例如「" + esc(v.first) + "」" : ""}` : "失败，" + esc(v.error)}`).join("<br>");
   };
 }
 

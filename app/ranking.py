@@ -53,6 +53,19 @@ def _host(url: str) -> str:
     return h[4:] if h.startswith("www.") else h
 
 
+PLATFORM_HOSTS = ("mp.weixin.qq.com", "weixin.sogou.com", "bilibili.com", "zhihu.com", "tieba.baidu.com",
+                  "xiaohongshu.com", "douyin.com", "juejin.cn", "github.com")
+
+
+def source_key(url: str, author: str | None = None) -> str:
+    """独立来源的单位：普通网站按站点；内容平台按“平台 + 作者/账号”（不同公众号、不同 UP 主是不同来源）。"""
+    h = _host(url)
+    if author and any(h == p or h.endswith("." + p) for p in PLATFORM_HOSTS):
+        plat = "mp.weixin.qq.com" if h == "weixin.sogou.com" else h
+        return f"{plat}/{author.strip()}"
+    return h
+
+
 def _num(v):
     return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
@@ -75,11 +88,11 @@ def _signals(pool: list[dict]) -> dict:
     topics = {d["topic"] for d in pool}
     events: dict[str, set] = {}
     if topics:
-        rows = db.query(f"SELECT event_id, url FROM documents WHERE status='active' AND duplicate_of IS NULL "
+        rows = db.query(f"SELECT event_id, url, author FROM documents WHERE status='active' AND duplicate_of IS NULL "
                         f"AND topic IN ({','.join('?' * len(topics))})", list(topics))
         for r in rows:
             if r["event_id"]:
-                events.setdefault(r["event_id"], set()).add(_host(r["url"]))
+                events.setdefault(r["event_id"], set()).add(source_key(r["url"], r["author"]))
     facts: dict[str, list] = {}
     ids = [d["id"] for d in pool]
     for i in range(0, len(ids), 400):
@@ -103,11 +116,11 @@ def _credibility(d: dict, sig: dict) -> tuple[float, list[str], dict]:
     if meta.get("primary"):
         score += 0.3
         reasons.append("一手来源（论文/仓库/官方）")
-    n = len(sig["events"].get(d["event_id"], set()) | {_host(d["url"])}) if d["event_id"] else 1
+    n = len(sig["events"].get(d["event_id"], set()) | {source_key(d["url"], d["author"])}) if d["event_id"] else 1
     info["independent"] = n
     if n >= 2:
         score += 0.25 * min(1, (n - 1) / 2)
-        reasons.append(f"{n} 个独立站点报道同一事件")
+        reasons.append(f"{n} 个独立来源报道同一事件")
     if d["content_kind"] == "full":
         score += 0.1
     fs = sig["facts"].get(d["id"], [])
