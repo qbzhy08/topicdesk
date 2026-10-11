@@ -1131,7 +1131,9 @@ async function showArticle(id, ver) {
   };
   const figs = m.figures || [], cover = m.cover, ich = m.image_checks || [], irej = m.image_rejected || [];
   const figRow = (f, where) => `<div class="fig-row"><img src="${esc(f.src)}" alt="" loading="lazy">
-      <div><b>${where}</b> <span class="tag ${f.kind === "diagram" ? "nv-update" : ""}">${f.kind === "diagram" ? "示意图" : "原图"}</span>
+      <div><b>${where}</b> <span class="tag ${f.decorative ? "rel-lo" : f.kind === "diagram" ? "nv-update" : "nv-new"}">${
+        f.kind === "diagram" ? ({ bar: "数据图·柱状", line: "数据图·折线", timeline: "时间线", numbers: "关键数字" }[f.diagram] || "示意图")
+        : f.decorative ? "照片补位" : f.info ? "原文信息图" : "原图"}</span>
         <p class="small">${esc(renum(f.caption || ""))}</p>
         <p class="small muted">为什么放这里：${esc(f.why || "")}</p>
         ${f.kind === "photo" && f.w ? `<p class="small muted">${f.w}×${f.h} · 清晰度 ${f.sharpness ?? "—"}${(f.warn || []).length ? ` · <span class="gap">${f.warn.map(esc).join("；")}</span>` : ""}

@@ -30,6 +30,16 @@ class FakeWriter:
             res = [{"i": i + 1, "verdict": "supported" if "差距" in seg else "unsupported", "reason": "测试"}
                    for i, seg in enumerate(re.split(r"^\d+\. 句子：", p, flags=re.M)[1:n + 1])]
             return {"content": "", "_cost": 0, "data": {"results": res}}
+        if "找出最多 2 组适合画图" in p:            # 一组真实数字 + 一组编造的数字
+            n = _num_of(p, "32K") if "32K" in p else 1
+            m = re.search(r"^\[(\d+)\][^\n]*32K[^\n]*64K[^\n]*128K", p, re.M)
+            n = int(m.group(1)) if m else n
+            return {"content": "", "_cost": 0, "data": {"charts": [
+                {"kind": "bar", "title": "实测的上下文长度", "unit": "K", "refs": [n],
+                 "items": [{"label": "短", "value": 32}, {"label": "中", "value": 64}, {"label": "长", "value": 128}],
+                 "takeaway": "实测覆盖了三档长度"},
+                {"kind": "line", "title": "编造的趋势", "unit": "K", "refs": [n],
+                 "items": [{"label": "1", "value": 32}, {"label": "2", "value": 999}, {"label": "3", "value": 128}]}]}}
         if "列提纲" in p:
             ids = re.findall(r"- id=(\w+)｜", p)
             return {"content": "", "_cost": 0, "data": {
@@ -300,3 +310,22 @@ class ImageClarityTest(WriteBase):
         self.assertIn("11,000台", nums)
         self.assertIn("30%", nums)
         self.assertTrue(writing.num_in("11,000台", writing._norm("累计下线约11000台")))
+
+    def test_charts_from_verified_numbers(self):
+        llm.available, llm.chat = (lambda: True), FakeWriter()
+        task, v = self.write("brief")
+        meta = v["meta"]
+        bars = [f for f in meta["figures"] if f.get("diagram") == "bar"]
+        self.assertEqual(len(bars), 1, meta["image_rejected"])                                   # 真实数字画出来了
+        self.assertIn("实测的上下文长度", bars[0]["caption"])
+        self.assertTrue(any("编造的趋势" in r["doc"] and "999" in r["why"] for r in meta["image_rejected"]))  # 编造的被拒
+        self.assertFalse(any(f.get("decorative") for f in meta["figures"]))
+
+    def test_classify_info_vs_photo(self):
+        from app import illustrate as ill
+        q_chart = {"chartlike": True, "colors": 300, "white": 0.6}
+        q_photo = {"chartlike": False, "colors": 5000, "white": 0.05}
+        self.assertTrue(ill.classify({"caption": "图表：2026年各品牌销量对比"}, q_chart)["info"])
+        self.assertFalse(ill.classify({"caption": "图/IC"}, q_photo)["info"])
+        self.assertFalse(ill.classify({"caption": "小米 YU7 发布会现场"}, q_photo)["info"])
+

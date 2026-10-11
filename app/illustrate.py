@@ -51,6 +51,8 @@ def quality(local_path: str, width: int | None, height: int | None, url: str = "
     hist = g.histogram()
     white = sum(hist[236:]) / max(1, sum(hist))
     chartlike = white > 0.42 and sharp > 300
+    small = im.convert("RGB").resize((96, max(1, int(96 * h / w))))
+    colors = len(small.getcolors(maxcolors=96 * 96 + 1) or [])
     if sharp < 25:
         issues.append(f"模糊（清晰度 {sharp}，低于 25）")
     elif sharp < 60:
@@ -69,7 +71,7 @@ def quality(local_path: str, width: int | None, height: int | None, url: str = "
     if w / h > 3.2 or h / w > 2.2:
         issues.append(f"宽高比 {w}:{h} 过于极端，可能是长条或被裁切")
     return {"ok": not issues, "sharpness": sharp, "issues": issues, "warn": warn, "w": w, "h": h,
-            "chartlike": chartlike, "white": round(white, 2)}
+            "chartlike": chartlike, "white": round(white, 2), "colors": colors}
 
 
 # ---------------------------------------------------------------- 候选与放置
@@ -106,7 +108,7 @@ def place(cands: list[dict], sections: list[dict], docs: list[dict], need: int,
     n_of = {d["id"]: d["n"] for d in docs}
     rejected, pool = [], []
     for im in cands:
-        q = quality(im["local_path"], im.get("width"), im.get("height"), im.get("url"))
+        q = im.get("quality") or quality(im["local_path"], im.get("width"), im.get("height"), im.get("url"))
         im["quality"] = q
         if not q["ok"]:
             rejected.append({"image": im["id"], "url": im["url"], "doc": im["doc_title"], "why": "；".join(q["issues"])})
@@ -333,6 +335,93 @@ def timeline_events(check_items: list[dict], sections: list[dict]) -> list[dict]
     return out[:7]
 
 
+INFO_WORDS = re.compile(r"图表|数据|统计|走势|趋势|对比|占比|份额|销量|出货|增速|同比|环比|排名|榜单|示意|流程|架构|结构|时间线|路线图|"
+                        r"参数|配置|价格|售价|规格|财报|营收|利润|测评|评测|跑分|成绩|得分|分布|曲线|柱状|饼图|表\s*\d|图\s*\d|"
+                        r"来源[:：]|资料来源|数据来源|单位[:：]|source|chart|data", re.I)
+PHOTO_WORDS = re.compile(r"图\s*/\s*IC|视觉中国|东方IC|新华社|中新社|摄影|摄$|记者\s*\S{2,4}\s*摄|供图|图虫|Getty|Shutterstock|"
+                         r"现场|发布会|亮相|合影|展台|外观|实拍|海报|封面", re.I)
+
+
+def classify(im: dict, q: dict) -> dict:
+    """这张图对读者有没有信息量：图表/信息图/流程图/参数表/数据截图 = info；新闻现场照、图库照片 = photo。
+    看两类信号：图注和图片前后正文里的词，以及图片本身（图表通常白底多、颜色少、笔画细密；照片颜色多）。"""
+    text = f"{im.get('caption') or ''} {im.get('context_text') or ''}"
+    score, why = 0, []
+    if INFO_WORDS.search(text):
+        score += 2
+        why.append(f"图注/上下文提到「{INFO_WORDS.search(text).group(0)}」")
+    if q.get("chartlike"):
+        score += 2
+        why.append("白底、笔画细密，像图表")
+    elif (q.get("colors") or 9999) < 900 and (q.get("white") or 0) > 0.25:
+        score += 1
+        why.append("颜色少、有大面积底色，像图形")
+    if PHOTO_WORDS.search(text):
+        score -= 3
+        why.append(f"图注像新闻照片（「{PHOTO_WORDS.search(text).group(0)}」）")
+    if (q.get("colors") or 0) > 3000 and not q.get("chartlike"):
+        score -= 1
+        why.append("颜色丰富，像照片")
+    return {"info": score >= 2, "score": score, "why": "；".join(why) or "没有明显的图表特征"}
+
+
+CHARTS_PROMPT = """下面是一篇文章引用的资料中带数字的句子（[n] 是出处编号）。找出最多 2 组适合画图、能帮读者看清数据的同类数字：
+- bar：3-8 个可比较的数值，单位相同（例如不同车型的价格、不同公司的销量、不同机构的份额）
+- line：同一指标在 3-12 个时间点的数值（例如 2022-2026 年各年销量、各月价格）
+数值必须原样来自句子（可以去掉千分位逗号），不要换算、估计或补全；凑不出就返回空数组。
+{lines}
+只输出 JSON：{{"charts": [{{"kind": "bar", "title": "图题（不超过 18 字，说明比的是什么）", "unit": "万元",
+  "items": [{{"label": "不超过 10 字", "value": 32.99}}], "refs": [3], "section": "最相关的节 id（可选：{sections}）",
+  "takeaway": "这张图说明了什么（一句话，不超过 30 字，只能是图中数字直接体现的结论）"}}]}}"""
+
+
+def numeric_lines(docs: list[dict], check_items: list[dict], limit: int = 40) -> str:
+    """给大模型找图表数据用：正文里核对通过的句子 + 出处原文中含 2 个以上数字的句子。"""
+    out, seen = [], set()
+    for it in check_items:
+        if it["status"] in ("supported", "semantic") and len(it["numbers"]) >= 1:
+            t = f"[{','.join(map(str, it['cites']))}] {writing.CITE.sub('', it['sentence'])[:180]}（节 {it['section']}）"
+            if t not in seen:
+                seen.add(t)
+                out.append(t)
+    for d in docs:
+        for snt in writing.sentences(d["text"])[:200]:
+            if len(writing.numbers(snt)) >= 2 and len(snt) <= 220:
+                t = f"[{d['n']}] {snt}"
+                if t not in seen:
+                    seen.add(t)
+                    out.append(t)
+            if len(out) >= limit:
+                break
+        if len(out) >= limit:
+            break
+    return "\n".join(out[:limit])
+
+
+def line_svg(title: str, unit: str, items: list[dict], source_note: str) -> str:
+    w, h = 720, 380
+    x0, x1, y0, y1 = 70, 690, 300, 80
+    vals = [i["value"] for i in items]
+    vmin, vmax = min(vals), max(vals)
+    lo = 0 if vmin >= 0 and vmin < vmax * 0.6 else vmin - (vmax - vmin) * 0.15
+    hi = vmax + (vmax - lo) * 0.12 or 1
+    X = lambda k: x0 + (x1 - x0) * (k / max(1, len(items) - 1))  # noqa: E731
+    Y = lambda v: y0 - (y0 - y1) * ((v - lo) / ((hi - lo) or 1))  # noqa: E731
+    pts = " ".join(f"{X(k):.1f},{Y(i['value']):.1f}" for k, i in enumerate(items))
+    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}" font-family="{FONT}">',
+             f'<rect width="{w}" height="{h}" fill="#fbfaf7"/>',
+             f'<text x="24" y="40" font-size="20" font-weight="700" fill="#1f1c18">{html.escape(title)}</text>', _badge(w - 100, 22),
+             f'<line x1="{x0}" y1="{y0}" x2="{x1}" y2="{y0}" stroke="#c9c1b4"/>',
+             f'<polyline points="{pts}" fill="none" stroke="#2c5d8a" stroke-width="3"/>']
+    for k, i in enumerate(items):
+        parts.append(f'<circle cx="{X(k):.1f}" cy="{Y(i["value"]):.1f}" r="4.5" fill="#2c5d8a"/>')
+        parts.append(f'<text x="{X(k):.1f}" y="{Y(i["value"]) - 10:.1f}" font-size="13" text-anchor="middle" fill="#1f1c18">'
+                     f'{html.escape(_fmt(i["value"]) + unit)}</text>')
+        parts.append(f'<text x="{X(k):.1f}" y="{y0 + 22}" font-size="13" text-anchor="middle" fill="#6b6357">{html.escape(i["label"][:8])}</text>')
+    parts.append(f'<text x="24" y="{h - 16}" font-size="12" fill="#8a8273">{html.escape(source_note)}</text></svg>')
+    return "".join(parts)
+
+
 CHART_PROMPT = """下面是一篇文章里已经核对过出处的句子（[n] 是出处编号）。如果其中有适合画成一张简单柱状图的同类数字
 （3-6 个可比较的数值，单位相同，例如不同时期的占比、不同对象的数值），给出图表数据；否则 kind 填 none。
 数值必须原样来自句子，不要换算、不要估计。
@@ -348,8 +437,9 @@ def verify_chart(spec: dict, docs: list[dict]) -> str | None:
     if not refs:
         return "没有给出有效的出处编号"
     items = spec.get("items") or []
-    if not 3 <= len(items) <= 6:
-        return f"数据点 {len(items)} 个，不适合画柱状图"
+    lo, hi = (3, 12) if spec.get("kind") == "line" else (3, 8)
+    if not lo <= len(items) <= hi:
+        return f"数据点 {len(items)} 个，不适合画{'折线图' if spec.get('kind') == 'line' else '柱状图'}"
     for it in items:
         try:
             v = float(it["value"])
@@ -392,6 +482,10 @@ def final_check(md: str, figs: list[dict], cover: dict | None, need: int) -> lis
     out.append({"name": "封面", "ok": bool(cover), "detail": ("原图" if cover and cover["kind"] == "photo" else "示意封面") if cover else "缺少"})
     srcs = [f["src"] for f in body] + ([cover["src"]] if cover else [])
     out.append({"name": "重复图片", "ok": len(srcs) == len(set(srcs)), "detail": "没有" if len(srcs) == len(set(srcs)) else "有重复"})
+    deco = [f for f in body if f.get("decorative")]
+    useful = len(body) - len(deco)
+    out.append({"name": "有信息量的图", "ok": not deco and useful > 0,
+                "detail": f"{useful} 张信息图/数据图" + (f"，{len(deco)} 张照片补位" if deco else "")})
     miss = [f for f in body if not (f.get("caption") or "").strip()]
     out.append({"name": "图注", "ok": not miss, "detail": "每张都有" if not miss else f"{len(miss)} 张缺图注"})
     gone = [s for s in srcs if not (config.DATA_DIR / s.replace("/media/", "", 1)).exists()]
