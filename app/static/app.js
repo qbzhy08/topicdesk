@@ -129,10 +129,20 @@ async function refreshList() {
 }
 
 // ---------------------------------------------------------------- 路由
+// 记住上次打开的任务和榜单分页：从“信息源”“记忆”等页面回到“任务”时恢复（浏览器本地保存，失败不影响使用）
+const store = {
+  get(k) { try { return JSON.parse(localStorage.getItem("td:" + k)); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem("td:" + k, JSON.stringify(v)); } catch { /* 隐私模式等 */ } },
+};
+
 function route() {
   if (current?.timer) clearTimeout(current.timer);
   current = null;
   const h = location.hash || "#/";
+  if (h === "#/" && store.get("lastTask")) {
+    location.replace(`#/task/${store.get("lastTask")}`);
+    return;
+  }
   const view = h.startsWith("#/library") ? "library" : h.startsWith("#/doc/") ? "library"
     : h.startsWith("#/memory") ? "memory"
     : h.startsWith("#/sources") ? "sources" : h.startsWith("#/settings") ? "settings" : "tasks";
@@ -154,7 +164,8 @@ function route() {
 
 // ---------------------------------------------------------------- 任务详情
 function showTask(id) {
-  current = { id, lastStepId: 0, timer: null };
+  store.set("lastTask", id);
+  current = { id, lastStepId: 0, timer: null, rkTab: (store.get("rkTabs") || {})[id] || null };
   const el = $("#detail");
   el.innerHTML = "";
   el.append($("#tpl-detail").content.cloneNode(true));
@@ -194,6 +205,11 @@ async function poll() {
     const busy = ACTIVE.has(task.status) || task.running;
     current.timer = setTimeout(poll, busy ? 1200 : 8000);
   } catch (err) {
+    if (/not found/i.test(err.message) && store.get("lastTask") === current?.id) {
+      store.set("lastTask", null);          // 任务已不存在：不再自动打开它
+      location.replace("#/new");
+      return;
+    }
     const e = $("[data-f=error]");
     if (e) e.textContent = err.message;
     if (current) current.timer = setTimeout(poll, 5000);
@@ -862,7 +878,13 @@ function renderRanking() {
     <div class="tabs">${tabs.map(([k, n]) => `<button class="tab ${k === tab ? "on" : ""}" data-rktab="${k}">${n}</button>`).join("")}</div>
     <div class="rk-pane">${tab === "base" ? rkBaselineTab(d, ev, labels) : tab === "proc" ? rkProcessTab(d, res) : rkListTab(d, tab, labels, res.topic)}</div>
     <p class="small rk-msg" data-rk="msg"></p></div>`;
-  box.querySelectorAll("[data-rktab]").forEach((b) => b.onclick = () => { current.rkTab = b.dataset.rktab; renderRanking(); });
+  box.querySelectorAll("[data-rktab]").forEach((b) => b.onclick = () => {
+    current.rkTab = b.dataset.rktab;
+    const tabs = store.get("rkTabs") || {};
+    tabs[current.id] = current.rkTab;
+    store.set("rkTabs", tabs);
+    renderRanking();
+  });
   box.querySelector("[data-rk=version]").onchange = (e) => { current.rkVersion = +e.target.value; loadRanking(true); };
   box.querySelectorAll("[data-rkv]").forEach((a) => a.onclick = (e) => { e.preventDefault(); current.rkVersion = +a.dataset.rkv; loadRanking(true); });
   box.querySelector("[data-rk=weights-toggle]").onclick = () => { const f = box.querySelector("[data-rk=weights]"); f.hidden = !f.hidden; };

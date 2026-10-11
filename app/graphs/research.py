@@ -388,7 +388,8 @@ def plan(ctx):
         for s in list(srcs):
             h = s.get("health") or {}
             recent = h.get("last_fail") and db.now() - h["last_fail"] < 12 * 3600
-            if h.get("consecutive_fail", 0) >= 3 and recent and (h.get("last_ok") or 0) < h["last_fail"]:
+            robots_no = (h.get("last_error") or {}).get("kind") == "robots" and (h.get("last_ok") or 0) < (h.get("last_fail") or 0)
+            if robots_no or (h.get("consecutive_fail", 0) >= 3 and recent and (h.get("last_ok") or 0) < h["last_fail"]):
                 srcs.remove(s)
                 bad.append(f"{s['name']}（{(h.get('last_error') or {}).get('kind', '失败')} 连续 {h['consecutive_fail']} 次）")
         if bad:
@@ -671,7 +672,7 @@ reason 用不超过 20 个字说明理由。只输出 JSON：{{"scores": [{{"i":
 
 def judge(ctx):
     """规则相关度只看字面；配置了大模型时，对相关度靠前的资料做一次批量复核，修正“关键词巧合”。
-    最终相关度 = 0.4 × 规则分 + 0.6 × 大模型分/3。"""
+    最终相关度 = 0.4 × 规则分 + 0.6 × 大模型分/3；大模型判 0 分（无关）封顶 0.15、1 分（顺带提到）封顶 0.35。"""
     st, p = ctx.state, ctx.params
     st["judge"] = {"by": "rules", "judged": 0, "demoted": 0, "promoted": 0}
     if not llm.available() or p.get("no_llm") or p.get("no_judge"):
@@ -702,7 +703,8 @@ def judge(ctx):
                 continue
             meta = dict(d["meta"] or {})
             lex = meta.get("relevance") or 0
-            final = round(0.4 * lex + 0.6 * sc / 3, 3)
+            # 大模型判为无关 / 只是顺带提到：封顶到门槛以下，不能靠关键词字面分混进榜单
+            final = round(min(0.4 * lex + 0.6 * sc / 3, {0: 0.15, 1: 0.35}.get(sc, 1.0)), 3)
             meta.update(rel_lex=lex, relevance=final, judge={"score": sc, "reason": str(x.get("reason", ""))[:40],
                                                                "task": ctx.task_id})
             db.update("documents", "id", d["id"], {"meta": meta})
