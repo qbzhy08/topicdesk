@@ -348,7 +348,7 @@ def plan(ctx):
             continue
         for e in db.query("SELECT d.url FROM evidence e JOIN documents d ON d.id=e.doc_id "
                           "WHERE e.claim_id=? AND e.stance='support' LIMIT 1", (f["id"],)):
-            _push(st, _fetch_action(e["url"], f"记忆中的时效性事实需复查：「{f['content'][:30]}」", prio=58))
+            _push(st, dict(_fetch_action(e["url"], f"记忆中的时效性事实需复查：「{f['content'][:30]}」", prio=58), force=True))
     for a in st["queue"]:
         a["initial"] = True        # 初始检索：保证每个来源至少查一次，不因资料数量提前达标而跳过
         if a["type"] == "search" and a["source"] in st["prefer_sources"]:
@@ -702,7 +702,7 @@ def _after_search(ctx, a, status, res):
                 _push(st, _fetch_action(it["url"], f"聚合站只有标题（{meta.get('points')} 分），追踪原文",
                                         prio=35 + min((meta.get("points") or 0) // 50, 20),
                                         base=it, doc_id=r["doc_id"]))
-        elif it["content_kind"] != "full" and a["source"] not in ("arxiv", "github", "openalex"):
+        elif it["content_kind"] != "full" and a["source"] not in ("arxiv", "github", "openalex", "pubmed"):
             mode = "browser" if meta.get("detail") == "browser" else "auto"
             _push(st, _fetch_action(it["url"], "RSS 只有摘要，抓取全文" +
                                     ("（前端渲染页面，用浏览器）" if mode == "browser" else ""),
@@ -737,6 +737,26 @@ def act(ctx):
     """执行一批行动：网络请求并行，结果按顺序处理（入库、追加后续行动、失败降级）。"""
     st, p = ctx.state, ctx.params
     batch = st.pop("current_batch", None) or [st.pop("current")]
+    # 已有全文且最近抓过的页面：直接复用库里的版本，不再联网（上次运行抓过的论文/仓库页常被再次引用）
+    reused = []
+    for a in [a for a in batch if a["type"] == "fetch" and not a.get("force")]:
+        old = db.query_one("SELECT * FROM documents WHERE canonical_url=? AND status='active' "
+                           "AND content_kind='full' AND fetched_at>? ORDER BY version DESC LIMIT 1",
+                           (canonical_url(a["url"]), db.now() - p.get("refetch_hours", 24) * 3600))
+        if not old:
+            continue
+        batch.remove(a)
+        st["done"].append(a["key"])
+        meta = dict(old["meta"] or {})
+        _save(ctx, {"url": old["url"], "title": old["title"], "text": old["text"], "content_kind": "full",
+                    "source_id": old["source_id"], "published_at": old["published_at"],
+                    "author": old.get("author"), "primary": meta.get("primary"),
+                    "relevance": meta.get("relevance"), "meta": {}}, "reuse")
+        reused.append(a["url"])
+    if reused:
+        ctx.observe(f"复用库中 {len(reused)} 篇最近抓过的全文，跳过联网：" + "、".join(u[:60] for u in reused))
+    if not batch:
+        return "decide"
     calls = []
     for a in batch:
         st["done"].append(a["key"])

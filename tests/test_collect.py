@@ -418,3 +418,34 @@ class GapFillTest(CollectBase):
         self.assertTrue(_kw_hit("位置外推", blob))                        # 中文二元组覆盖
         self.assertFalse(_kw_hit("rag", "average storage"))              # 不做子串误判（短词仍是原文匹配）
         self.assertFalse(_kw_hit("x", blob))
+
+
+class FetchCostTest(CollectBase):
+    """避免白等：最近抓过的全文直接复用；PubMed 摘要走接口；Gradio 应用页不开浏览器。"""
+
+    def test_second_run_reuses_recent_full_text(self):
+        params = {"no_llm": True, "max_docs": 30, "en_keywords": ["long context LLM"],
+                  "sources": ["hn", "github", "arxiv"]}
+        t1 = create_task("research", "开源大模型 长上下文 评测", params=params)
+        self.assertEqual(run_task(t1), "done")
+        first = self.web.calls.count("https://blog.example.com/long-context")
+        self.assertEqual(first, 1)
+        t2 = create_task("research", "开源大模型 长上下文 评测", params=params)
+        self.assertEqual(run_task(t2), "done")
+        self.assertEqual(self.web.calls.count("https://blog.example.com/long-context"), 1)   # 第二次没联网
+        doc = db.query_one("SELECT meta FROM documents WHERE url='https://blog.example.com/long-context'")
+        self.assertIn(t2, doc["meta"]["seen_by_tasks"])                                    # 但计入本次资料
+        obs = " ".join(s["summary"] or "" for s in db.query("SELECT summary FROM steps WHERE task_id=?", (t2,)))
+        self.assertIn("复用库中", obs)
+
+    def test_pubmed_abstract_via_api(self):
+        items = sources.search_pubmed({"id": "pubmed", "config": {}}, "long context LLM")
+        self.assertIn("dropped beyond 32K", items[0]["text"])
+        self.assertFalse(any("pubmed.ncbi.nlm.nih.gov/42211289" in c for c in self.web.calls))
+
+    def test_gradio_space_skips_browser(self):
+        called = []
+        browser.render = lambda *a, **k: called.append(a) or fixtures.fake_render(*a, **k)
+        art = sources.fetch_page("https://huggingface.co/spaces/snap-stanford/stark-leaderboard")
+        self.assertEqual(called, [])
+        self.assertFalse(art["via_browser"])

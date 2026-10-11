@@ -254,6 +254,19 @@ class FakeWeb:
             page = ("<html><head><title>LongEval</title></head><body><blockquote class='abstract'>"
                     + "We present a long context benchmark for open LLMs. " * 20 + "</blockquote></body></html>")
             return 200, H, page.encode(), url
+        if url.startswith("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch"):
+            return 200, J, json.dumps({"esearchresult": {"idlist": ["42211289"]}}).encode(), url
+        if url.startswith("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary"):
+            return 200, J, json.dumps({"result": {"42211289": {
+                "title": "Long context language models in clinical notes", "fulljournalname": "J Med AI",
+                "pubdate": "2026 Sep", "authors": [{"name": "Li X"}]}}}).encode(), url
+        if url.startswith("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch"):
+            return 200, X, (b"<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>42211289</PMID>"
+                            b"<Article><Abstract><AbstractText Label='RESULTS'>Accuracy of long context LLMs "
+                            b"on clinical notes dropped beyond 32K tokens.</AbstractText></Abstract></Article>"
+                            b"</MedlineCitation></PubmedArticle></PubmedArticleSet>"), url
+        if url.startswith("https://huggingface.co/spaces/"):
+            return 200, H, b"<html><head><title>Leaderboard</title></head><body><gradio-app></gradio-app></body></html>", url
         if url in self.images:
             return 200, {"content-type": "image/png"}, self.images[url], url
         if url.startswith("https://captcha.example.com"):

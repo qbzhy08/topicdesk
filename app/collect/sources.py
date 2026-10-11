@@ -464,6 +464,19 @@ def search_pubmed(source: dict, query: str, limit: int = 10, **_) -> list[dict]:
     r2 = fetcher.get(base + "esummary.fcgi?db=pubmed&retmode=json&id=" + ",".join(ids),
                      respect_robots=False, cache_ttl=6 * 3600)
     res = r2.json().get("result") or {}
+    abstracts = {}
+    try:      # 摘要用 efetch 一次批量取回，避免逐篇打开 PubMed 网页（网页常被拦截、渲染慢）
+        r3 = fetcher.get(base + "efetch.fcgi?db=pubmed&retmode=xml&rettype=abstract&id=" + ",".join(ids),
+                         respect_robots=False, cache_ttl=24 * 3600)
+        soup = BeautifulSoup(r3.content, "xml")
+        for art in soup.find_all("PubmedArticle"):
+            pmid = art.find("PMID")
+            parts = [(t.get("Label") + "：" if t.get("Label") else "") + t.get_text(" ", strip=True)
+                     for t in art.find_all("AbstractText")]
+            if pmid and parts:
+                abstracts[pmid.get_text(strip=True)] = "\n".join(parts)
+    except (FetchError, Exception):
+        pass
     items = []
     for pid in ids:
         x = res.get(pid) or {}
@@ -472,9 +485,9 @@ def search_pubmed(source: dict, query: str, limit: int = 10, **_) -> list[dict]:
             "url": f"https://pubmed.ncbi.nlm.nih.gov/{pid}/", "title": title,
             "author": ", ".join(a.get("name", "") for a in (x.get("authors") or [])[:5]),
             "published_at": x.get("sortpubdate") or x.get("pubdate"),
-            "summary": f"{x.get('fulljournalname', '')} {x.get('pubdate', '')}：{title}",
-            "text": None, "content_kind": "summary", "images": [], "source_id": "pubmed", "primary": True,
-            "meta": {"journal": x.get("fulljournalname"), "doc_type": "医学论文", "detail": "html"},
+            "summary": (abstracts.get(pid) or f"{x.get('fulljournalname', '')} {x.get('pubdate', '')}：{title}")[:600],
+            "text": abstracts.get(pid), "content_kind": "summary", "images": [], "source_id": "pubmed",
+            "primary": True, "meta": {"journal": x.get("fulljournalname"), "doc_type": "医学论文摘要"},
         })
     return items
 
@@ -502,11 +515,20 @@ def search(source_id: str, query: str, limit: int = 15, terms: list[str] | None 
 
 # ---------------------------------------------------------------- 单页抓取（含降级）
 
+NO_BROWSER = [
+    re.compile(r"huggingface\.co/spaces/"),     # Gradio/Streamlit 应用，内容在 iframe 里且不断轮询
+    re.compile(r"pubmed\.ncbi\.nlm\.nih\.gov/"),  # 摘要已由 efetch 接口取得；网页常返回验证页
+    re.compile(r"\.streamlit\.app/|\.gradio\.live/"),
+]
+
+
 def fetch_page(url: str, mode: str = "auto") -> dict:
     """抓取单个网页。mode: html / browser / auto（静态正文太少时自动改用浏览器渲染）。
     返回 extract_article 的结果 + {final_url, via_browser, attempts}。"""
     attempts = []
     art = None
+    if mode == "auto" and any(p.search(url) for p in NO_BROWSER):
+        mode = "html"         # 这类页面浏览器渲染也拿不到正文，只会白等 20 多秒
     if mode in ("html", "auto"):
         try:
             r = fetcher.get(url)

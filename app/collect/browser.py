@@ -56,7 +56,7 @@ def render(url: str, wait_selector: str | None = None, timeout: float = 25) -> d
                 if wait_selector:
                     page.wait_for_selector(wait_selector, timeout=8000)
                 else:
-                    page.wait_for_load_state("networkidle", timeout=8000)
+                    page.wait_for_load_state("networkidle", timeout=4000)
             except PWTimeout:
                 pass  # 部分页面长连接永远不 idle，已有内容即可
             try:
