@@ -800,7 +800,10 @@ def fetch_page(url: str, mode: str = "auto", fresh: bool = False) -> dict:
                 art = extract_article(r.text, r.final_url)
             art.update(final_url=r.final_url, via_browser=False)
             attempts.append({"mode": "html", "ok": True, "chars": len(art["text"]),
-                             "cache": r.from_cache})
+                             "cache": r.from_cache, "elapsed_ms": r.elapsed_ms, "status": r.status,
+                             "robots": "allowed",
+                             # 普通抓取实际看到的文字（用于和浏览器渲染结果对比）
+                             "preview": re.sub(r"\s+", " ", art["text"] or art.get("title") or "")[:160]})
             if mode == "html" or len(art["text"]) >= 400:
                 art["attempts"] = attempts
                 return art
@@ -808,6 +811,20 @@ def fetch_page(url: str, mode: str = "auto", fresh: bool = False) -> dict:
         except FetchError as e:
             attempts.append({"mode": "html", "ok": False, **e.to_dict()})
             if e.kind in ("robots", "not_found") or mode == "html":
+                e.attempts = attempts
+                raise
+    if mode == "browser" and art is None:
+        # 已知前端渲染的站点直接用浏览器；但先快速取一次静态页（5 秒内），只用来记录“普通抓取能看到什么”作对比
+        try:
+            r0 = fetcher.get(url, timeout=5)
+            a0 = extract_article(r0.text, r0.final_url)
+            attempts.append({"mode": "html", "ok": True, "chars": len(a0["text"]), "cache": r0.from_cache,
+                             "elapsed_ms": r0.elapsed_ms, "status": r0.status, "robots": "allowed", "probe": True,
+                             "note": "已知前端渲染站点，静态页只作对比",
+                             "preview": re.sub(r"\s+", " ", a0["text"] or a0.get("title") or "")[:160]})
+        except FetchError as e:
+            attempts.append({"mode": "html", "ok": False, "probe": True, **e.to_dict()})
+            if e.kind == "robots":
                 e.attempts = attempts
                 raise
     from .browser import render

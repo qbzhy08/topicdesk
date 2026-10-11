@@ -209,6 +209,11 @@ def article_to_item(art: dict, url: str, source_id: str = "web", base: dict | No
                 cover=art.get("cover"), out_links=art.get("links", [])[:30])
     if art.get("doc_type"):
         meta["doc_type"] = art["doc_type"]
+    before = base.get("text") or base.get("summary") or ""
+    if base.get("url") and before is not None:
+        # 抓取前已有的内容（RSS / 搜索结果里的摘要），用于说明“抓全文带来了什么”
+        meta["before_fetch"] = {"kind": base.get("content_kind") or ("summary" if before else "title"),
+                                "chars": len(before), "source": base.get("source_id")}
     return {
         "url": base.get("url") or art.get("final_url") or url,
         "title": art.get("title") or base.get("title"),

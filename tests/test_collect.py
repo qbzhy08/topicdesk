@@ -620,3 +620,32 @@ class RobustnessTest(CollectBase):
             TOOLS["page_fetch"].fn = orig
         st = db.query_one("SELECT state FROM tasks WHERE id=?", (tid,))["state"]
         self.assertTrue(any("gzip" in (f.get("reason") or "") for f in st["failures"]))
+
+
+class FetchCardDataTest(CollectBase):
+    def test_dynamic_page_records_comparison_data_and_paste(self):
+        """少数派动态页：记录普通抓取预览/耗时、抓取前摘要、浏览器渲染；报告汇总动态页面；失败页可粘贴正文。"""
+        tid = create_task("research", "开源大模型 长上下文 评测",
+                          params={"no_llm": True, "max_docs": 30, "keywords": ["长上下文"], "en_keywords": ["long context LLM"],
+                                  "days": 365, "sources": ["sspai", "hn"], "verify_top": False})
+        self.assertEqual(run_task(tid), "done")
+        d = db.query_one("SELECT * FROM documents WHERE url='https://sspai.com/post/1001' AND status='active'")
+        att = d["meta"]["fetch_attempts"]
+        html = next(a for a in att if a["mode"] == "html")
+        br = next(a for a in att if a["mode"] == "browser")
+        self.assertTrue(br["ok"])
+        self.assertIn("preview", html)
+        self.assertLess(html["chars"], br["chars"])
+        self.assertIn("before_fetch", d["meta"])
+        rep = db.query_one("SELECT state FROM tasks WHERE id=?", (tid,))["state"]["report"]
+        self.assertGreaterEqual(rep["dynamic"]["rendered"], 1)
+        self.assertIsNotNone(rep["dynamic"]["example"])
+        # 被拦截、只有摘要的页面：用户粘贴正文 → 变成全文
+        from app import server
+        c = server.app.test_client()
+        pw = db.query_one("SELECT id FROM documents WHERE url='https://paywall.example.com/a'")
+        self.assertEqual(c.post(f"/api/docs/{pw['id']}/paste", json={"text": "太短"}).status_code, 400)
+        r = c.post(f"/api/docs/{pw['id']}/paste", json={"text": "这是用户从原网页复制的正文，" * 10}).json
+        nd = db.query_one("SELECT content_kind, meta FROM documents WHERE id=?", (r["doc_id"],))
+        self.assertEqual(nd["content_kind"], "full")
+        self.assertEqual(nd["meta"]["provided_by"], "human")

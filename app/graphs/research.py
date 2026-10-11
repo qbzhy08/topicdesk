@@ -1335,6 +1335,22 @@ register_graph(Graph(name="reassess", start="reassess", nodes=dict(reassess=reas
 
 # ---------------------------------------------------------------- 节点：report
 
+def _dynamic_summary(docs: list[dict]) -> dict:
+    """动态页面处理汇总：普通抓取正文太短、改用浏览器渲染的有几篇，成功 / 失败各几篇，挑一个最有代表性的例子。"""
+    ok, failed = [], []
+    for d in docs:
+        att = (d["meta"] or {}).get("fetch_attempts") or []
+        br = next((a for a in att if a.get("mode") == "browser"), None)
+        if not br:
+            continue
+        html = next((a for a in att if a.get("mode") == "html"), {}) or {}
+        (ok if br.get("ok") else failed).append((br.get("chars", 0) - (html.get("chars") or 0), d))
+    ok.sort(key=lambda x: -x[0])
+    ex = ok[0][1] if ok else (failed[0][1] if failed else None)
+    return {"rendered": len(ok), "failed": len(failed),
+            "example": {"id": ex["id"], "title": ex["title"]} if ex else None}
+
+
 def report(ctx):
     st = ctx.state
     docs = _task_docs(ctx.task_id)
@@ -1415,6 +1431,7 @@ def report(ctx):
     }
     st["report"] = {
         "quality": quality, "delivered_docs": top_docs, "ranking": st.get("ranking"),
+        "dynamic": _dynamic_summary(docs),
         "covered_at": st.get("covered_at"), "dropped_after_cover": st.get("dropped_after_cover", 0),
         "domains": st.get("domains"), "source_ids": st.get("source_ids"),
         "memory": memory_report,

@@ -229,6 +229,25 @@ def get_doc(did):
     return jsonify(d)
 
 
+@app.post("/api/docs/<did>/paste")
+def paste_doc(did):
+    """抓取失败时由用户粘贴正文：作为人工提供的全文入库（新版本或补全），并记录来源是人工。"""
+    from .collect.store import upsert_document
+    d = db.query_one("SELECT * FROM documents WHERE id=?", (did,))
+    if d is None:
+        abort(404)
+    text = ((request.get_json(silent=True) or {}).get("text") or "").strip()
+    if len(text) < 50:
+        return jsonify(error="正文太短（至少 50 字）"), 400
+    meta = {"provided_by": "human", "extract_method": "human",
+            "fetch_attempts": ((d["meta"] or {}).get("fetch_attempts") or []) + [{"mode": "human", "ok": True, "chars": len(text)}]}
+    r = upsert_document({"url": d["url"], "title": d["title"], "author": d["author"], "published_at": d["published_at"],
+                         "text": text, "content_kind": "full", "source_id": d["source_id"],
+                         "primary": (d["meta"] or {}).get("primary"), "relevance": (d["meta"] or {}).get("relevance"),
+                         "meta": meta}, d["topic"])
+    return jsonify(r)
+
+
 @app.get("/media/<path:p>")
 def media(p):
     return send_from_directory(config.DATA_DIR, p)

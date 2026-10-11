@@ -394,6 +394,8 @@ function renderReport(rep, state) {
       ${rep.memory ? memoryReport(rep.memory) : ""}
       ${rep.domains ? `<p class="small">主题领域：${rep.domains.map((d) => DOMAIN_NAME[d] || d).join("、")}；选用来源 ${rep.source_ids?.length || 0} 个：${(rep.source_ids || []).map((id) => esc(sourcesCache.find((x) => x.id === id)?.name || id)).join("、")}</p>` : ""}
       ${rep.quality ? qualityReport(rep.quality) : ""}
+      ${rep.dynamic && (rep.dynamic.rendered || rep.dynamic.failed) ? `<p class="small"><b>动态页面</b>：${rep.dynamic.rendered} 篇普通抓取拿不到正文，改用浏览器渲染后成功${rep.dynamic.failed ? `；${rep.dynamic.failed} 篇浏览器也被拦截，保留摘要（可在资料页粘贴正文）` : ""}。
+        ${rep.dynamic.example ? `例子：<a href="#/doc/${rep.dynamic.example.id}">${esc((rep.dynamic.example.title || "").slice(0, 40))}</a>` : ""}</p>` : ""}
       ${aspectPlanReport(state?.aspect_plan)}
       <h4>覆盖矩阵</h4>${covTable(rep.coverage)}
       ${rep.covered_at ? `<p class="small">在第 ${rep.covered_at.docs} 篇资料时覆盖了全部子问题，之后只做收尾${rep.dropped_after_cover ? `，放弃了 ${rep.dropped_after_cover} 个低价值行动` : ""}。</p>` : ""}
@@ -591,6 +593,89 @@ function docRow(d) {
     </div></a>`;
 }
 
+// ---------------------------------------------------------------- 采集过程卡片
+// 只把会影响“信不信这份资料、要不要做点什么”的信息放在明面上：结果 → 关键判断 → 前后对比 → 代价 → 合规 → 需要你做的；
+// 请求头、重试、原始记录等收进“技术细节”。
+const KIND_FULL = { full: "全文", excerpt: "节选", summary: "摘要", title: "标题" };
+const secs = (ms) => (ms == null ? "" : ms < 100 ? "<0.1 s" : ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`);
+const ERR_KIND = { blocked: "被拦截（访问受限或验证页）", timeout: "超时", robots: "robots.txt 不允许", not_found: "页面不存在",
+  network: "网络不可达", bad_content: "内容无法解析", rate_limit: "被限流", server: "服务器错误" };
+
+function fetchCard(d) {
+  const m = d.meta || {};
+  const att = m.fetch_attempts || [];
+  if (!att.length) return "";
+  const html = att.find((a) => a.mode === "html");
+  const br = att.find((a) => a.mode === "browser");
+  const human = att.find((a) => a.mode === "human");
+  const kept = (d.images || []).filter((i) => i.status === "kept").length;
+  const full = d.content_kind === "full";
+  const chars = (d.text || "").length;
+  const before = m.before_fetch;
+  const dynamic = !!br;
+  const status = full ? `<span class="fc-ok">✓ 已拿到全文</span>` : `<span class="fc-warn">⚠ 只有${KIND_FULL[d.content_kind] || "摘要"}</span>`;
+  const kindLabel = human ? "人工提供正文" : dynamic ? (br.ok ? "前端渲染页面" : "动态页面 · 抓取受阻") : "静态页面";
+
+  // ① 结果
+  const result = `${KIND_FULL[d.content_kind] || ""} ${chars.toLocaleString()} 字${kept ? ` · 配图 ${kept} 张` : ""}`
+    + (before && before.chars < chars ? `<span class="fc-before">（抓取前只有 ${before.chars} 字${KIND_FULL[before.kind] || "摘要"}）</span>` : "");
+
+  // ② 关键判断：每一步一行
+  const steps = [];
+  if (html) {
+    const why = !html.ok ? `失败：${ERR_KIND[html.kind] || html.kind || ""}` :
+      dynamic ? (html.probe ? `只有 ${html.chars} 字（该站已知为前端渲染，直接用浏览器）` : `只有 ${html.chars} 字，正文太短 → 改用浏览器打开`)
+        : `${html.chars} 字，正文完整`;
+    steps.push(`<li class="${html.ok && !dynamic ? "ok" : dynamic && html.ok ? "turn" : "bad"}"><b>普通抓取</b><span class="fc-t">${html.cache ? "缓存" : secs(html.elapsed_ms)}</span><span>${esc(why)}</span></li>`);
+  }
+  if (br) {
+    steps.push(`<li class="${br.ok ? "ok" : "bad"}"><b>浏览器渲染</b><span class="fc-t">${secs(br.elapsed_ms)}</span><span>${br.ok ? `${br.chars} 字 ✓` : `失败：${esc(br.reason ? br.reason.replace(/^浏览器/, "").slice(0, 40) : (ERR_KIND[br.kind] || br.kind || ""))}`}</span></li>`);
+  }
+  if (human) steps.push(`<li class="ok"><b>人工粘贴</b><span class="fc-t"></span><span>${human.chars} 字 ✓</span></li>`);
+
+  // ③ 前后对比：只在“换了方式且换成功”时才有意义
+  const compare = dynamic && br.ok && html?.ok && html.preview != null ? `<div class="fc-compare">
+      <div><small>普通抓取看到的（${html.chars} 字）</small><p>${esc(html.preview || "（几乎没有正文）")}</p></div>
+      <div><small>浏览器渲染后（${(br.chars || chars).toLocaleString()} 字）</small><p>${esc((d.text || "").replace(/\s+/g, " ").slice(0, 160))}…</p></div></div>` : "";
+
+  // ④ 代价：只有用了浏览器才值得说
+  const cost = dynamic && br.ok && br.elapsed_ms ? `<p class="fc-note">${html?.elapsed_ms >= 100
+      ? `浏览器渲染耗时约为普通抓取的 ${Math.max(2, Math.round(br.elapsed_ms / html.elapsed_ms))} 倍`
+      : `浏览器渲染用时 ${secs(br.elapsed_ms)}，普通抓取不到 0.1 秒`}，所以只在普通抓取拿不到正文时才用。</p>` : "";
+
+  // ⑤ 合规
+  const robotsNo = att.some((a) => a.kind === "robots");
+  const comply = `<p class="fc-badges">${robotsNo ? `<span class="tag">robots.txt 不允许 · 已停止</span>` : `<span class="tag">遵守 robots.txt</span>`}<span class="tag">未登录</span><span class="tag">未绕过验证码</span></p>`;
+
+  // ⑥ 需要你做的：只在没拿到全文时出现
+  const action = !full ? `<div class="fc-action"><p><b>需要你帮忙：</b>${dynamic ? "浏览器也没能打开正文。" : "没能拿到正文。"}已保留${KIND_FULL[d.content_kind] || "摘要"}；
+      如果这篇重要，打开<a href="${esc(d.url)}" target="_blank" rel="noopener">原文</a>，把正文粘贴到这里：</p>
+      <textarea rows="4" data-paste placeholder="粘贴正文（至少 50 字）"></textarea>
+      <button class="ghost sm" data-paste-btn="${esc(d.id)}">保存为全文</button> <small data-paste-msg></small></div>` : "";
+
+  return `<section class="card fetch-card">
+    <header><h3>采集过程</h3>${status}</header>
+    <p class="fc-kind">${esc(d.source?.name || d.source_id)} · ${kindLabel}</p>
+    <p class="fc-result">${result}</p>
+    <ol class="fc-steps">${steps.join("")}</ol>
+    ${compare}${cost}${comply}${action}
+    <details class="fc-tech"><summary>查看技术细节</summary><pre>${esc(JSON.stringify(att, null, 1))}</pre></details>
+  </section>`;
+}
+
+function bindPaste(el) {
+  const b = el.querySelector("[data-paste-btn]");
+  if (!b) return;
+  b.onclick = async () => {
+    const msg = el.querySelector("[data-paste-msg]");
+    try {
+      const r = await api(`/api/docs/${b.dataset.pasteBtn}/paste`, { method: "POST", body: { text: el.querySelector("[data-paste]").value } });
+      location.hash = `#/doc/${r.doc_id}`;
+      if (r.doc_id === b.dataset.pasteBtn) showDoc(r.doc_id);
+    } catch (err) { msg.textContent = err.message; }
+  };
+}
+
 async function showDoc(id) {
   const el = $("#detail");
   const d = await api(`/api/docs/${id}`);
@@ -609,6 +694,7 @@ async function showDoc(id) {
       ${m.license ? `<tr><th>使用条件</th><td>${esc(m.license)}</td></tr>` : ""}
       ${d.recheck_at ? `<tr><th>下次复查</th><td>${fmtTime(d.recheck_at)}</td></tr>` : ""}
     </table>
+    ${fetchCard(d)}
     ${d.versions.length > 1 ? `<h3>版本历史</h3><ul class="small">${d.versions.map((v) => `<li><a href="#/doc/${v.id}">v${v.version}</a> · ${fmtTime(v.fetched_at)} · ${v.status === "superseded" ? "已被新版本取代" : "当前"}${v.change ? ` · 相似度 ${v.change.similarity}${v.change.numbers_removed?.length ? ` · 数字变化：${esc(v.change.numbers_removed.join(","))} → ${esc(v.change.numbers_added.join(","))}` : ""}` : ""}
       ${v.change?.sentences_added?.length ? `<br><small>新增：${esc(v.change.sentences_added.slice(0, 2).join(" / "))}</small>` : ""}</li>`).join("")}</ul>` : ""}
     ${d.reprints.length ? `<h3>转载 / 重复</h3>${d.reprints.map(docRow).join("")}` : ""}
@@ -624,8 +710,9 @@ async function showDoc(id) {
             <br><small>段落位置 ${i.position ?? "—"} · ${esc(i.license || "")}</small>
             <br><small><a href="${esc(i.url)}" target="_blank" rel="noopener">原图地址</a></small></figcaption>
         </figure>`).join("")}</div>` : ""}
-    ${m.fetch_attempts ? `<h3>抓取过程</h3><pre>${esc(JSON.stringify(m.fetch_attempts, null, 1))}</pre>` : ""}
+
     <h3>正文</h3><div class="doc-text">${(d.text || "").split(/\n+/).map((p) => p.startsWith("## ") ? `<h4>${esc(p.slice(3))}</h4>` : `<p>${esc(p)}</p>`).join("")}</div>`;
+  bindPaste(el);
 }
 
 // ---------------------------------------------------------------- 记忆
