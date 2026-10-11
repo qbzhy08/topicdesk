@@ -558,3 +558,31 @@ class RecheckScopeTest(CollectBase):
         self.assertEqual(run_task(tid), "done")
         rep = db.query_one("SELECT state FROM tasks WHERE id=?", (tid,))["state"]["report"]
         self.assertEqual(rep["checked"], 0)
+
+    def test_recheck_uses_status_apis(self):
+        params = {"no_llm": True, "max_docs": 30, "en_keywords": ["long context LLM"],
+                  "sources": ["hn", "github", "arxiv"]}
+        t1 = create_task("research", "开源大模型 长上下文 评测", params=params)
+        self.assertEqual(run_task(t1), "done")
+        r1 = create_task("recheck", "开源大模型 长上下文 评测", params={"force": True, "scope_task": t1})
+        self.assertEqual(run_task(r1), "done")
+        calls = db.query("SELECT tool, input FROM tool_calls WHERE task_id=?", (r1,))
+        fetched = [c["input"]["url"] for c in calls if c["tool"] == "page_fetch"]
+        self.assertFalse(any("github.com/example/longeval" in u or "arxiv.org" in u for u in fetched))
+        self.assertEqual(sum(c["tool"] == "github_status" for c in calls), 1)
+        rep = db.query_one("SELECT state FROM tasks WHERE id=?", (r1,))["state"]["report"]
+        gh = next(i for i in rep["items"] if "github.com/example/longeval" in i["url"])
+        self.assertEqual(gh["outcome"], "unchanged")
+        # 仓库有新提交 → 才打开页面看具体变化
+        old = fixtures.GH_JSON
+        fixtures.GH_JSON = old.replace("2026-10-05T00:00:00Z", "2026-10-10T00:00:00Z")
+        try:
+            r2 = create_task("recheck", "开源大模型 长上下文 评测", params={"force": True, "scope_task": t1})
+            self.assertEqual(run_task(r2), "done")
+        finally:
+            fixtures.GH_JSON = old
+        rep2 = db.query_one("SELECT state FROM tasks WHERE id=?", (r2,))["state"]["report"]
+        gh2 = next(i for i in rep2["items"] if "github.com/example/longeval" in i["url"])
+        self.assertIn("有新提交", gh2["note"])
+        fetched2 = [c["input"]["url"] for c in db.query("SELECT input FROM tool_calls WHERE task_id=? AND tool='page_fetch'", (r2,))]
+        self.assertIn("https://github.com/example/longeval", fetched2)

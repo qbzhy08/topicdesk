@@ -1187,7 +1187,9 @@ def _recheck_why(d: dict) -> str:
 
 def recheck(ctx):
     """复查可能变化的页面（代码仓库、论文、刚发布的新闻）。
-    范围：scope_task（某次任务的资料）> 主题 > 全部。定时复查只查到期的；手动复查（force）查范围内所有待复查页面。"""
+    范围：scope_task（某次任务的资料）> 主题 > 全部。定时复查只查到期的；手动复查（force）查范围内所有待复查页面。
+    提速：GitHub 仓库先批量查最近推送时间、arXiv 先批量查最新版本，没变就不打开网页；
+    其余网页绕过缓存并行抓取，只用静态 HTML（原先需要浏览器渲染的页面除外）。"""
     p = ctx.params
     limit = p.get("limit", 20)
     sql = "SELECT * FROM documents WHERE status='active' AND recheck_at IS NOT NULL"
@@ -1208,34 +1210,124 @@ def recheck(ctx):
     st.setdefault("stats", {})
     scope = (f"任务 {p['scope_task']} 的资料" if p.get("scope_task") else
              f"主题「{ctx.topic}」" if ctx.topic and ctx.topic != "*" else "全部主题")
-    ctx.think(f"复查范围：{scope}；{'手动复查：范围内所有可能变化的页面' if p.get('force') else '定时复查：只查已到复查时间的页面'}，"
-              f"共 {len(due)} 篇" + ("" if due else "。没有需要复查的页面"))
     done_ids = {r["doc_id"] for r in st["results"]}
-    for d in due:
-        if d["id"] in done_ids:
-            continue
-        res = {"doc_id": d["id"], "title": d["title"], "url": d["url"], "why": _recheck_why(d)}
-        try:
-            art = ctx.tool("page_fetch", url=d["url"], mode="auto")
-            item = article_to_item(art, d["url"], base={"source_id": d["source_id"], "url": d["url"],
-                                                        "title": d["title"],
-                                                        "primary": (d["meta"] or {}).get("primary")})
-            item["meta"]["extract_method"] = "browser" if art.get("via_browser") else "html"
-            r = upsert_document(item, d["topic"], task_id=ctx.task_id)
-            outcome = r["action"]
-            if outcome == "updated":
-                new = db.query_one("SELECT meta, version FROM documents WHERE id=?", (r["doc_id"],))
-                ch = (new["meta"] or {}).get("change") or {}
-                res.update(new_doc_id=r["doc_id"], version=new["version"],
-                           change={k: ch.get(k) for k in ("similarity", "numbers_added", "numbers_removed",
-                                                         "sentences_added", "sentences_removed")})
-        except FetchError as e:
-            outcome = "failed"
-            res["error"] = f"{e.kind}：{e.reason}"
+    todo = [d for d in due if d["id"] not in done_ids]
+    gh, ax, web = [], [], []
+    for d in todo:
+        u = d["canonical_url"] or d["url"] or ""
+        m_gh = re.match(r"https?://github\.com/([\w.-]+/[\w.-]+?)/?$", u)
+        m_ax = re.search(r"arxiv\.org/(?:abs|pdf)/(\d{4}\.\d{4,5})", u)
+        if m_gh:
+            gh.append((m_gh.group(1), d))
+        elif m_ax:
+            ax.append((m_ax.group(1), d))
+        else:
+            web.append(d)
+    ctx.think(f"复查范围：{scope}；{'手动复查：范围内所有可能变化的页面' if p.get('force') else '定时复查：只查已到复查时间的页面'}，"
+              f"共 {len(due)} 篇" + (f"（代码仓库 {len(gh)}、论文 {len(ax)}、网页 {len(web)}）" if todo else "") +
+              ("" if due else "。没有需要复查的页面") +
+              ("。仓库和论文先批量查更新时间/版本号，没变就不打开网页；网页并行抓取" if gh or ax else ""))
+
+    def finish(d, res, outcome):
         nxt = None if outcome == "updated" else db.now() + 3 * 86400
         db.update("documents", "id", d["id"], {"recheck_at": nxt})
         res["outcome"] = outcome
         st["results"].append(res)
+
+    def merge_meta(d, **kw):
+        meta = dict(d["meta"] or {})
+        meta.update({k: v for k, v in kw.items() if v is not None})
+        db.update("documents", "id", d["id"], {"meta": meta})
+
+    def base_res(d):
+        return {"doc_id": d["id"], "title": d["title"], "url": d["url"], "why": _recheck_why(d)}
+
+    def from_upsert(res, r):
+        if r["action"] == "updated":
+            new = db.query_one("SELECT meta, version FROM documents WHERE id=?", (r["doc_id"],))
+            ch = (new["meta"] or {}).get("change") or {}
+            res.update(new_doc_id=r["doc_id"], version=new["version"],
+                       change={k: ch.get(k) for k in ("similarity", "numbers_added", "numbers_removed",
+                                                     "sentences_added", "sentences_removed")})
+        return r["action"]
+
+    refetch = []        # (doc, 说明)：状态显示有变化、需要打开网页看具体改了什么
+    # ---- GitHub：一次搜索请求查多个仓库的最近推送时间
+    if gh:
+        try:
+            info = ctx.tool("github_status", repos=[n for n, _ in gh])
+        except FetchError as e:
+            ctx.think(f"GitHub 状态接口失败（{e.kind}），改为直接抓仓库页面")
+            info = None
+            web += [d for _, d in gh]
+        for name, d in gh if info is not None else []:
+            res = base_res(d)
+            i = info.get(name.lower())
+            old = (d["meta"] or {}).get("pushed_at")
+            if not i:
+                res["error"] = "仓库不存在、已改名或设为私有"
+                finish(d, res, "failed")
+                continue
+            merge_meta(d, pushed_at=i["pushed_at"], stars=i["stars"])
+            if old and i["pushed_at"] and i["pushed_at"] > old:
+                refetch.append((d, f"有新提交（最近推送 {old[:10]} → {i['pushed_at'][:10]}）"))
+            else:
+                res["note"] = f"最近推送 {(i['pushed_at'] or '')[:10]}" + ("，未变" if old else "（首次记录，作为下次比较的基线）")
+                finish(d, res, "unchanged")
+    # ---- arXiv：一次请求查多篇论文的最新版本
+    if ax:
+        try:
+            info = ctx.tool("arxiv_status", ids=[i for i, _ in ax])
+        except FetchError as e:
+            ctx.think(f"arXiv 接口失败（{e.kind}），改为直接抓论文页面")
+            info = None
+            web += [d for _, d in ax]
+        for aid, d in ax if info is not None else []:
+            res = base_res(d)
+            i = info.get(aid)
+            if not i:
+                res["error"] = "arXiv 未返回该论文"
+                finish(d, res, "failed")
+                continue
+            mv = re.search(r"v(\d+)$", d["url"] or "")
+            old_v = int(mv.group(1)) if mv else (d["meta"] or {}).get("arxiv_version")
+            old_up = (d["meta"] or {}).get("updated")
+            changed = (old_v and i["version"] > old_v) or (not old_v and old_up and i["updated"] > old_up)
+            merge_meta(d, arxiv_version=i["version"], updated=i["updated"])
+            if changed:
+                r = upsert_document({"url": i["url"], "title": i["title"], "summary": i["summary"],
+                                     "text": i["summary"], "content_kind": d["content_kind"] if d["content_kind"] != "full" else "summary",
+                                     "source_id": d["source_id"], "primary": True,
+                                     "meta": {"arxiv_version": i["version"], "updated": i["updated"]}},
+                                    d["topic"], task_id=ctx.task_id)
+                res["note"] = f"发布了新版本 v{old_v or '?'} → v{i['version']}"
+                from_upsert(res, r)
+                finish(d, res, "updated")      # 新版本本身就是更新，即使摘要没变
+            else:
+                res["note"] = f"仍是 v{i['version']}"
+                finish(d, res, "unchanged")
+    # ---- 网页（及有新提交的仓库）：绕过缓存并行抓取
+    pages = [(d, "") for d in web] + refetch
+    if pages:
+        calls = [("page_fetch", dict(url=d["url"], fresh=True,
+                                      mode="auto" if (d["meta"] or {}).get("extract_method") == "browser" else "html"))
+                 for d, _ in pages]
+        outs = ctx.tool_parallel(calls, max_workers=p.get("parallel", 6))
+        for (d, note), (status, out) in zip(pages, outs):
+            res = base_res(d)
+            if note:
+                res["note"] = note
+            if status == "error":
+                res["error"] = f"{getattr(out, 'kind', 'error')}：{getattr(out, 'reason', str(out))[:80]}"
+                finish(d, res, "failed")
+                continue
+            item = article_to_item(out, d["url"], base={"source_id": d["source_id"], "url": d["url"],
+                                                        "title": d["title"],
+                                                        "primary": (d["meta"] or {}).get("primary")})
+            item["meta"]["extract_method"] = (d["meta"] or {}).get("extract_method") or \
+                ("browser" if out.get("via_browser") else "html")
+            r = upsert_document(item, d["topic"], task_id=ctx.task_id)
+            finish(d, res, from_upsert(res, r))
     summary = {}
     for r in st["results"]:
         summary[r["outcome"]] = summary.get(r["outcome"], 0) + 1
@@ -1246,8 +1338,11 @@ def recheck(ctx):
                              [ctx.topic] if ctx.topic and ctx.topic != "*" else []))
     st["report"] = {"kind": "recheck", "scope": scope, "force": bool(p.get("force")),
                     "checked": len(st["results"]), "summary": summary, "items": st["results"],
-                    "next_due": upcoming["t"], "pending": upcoming["n"]}
-    ctx.observe(f"复查 {len(st['results'])} 篇：{json.dumps(summary, ensure_ascii=False)}")
+                    "next_due": upcoming["t"], "pending": upcoming["n"],
+                    "by_kind": {"github": len(gh), "arxiv": len(ax), "web": len(web)},
+                    "opened_pages": len(pages)}
+    ctx.observe(f"复查 {len(st['results'])} 篇：{json.dumps(summary, ensure_ascii=False)}；"
+                f"实际打开网页 {len(pages)} 个（其余用接口确认未变）")
     return END
 
 

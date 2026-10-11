@@ -239,7 +239,8 @@ function recheckReport(rep) {
     c.sentences_added?.length ? `新增：${esc(c.sentences_added[0].slice(0, 60))}…` : "",
     c.sentences_removed?.length ? `删除：${esc(c.sentences_removed[0].slice(0, 60))}…` : ""].filter(Boolean).join("<br>");
   return `<div class="card report"><h3>复查结果</h3>
-    <p class="small">范围：${esc(rep.scope)} · ${rep.force ? "手动复查（范围内所有可能变化的页面）" : "定时复查（只查已到期的页面）"}</p>
+    <p class="small">范围：${esc(rep.scope)} · ${rep.force ? "手动复查（范围内所有可能变化的页面）" : "定时复查（只查已到期的页面）"}
+      ${rep.by_kind ? ` · 代码仓库 ${rep.by_kind.github}、论文 ${rep.by_kind.arxiv}、网页 ${rep.by_kind.web}；实际打开网页 ${rep.opened_pages} 个，其余通过接口确认未变` : ""}</p>
     <div class="stats">
       <div><b>${rep.checked}</b><small>已复查</small></div>
       <div><b>${rep.summary?.updated || 0}</b><small>有更新</small></div>
@@ -249,7 +250,7 @@ function recheckReport(rep) {
     ${items.length ? `<table class="tbl"><tr><th>页面</th><th>为什么复查</th><th>结果</th></tr>${items.map((r) => `
       <tr><td><a href="#/doc/${r.new_doc_id || r.doc_id}">${esc(r.title || r.url)}</a></td><td class="small">${esc(r.why || "")}</td>
       <td><span class="tag ${r.outcome === "updated" ? "nv-update" : ""}">${OUT[r.outcome] || esc(r.outcome)}</span>
-      ${r.version ? ` v${r.version}` : ""}${r.error ? `<br><small>${esc(r.error)}</small>` : ""}
+      ${r.version ? ` v${r.version}` : ""}${r.note ? `<br><small>${esc(r.note)}</small>` : ""}${r.error ? `<br><small>${esc(r.error)}</small>` : ""}
       ${r.change ? `<br><small>${changeTxt(r.change)}</small>` : ""}</td></tr>`).join("")}</table>`
     : `<p class="empty">这个范围内没有需要复查的页面。只有代码仓库、arXiv 论文和 3 天内发布的新闻会被安排复查。</p>`}
     <p class="small">范围内仍在复查计划中的页面 ${rep.pending} 篇${rep.next_due ? `，下次到期 ${fmtTime(rep.next_due)}` : ""}。</p></div>`;

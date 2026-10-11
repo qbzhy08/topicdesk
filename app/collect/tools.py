@@ -17,8 +17,18 @@ def source_search(source_id: str, query: str, limit: int = 15, terms: list | Non
 
 
 @tool("page_fetch", "抓取单个网页并抽取正文、元数据和候选配图；静态页正文不足时用浏览器渲染")
-def page_fetch(url: str, mode: str = "auto"):
-    return sources.fetch_page(url, mode=mode)
+def page_fetch(url: str, mode: str = "auto", fresh: bool = False):
+    return sources.fetch_page(url, mode=mode, fresh=fresh)
+
+
+@tool("github_status", "批量查询 GitHub 仓库最近推送时间（复查用，不打开网页）", cacheable=False)
+def github_status(repos: list):
+    return sources.github_status(repos)
+
+
+@tool("arxiv_status", "批量查询 arXiv 论文最新版本（复查用，不打开网页）", cacheable=False)
+def arxiv_status(ids: list):
+    return sources.arxiv_status(ids)
 
 
 @tool("image_download", "下载图片并做清晰度、尺寸、宽高比检查", cacheable=True)

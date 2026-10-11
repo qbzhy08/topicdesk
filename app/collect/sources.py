@@ -549,10 +549,59 @@ NO_BROWSER = [
     re.compile(r"huggingface\.co/spaces/"),     # Gradio/Streamlit 应用，内容在 iframe 里且不断轮询
     re.compile(r"pubmed\.ncbi\.nlm\.nih\.gov/"),  # 摘要已由 efetch 接口取得；网页常返回验证页
     re.compile(r"\.streamlit\.app/|\.gradio\.live/"),
+    re.compile(r"github\.com/[\w.-]+/[\w.-]+/?($|[?#])"),   # 仓库页静态 HTML 已含 README；README 短时浏览器也拿不到更多
+    re.compile(r"arxiv\.org/(abs|pdf)/"),                    # 论文页是静态的
 ]
 
 
-def fetch_page(url: str, mode: str = "auto") -> dict:
+# ---------------------------------------------------------------- 复查用：轻量状态查询
+
+def github_status(repos: list[str]) -> dict:
+    """批量查询仓库最近推送时间：一次搜索请求可带多个 repo: 条件，14 个仓库约 3 次请求。
+    返回 {"owner/name": {"pushed_at", "stars", "description"}}。"""
+    out, chunk = {}, []
+    headers = {"Accept": "application/vnd.github+json"}
+    if os.environ.get("GITHUB_TOKEN"):
+        headers["Authorization"] = "Bearer " + os.environ["GITHUB_TOKEN"]
+
+    def flush(names):
+        if not names:
+            return
+        q = " ".join(f"repo:{n}" for n in names)
+        r = fetcher.get("https://api.github.com/search/repositories?per_page=100&q=" + quote(q),
+                        respect_robots=False, cache_ttl=0, headers=headers)
+        for repo in r.json().get("items", []):
+            out[repo["full_name"].lower()] = {"pushed_at": repo.get("pushed_at"),
+                                              "stars": repo.get("stargazers_count"),
+                                              "description": repo.get("description") or ""}
+    for n in repos:
+        if len(" ".join(f"repo:{x}" for x in chunk + [n])) > 240:
+            flush(chunk)
+            chunk = []
+        chunk.append(n)
+    flush(chunk)
+    return out
+
+
+def arxiv_status(ids: list[str]) -> dict:
+    """批量查询论文最新版本：一次请求。返回 {"2410.01234": {"version", "updated", "title", "summary", "url"}}。"""
+    if not ids:
+        return {}
+    r = fetcher.get("https://export.arxiv.org/api/query?max_results=100&id_list=" + ",".join(ids),
+                    respect_robots=False, cache_ttl=0)
+    out = {}
+    for e in BeautifulSoup(r.text, "xml").find_all("entry"):
+        m = re.search(r"abs/([\w.\-/]+?)(v(\d+))?$", e.find("id").get_text(strip=True))
+        if not m:
+            continue
+        out[m.group(1)] = {"version": int(m.group(3) or 1), "updated": e.find("updated").get_text(strip=True),
+                           "title": re.sub(r"\s+", " ", e.find("title").get_text()).strip(),
+                           "summary": re.sub(r"\s+", " ", e.find("summary").get_text()).strip(),
+                           "url": e.find("id").get_text(strip=True)}
+    return out
+
+
+def fetch_page(url: str, mode: str = "auto", fresh: bool = False) -> dict:
     """抓取单个网页。mode: html / browser / auto（静态正文太少时自动改用浏览器渲染）。
     返回 extract_article 的结果 + {final_url, via_browser, attempts}。"""
     attempts = []
@@ -561,7 +610,7 @@ def fetch_page(url: str, mode: str = "auto") -> dict:
         mode = "html"         # 这类页面浏览器渲染也拿不到正文，只会白等 20 多秒
     if mode in ("html", "auto"):
         try:
-            r = fetcher.get(url)
+            r = fetcher.get(url, cache_ttl=0 if fresh else None)     # 复查必须绕过缓存
             ct = r.headers.get("content-type", "")
             if "pdf" in ct or r.final_url.lower().endswith(".pdf"):
                 art = _pdf_article(r)
