@@ -33,6 +33,19 @@ if [ ! -f .venv/.deps-ok ] || [ requirements.txt -nt .venv/.deps-ok ]; then
 fi
 
 PORT="${PORT:-8000}"
+# 端口上还有旧的主题编辑台在运行（例如没关旧窗口又双击了一次）：先关掉，否则新版启动失败、浏览器打开的仍是旧版
+OLD_PIDS=$(lsof -ti tcp:"$PORT" -sTCP:LISTEN 2>/dev/null)
+for pid in $OLD_PIDS; do
+  if ps -p "$pid" -o command= | grep -q "run.py"; then
+    echo "端口 $PORT 上有旧的服务（进程 $pid），先关闭它…"
+    kill "$pid" 2>/dev/null; sleep 1
+    kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+  else
+    echo "端口 $PORT 被其他程序占用（进程 $pid：$(ps -p "$pid" -o comm=)）。"
+    echo "可以关掉那个程序，或者用其他端口启动：PORT=8002 bash start.command"
+    read -r -p "按回车键退出" _; exit 1
+  fi
+done
 echo "启动服务：http://127.0.0.1:$PORT  （关闭此窗口或按 Ctrl+C 停止）"
 ( sleep 2; open "http://127.0.0.1:$PORT/${OPEN_PATH:-}" ) &
 exec .venv/bin/python run.py --port "$PORT" --auto-resume "$@"
