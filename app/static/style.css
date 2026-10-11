@@ -30,7 +30,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .detail-col { min-width: 0; }
 .histbar {
   position: sticky; top: 0; z-index: 30; display: flex; align-items: center; gap: 12px;
-  padding: 8px 32px; background: color-mix(in srgb, var(--paper) 90%, transparent);
+  padding: 8px 32px; background: color-mix(in srgb, var(--paper) 97%, transparent);
   backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); border-bottom: 1px solid var(--line);
   font: 13px var(--sans);
 }
