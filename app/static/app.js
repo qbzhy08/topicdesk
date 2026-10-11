@@ -413,7 +413,8 @@ function renderReport(rep, state) {
 
 const VERIFY = { supported: "已核实", unverified: "待核实", disputed: "有争议", refuted: "已被否定" };
 const MSTATUS = { active: "有效", stale: "需复查/需更正", superseded: "已被更正", deleted: "已删除",
-  invalid: "已失效", resolved: "已裁决" };
+  invalid: "已失效", resolved: "已裁决", archived: "不再参考" };
+const mstatus = (m) => m.kind === "delivery" && m.status === "stale" ? "部分结论已过期" : (MSTATUS[m.status] || m.status);
 
 function memoryReport(m) {
   const chip = (n, v) => `<span class="chip">${n} <b>${v}</b></span>`;
@@ -798,7 +799,7 @@ function memRow(m) {
     <div class="doc-main"><b>${esc(m.content)}</b>
       <small>${esc(m.kind)} · 更新 ${fmtTime(m.updated_at)} · 使用 ${m.used_count} 次${m.last_used_at ? `（最近 ${fmtTime(m.last_used_at)}）` : ""}${m.note ? ` · ${esc(m.note)}` : ""}</small></div>
     <div class="doc-tags">
-      <span class="tag st-${m.status}">${MSTATUS[m.status] || m.status}</span>
+      ${m.invalid_value ? "" : `<span class="tag st-${m.status}">${mstatus(m)}</span>`}
       ${m.invalid_value ? `<span class="tag v-refuted">内容无效，未生效（建议删除）</span>` : ""}
       ${v ? `<span class="tag v-${v}">${VERIFY[v] || v}</span>` : ""}
       ${m.meta?.independent != null ? `<span class="tag">独立来源 ${m.meta.independent}${m.meta.reprints ? ` · 转载 ${m.meta.reprints}` : ""}</span>` : ""}
@@ -820,7 +821,8 @@ async function showMemoryHome(qs) {
     <div class="detail-head"><div><p class="kicker">记忆</p><h1>下次再来，别从头开始</h1>
       <p class="meta">每条记忆都记录来源、适用范围、更新时间和使用次数；可以查看证据、更正或删除，失效会同步到派生条目。</p></div></div>
     <div class="card"><h3>用户偏好（长期）</h3>
-      ${prefs.map(memRow).join("") || '<p class="small">还没有长期偏好。任务里的“本次要求”默认不会保存，勾选“同时保存为长期偏好”或在这里添加才会生效。</p>'}
+      ${prefs.map((p) => memRow(p) + (p.suggest ? `<div class="fix-row">这条偏好的类型选错了，所以没有生效。
+        <button class="ghost sm" data-fix="${p.id}" data-type="${p.suggest.type}" data-value="${p.suggest.value}">${esc(p.suggest.label)}</button></div>` : "")).join("") || '<p class="small">还没有长期偏好。任务里的“本次要求”默认不会保存，勾选“同时保存为长期偏好”或在这里添加才会生效。</p>'}
       <form id="pref-form" class="row pref-form" style="margin-top:10px">
         <select name="type">${Object.entries(PREF_TYPES).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select>
         <input name="value" required>
@@ -835,8 +837,16 @@ async function showMemoryHome(qs) {
     ${topic ? `
     <h3>未解争议</h3>${by("dispute").map(memRow).join("") || '<p class="small">无</p>'}
     <h3>事实与验证状态</h3>${by("fact").map(memRow).join("") || '<p class="small">无</p>'}
-    <h3>历史交付</h3>${by("delivery").map(memRow).join("") || '<p class="small">无</p>'}
+    <h3>历史交付</h3><p class="small">每次检索交付了哪些资料和事实。下次检索会参考它，说明“与上次相比”的变化；其中的事实被更正时，它会标为“部分结论已过期”。</p>
+    ${by("delivery").map(memRow).join("") || '<p class="small">无</p>'}
     <details class="card"><summary>下一次任务会召回什么（预览，约 ${preview.tokens} token，预算外舍弃 ${preview.dropped} 条）</summary><pre>${esc(preview.text || "（无）")}</pre></details>` : ""}`;
+  $$("[data-fix]").forEach((b) => b.onclick = async () => {
+    try {
+      await api("/api/preferences", { method: "POST", body: { type: b.dataset.type, value: +b.dataset.value } });
+      await api(`/api/memories/${b.dataset.fix}`, { method: "DELETE", body: { reason: "类型选错，已改为阅读时间" } });
+      showMemoryHome(qs);
+    } catch (err) { b.insertAdjacentText("afterend", " " + err.message); }
+  });
   $("#mem-topic").onchange = (e) => location.hash = `#/memory?topic=${encodeURIComponent(e.target.value)}${showDead ? "&all=1" : ""}`;
   $("#mem-dead").onchange = (e) => location.hash = `#/memory?topic=${encodeURIComponent(topic)}${e.target.checked ? "&all=1" : ""}`;
   const PH = { reading_minutes: "分钟数，如 5", background: "如：程序员，熟悉机器学习", focus: "多个用逗号分隔，如：复现, 开源",
@@ -869,12 +879,13 @@ async function showMemory(id) {
   const el = $("#detail");
   const m = await api(`/api/memories/${id}`);
   const alive = ["active", "stale"].includes(m.status);
+  const isDelivery = m.kind === "delivery";
   el.innerHTML = `
     <p class="kicker"><a href="#/memory?topic=${encodeURIComponent(m.topic || "")}">← 记忆</a></p>
     <h1 class="doc-title">${esc(m.content)}</h1>
     <table class="tbl meta-tbl">
       <tr><th>类型</th><td>${esc(m.scope)} / ${esc(m.kind)}${m.meta?.type ? ` / ${esc(PREF_TYPES[m.meta.type] || m.meta.type)}` : ""}</td></tr>
-      <tr><th>状态</th><td><span class="tag st-${m.status}">${MSTATUS[m.status] || m.status}</span>
+      <tr><th>状态</th><td><span class="tag st-${m.status}">${mstatus(m)}</span>
         ${m.meta?.verify ? `<span class="tag v-${m.meta.verify}">${VERIFY[m.meta.verify]}</span>` : ""} ${esc(m.note || "")}</td></tr>
       ${m.meta?.independent != null ? `<tr><th>证据强度</th><td>独立来源 ${m.meta.independent} 个${m.meta.primary ? "（含一手来源）" : ""}；转载 ${m.meta.reprints || 0} 篇（不重复计数）${m.meta.generated_ignored ? `；系统生成内容 ${m.meta.generated_ignored} 条已忽略` : ""}；置信度 ${m.confidence ?? "—"}</td></tr>` : ""}
       <tr><th>适用范围</th><td>${esc(m.applies_to || "all")}${m.topic ? ` · 主题：${esc(m.topic)}` : ""}</td></tr>
@@ -884,7 +895,13 @@ async function showMemory(id) {
       ${m.meta?.previous_content ? `<tr><th>更正前</th><td><s>${esc(m.meta.previous_content)}</s></td></tr>` : ""}
       ${m.successor ? `<tr><th>已被更正为</th><td><a href="#/memory/${m.successor.id}">${esc(m.successor.content)}</a></td></tr>` : ""}
     </table>
-    ${alive ? `<form id="mem-edit" class="card"><h3>更正这条记忆</h3>
+    ${isDelivery && (alive || m.status === "archived") ? `<div class="card" id="dlv-actions"><h3>这条交付记录</h3>
+      <p class="small">交付记录是“发生过什么”的历史，没有对错，所以不提供更正。${m.status === "archived"
+        ? "它现在<b>不再参考</b>：下次检索不会召回，但记录保留，可以随时恢复。" : "不想让下次检索参考它时，选“不再参考”即可，记录会保留、可以恢复。"}</p>
+      <div class="row">${m.status === "archived" ? `<button id="dlv-restore">恢复参考</button>` : `<button id="dlv-archive">不再参考</button>`}
+        <button type="button" class="ghost danger sm" id="dlv-del">彻底删除…</button></div>
+      <div id="dlv-impact" hidden></div></div>` : ""}
+    ${alive && !isDelivery ? `<form id="mem-edit" class="card"><h3>更正这条记忆</h3>
       <textarea name="content" rows="2" style="width:100%">${esc(m.content)}</textarea>
       <input name="reason" placeholder="更正原因（可空）" style="width:100%;margin:6px 0;padding:6px">
       <div class="row"><button>保存更正</button><button type="button" class="ghost danger" id="mem-del">删除这条记忆</button></div>
@@ -896,7 +913,23 @@ async function showMemory(id) {
     ${m.derived?.length ? `<h3>派生条目</h3><ul class="small">${m.derived.map((u) => `<li><a href="#/memory/${u.id}">${esc(u.content)}</a> · ${esc(MSTATUS[u.status] || u.status)}</li>`).join("")}</ul>` : ""}
     <h3>变化记录</h3><ol class="timeline">${m.events.map((e) => `<li class="ok"><div class="step-head"><b>${esc(e.event)}</b><span>${esc(e.actor)} · ${fmtTime(e.created_at)}${e.task_id ? ` · <a href="#/task/${e.task_id}">${esc(e.task_id)}</a>` : ""}</span></div>
       ${e.detail && Object.keys(e.detail).length ? `<p class="obs">${esc(JSON.stringify(e.detail))}</p>` : ""}</li>`).join("")}</ol>`;
-  if (alive) {
+  if (isDelivery && $("#dlv-actions")) {
+    const ar = $("#dlv-archive"), rs = $("#dlv-restore");
+    if (ar) ar.onclick = async () => { await api(`/api/memories/${id}/archive`, { method: "POST", body: {} }); showMemory(id); };
+    if (rs) rs.onclick = async () => { await api(`/api/memories/${id}/restore`, { method: "POST", body: {} }); showMemory(id); };
+    $("#dlv-del").onclick = async () => {
+      const box = $("#dlv-impact");
+      const imp = await api(`/api/memories/${id}/impact`);
+      box.hidden = false;
+      box.innerHTML = `<div class="fc-action"><p><b>彻底删除后无法恢复。</b>这次交付包含 ${imp.docs} 篇资料、${imp.facts} 条事实。影响：</p>
+        <ul class="small">${imp.effects.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
+        <p class="small">如果只是不想让下次检索参考它，用“不再参考”更合适。</p>
+        <div class="row"><button class="danger" id="dlv-del-yes">确认彻底删除</button><button class="ghost" id="dlv-del-no">取消</button></div></div>`;
+      $("#dlv-del-no").onclick = () => { box.hidden = true; };
+      $("#dlv-del-yes").onclick = async () => { await api(`/api/memories/${id}`, { method: "DELETE", body: { reason: "用户彻底删除交付记录" } }); showMemory(id); };
+    };
+  }
+  if (alive && !isDelivery) {
     $("#mem-edit").onsubmit = async (e) => {
       e.preventDefault();
       const f = new FormData(e.target);

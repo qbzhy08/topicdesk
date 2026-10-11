@@ -102,12 +102,57 @@ def cascade(mid: str, new_status: str, reason: str, *, actor: str = "system", ta
         if d["id"] in seen or d["status"] in DEAD:
             continue
         seen.add(d["id"])
+        if d["status"] == "archived":       # 已“不再参考”的交付：保持归档，只记下它也过期了
+            update(d["id"], {"meta": {**(d["meta"] or {}), "stale_while_archived": reason}}, "stale",
+                   {"upstream": mid, "reason": reason, "archived": True}, actor=actor, task_id=task_id)
+            hit.append(d["id"])
+            continue
         note = f"{reason}（上游 {mid}）"
         update(d["id"], {"status": new_status, "note": note}, "invalidate" if new_status == "invalid"
                else "stale", {"upstream": mid, "reason": reason}, actor=actor, task_id=task_id)
         hit.append(d["id"])
         hit += cascade(d["id"], new_status, reason, actor=actor, task_id=task_id, _seen=seen)
     return hit
+
+
+def archive(mid: str, *, actor: str = "user", reason: str = "用户选择不再参考") -> dict:
+    """历史交付“不再参考”：下次任务不召回，但记录保留、可以恢复（历史没有对错，不提供更正）。"""
+    m = get(mid)
+    if m is None:
+        raise KeyError(mid)
+    if m["kind"] != "delivery":
+        raise ValueError("只有历史交付可以设为“不再参考”；偏好和事实请更正或删除")
+    if m["status"] in DEAD:
+        raise ValueError("这条记忆已失效，不能归档")
+    meta = {**(m["meta"] or {}), "archived_from": m["status"]}
+    update(mid, {"status": "archived", "note": reason, "meta": meta}, "archive", {"reason": reason}, actor=actor)
+    return {"archived": mid}
+
+
+def restore(mid: str, *, actor: str = "user") -> dict:
+    m = get(mid)
+    if m is None:
+        raise KeyError(mid)
+    if m["status"] != "archived":
+        raise ValueError("只有“不再参考”的记忆可以恢复")
+    meta = dict(m["meta"] or {})
+    back = meta.pop("archived_from", "active")
+    if meta.pop("stale_while_archived", None):
+        back = "stale"          # 归档期间依据被更正：恢复后标为需更正
+    update(mid, {"status": back, "note": None, "meta": meta}, "restore", {"to": back}, actor=actor)
+    return {"restored": mid, "status": back}
+
+
+def delivery_impact(mid: str) -> dict:
+    """彻底删除前的影响说明。"""
+    m = get(mid)
+    meta = (m or {}).get("meta") or {}
+    return {"docs": len(meta.get("docs") or []), "facts": sum(1 for x in (m or {}).get("derived_from") or []
+                                                             if str(x).startswith("m_")),
+            "task": meta.get("task"),
+            "effects": ["下次检索无法与这次交付对比（“与上次相比”缺少这一次）",
+                        "这次交付用到的事实以后被更正时，不会再提醒你这次交付已过期",
+                        "资料本身、去重和“新进展”判断不受影响（它们依据资料库，不依据交付记录）"]}
 
 
 def delete(mid: str, *, actor: str = "user", reason: str = "用户删除", task_id=None) -> dict:
@@ -283,6 +328,8 @@ def validate_preference(ptype: str, value):
     text = "，".join(items)
     if len(text) < 2 or text.isdigit():
         raise PreferenceError("内容太短或是纯数字，请写清楚，例如：程序员，熟悉机器学习")
+    if re.fullmatch(r"\s*\d+\s*(分钟|min|mins|minutes|分)\s*", text, re.I):
+        raise PreferenceError(f"“{text}”看起来是阅读时间，请把类型选为“阅读时间（分钟）”")
     return text
 
 
@@ -348,7 +395,7 @@ def list_memories(scope: str | None = None, topic: str | None = None, kind: str 
             sql += f" AND {col}=?"
             args.append(val)
     if status == "alive":
-        sql += " AND status IN ('active','stale')"
+        sql += " AND (status IN ('active','stale') OR (status='archived' AND kind='delivery'))"
     elif status:
         sql += " AND status=?"
         args.append(status)
@@ -356,6 +403,11 @@ def list_memories(scope: str | None = None, topic: str | None = None, kind: str 
     for r in rows:
         if r["kind"] == "preference" and not pref_valid(r):
             r["invalid_value"] = True
+            v = str((r["meta"] or {}).get("value") or "")
+            mm = re.fullmatch(r"\s*(\d+)\s*(分钟|min|mins|minutes|分)\s*", v, re.I)
+            if mm and (r["meta"] or {}).get("type") != "reading_minutes":
+                r["suggest"] = {"type": "reading_minutes", "value": int(mm.group(1)),
+                                "label": f"改为“阅读时间：{mm.group(1)} 分钟”"}
     return rows
 
 

@@ -394,3 +394,8 @@ small.muted, .muted { color: var(--muted); }
   .fc-steps .fc-t { display: none; }
 }
 .fc-steps li.one { grid-template-columns: 22px 80px 1fr; }
+.fix-row { margin: -2px 0 10px; padding: 6px 12px; font-size: 13px; color: var(--warn);
+  border: 1px dashed color-mix(in srgb, var(--warn) 50%, var(--line)); border-top: 0; border-radius: 0 0 6px 6px; }
+.fix-row button { margin-left: 8px; }
+.tag.st-archived { color: var(--muted); border-style: dashed; }
+button.danger:not(.ghost) { background: var(--accent); color: #fff; }

@@ -188,3 +188,30 @@ class LegacyPrefTest(CollectBase):
         self.assertEqual(rec["preferences"], [])
         rows = mem.list_memories(scope="user", kind="preference")
         self.assertTrue(all(r.get("invalid_value") for r in rows))
+
+
+class DeliveryArchiveTest(CollectBase):
+    def test_archive_restore_and_recall(self):
+        from app import memory_facts as mf
+        f = mem.add("topic", "fact", "128K 时准确率下降到六成", topic="T")
+        did = mf.record_delivery("T", "t_1", "default", "检索交付 5 篇", [f], ["d_1"], {})
+        self.assertIn(did, mem.recall("default", "T")["used"])
+        with self.assertRaises(ValueError):
+            mem.archive(f)                                  # 只有交付可以“不再参考”
+        mem.archive(did)
+        self.assertNotIn(did, mem.recall("default", "T")["used"])          # 不再召回
+        self.assertIn(did, [m["id"] for m in mem.list_memories("topic", "T", "delivery", "alive")])  # 仍可见
+        mem.correct(f, "64K 时准确率下降到六成")              # 归档期间事实被更正
+        self.assertEqual(mem.get(did)["status"], "archived")
+        self.assertEqual(mem.restore(did)["status"], "stale")              # 恢复后标为部分结论已过期
+        self.assertIn(did, mem.recall("default", "T")["used"])
+        imp = mem.delivery_impact(did)
+        self.assertEqual((imp["docs"], imp["facts"]), (1, 1))
+
+    def test_minutes_in_wrong_pref_type(self):
+        with self.assertRaises(mem.PreferenceError):
+            mem.validate_preference("background", "5分钟")
+        m = mem.add("user", "preference", "知识背景：5分钟", meta={"type": "background", "value": "5分钟"})
+        row = next(r for r in mem.list_memories("user", kind="preference") if r["id"] == m)
+        self.assertTrue(row["invalid_value"])
+        self.assertEqual(row["suggest"]["value"], 5)

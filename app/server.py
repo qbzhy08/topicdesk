@@ -540,6 +540,33 @@ def delete_mem(mid):
         abort(404)
 
 
+@app.post("/api/memories/<mid>/archive")
+def archive_mem(mid):
+    try:
+        return jsonify(mem.archive(mid, reason=(request.get_json(silent=True) or {}).get("reason") or "用户选择不再参考"))
+    except KeyError:
+        abort(404)
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+
+
+@app.post("/api/memories/<mid>/restore")
+def restore_mem(mid):
+    try:
+        return jsonify(mem.restore(mid))
+    except KeyError:
+        abort(404)
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+
+
+@app.get("/api/memories/<mid>/impact")
+def impact_mem(mid):
+    if not mem.get(mid):
+        abort(404)
+    return jsonify(mem.delivery_impact(mid))
+
+
 @app.post("/api/preferences")
 def add_pref():
     b = request.get_json(force=True)
