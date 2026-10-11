@@ -24,9 +24,18 @@ a { color: inherit; }
 button, input, select, textarea { font: inherit; color: inherit; }
 
 .masthead {
-  display: flex; align-items: baseline; justify-content: space-between;
+  display: flex; align-items: center; justify-content: space-between;
   padding: 14px 24px; border-bottom: 2px solid var(--ink);
 }
+.mast-left { display: flex; align-items: center; gap: 14px; }
+.histnav { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--card); }
+.histnav button {
+  width: 34px; height: 30px; border: 0; background: none; color: var(--ink); font: 600 16px var(--sans);
+  cursor: pointer; line-height: 1;
+}
+.histnav button + button { border-left: 1px solid var(--line); }
+.histnav button:hover:not(:disabled) { background: var(--paper); color: var(--accent); }
+.histnav button:disabled { color: var(--line); cursor: default; }
 .brand { font: 700 22px var(--serif); text-decoration: none; letter-spacing: .04em; }
 .brand span { font: 500 11px var(--mono); color: var(--muted); margin-left: 10px; letter-spacing: .1em; }
 .masthead nav a { margin-left: 18px; text-decoration: none; color: var(--muted); }

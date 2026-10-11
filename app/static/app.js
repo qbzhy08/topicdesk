@@ -39,6 +39,7 @@ async function init() {
   setupTranslate();
   $("#import-form").addEventListener("submit", submitImport);
   window.addEventListener("hashchange", route);
+  setupHistNav();
   route();
   refreshList();
   setInterval(refreshList, 5000);
@@ -156,6 +157,23 @@ const store = {
   get(k) { try { return JSON.parse(localStorage.getItem("td:" + k)); } catch { return null; } },
   set(k, v) { try { localStorage.setItem("td:" + k, JSON.stringify(v)); } catch { /* 隐私模式等 */ } },
 };
+
+// ---- 页面内的返回 / 前进按钮（等同浏览器的后退、前进；页面都是 # 路由，历史记录天然可用）
+function setupHistNav() {
+  const back = $("#nav-back"), fwd = $("#nav-fwd");
+  const nav = window.navigation;              // Chrome/Edge 支持，可判断能否后退/前进
+  const sync = () => {
+    if (nav && "canGoBack" in nav) {
+      back.disabled = !nav.canGoBack;
+      fwd.disabled = !nav.canGoForward;
+    }
+  };
+  back.onclick = () => history.back();
+  fwd.onclick = () => history.forward();
+  window.addEventListener("hashchange", () => setTimeout(sync, 0));
+  nav?.addEventListener?.("currententrychange", sync);
+  sync();
+}
 
 let routedOnce = false;
 
