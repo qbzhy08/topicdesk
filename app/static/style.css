@@ -183,3 +183,6 @@ code { font-family: var(--mono); font-size: 12px; background: var(--paper); padd
 .domain-pick { margin: 6px 0 10px; }
 .domain-pick .opt { display: inline-flex; margin-right: 10px; }
 .pref-form select { padding: 7px 9px; background: var(--paper); border: 1px solid var(--line); border-radius: 4px; }
+
+.kw-bar { display: flex; justify-content: space-between; align-items: center; margin: -4px 0 2px; }
+.kw-note { margin: 0 0 10px; line-height: 1.5; }

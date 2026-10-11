@@ -391,6 +391,19 @@ def mem_topics():
                             "('active','stale') GROUP BY topic ORDER BY last DESC"))
 
 
+@app.post("/api/keywords/suggest")
+def suggest_keywords():
+    from . import keywords
+    b = request.get_json(force=True)
+    topic = (b.get("topic") or "").strip()
+    if not topic:
+        return jsonify(error="请先填写主题"), 400
+    try:
+        return jsonify(keywords.suggest(topic, b.get("keywords") or [], b.get("en_keywords") or []))
+    except Exception as e:
+        return jsonify(error=str(e)[:200]), 500
+
+
 @app.get("/api/replay")
 def replay_info():
     from . import replay

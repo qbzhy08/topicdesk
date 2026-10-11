@@ -305,3 +305,35 @@ class ImportGraphTest(CollectBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TranslateTest(CollectBase):
+    def test_dictionary_translation(self):
+        from app import keywords
+        r = keywords.suggest("大模型长上下文", use_llm=False)
+        self.assertIn("长上下文", r["terms_zh"])
+        self.assertTrue(any("long context" in q.lower() for q in r["queries_en"]))
+        r2 = keywords.suggest("long context LLM benchmark", use_llm=False)
+        self.assertIn("长上下文", r2["terms_zh"])
+        self.assertEqual(r2["queries_en"], ["long context LLM benchmark"])
+
+    def test_research_fills_missing_language(self):
+        tid = create_task("research", "开源大模型 长上下文 评测",
+                          params={"no_llm": True, "max_docs": 10, "sources": ["ithome", "arxiv"]},
+                          budget={"max_tool_calls": 100})
+        self.assertEqual(run_task(tid), "done")
+        task = db.query_one("SELECT * FROM tasks WHERE id=?", (tid,))
+        q = task["state"]["plan"]["queries_en"]
+        self.assertTrue(any("long context" in x.lower() for x in q))     # 没填英文也会自动补
+        searched = [t["input"] for t in db.query("SELECT input FROM tool_calls WHERE task_id=? AND tool='source_search'", (tid,))]
+        self.assertTrue(any(i["source_id"] == "arxiv" for i in searched))
+        plan = db.query_one("SELECT thought FROM steps WHERE task_id=? AND node='plan'", (tid,))["thought"]
+        self.assertIn("自动翻译", plan)
+
+    def test_user_keywords_are_kept(self):
+        tid = create_task("research", "开源大模型 长上下文 评测",
+                          params={"no_llm": True, "max_docs": 5, "en_keywords": ["my custom query"],
+                                  "sources": ["arxiv"]}, budget={"max_tool_calls": 60})
+        run_task(tid)
+        task = db.query_one("SELECT * FROM tasks WHERE id=?", (tid,))
+        self.assertEqual(task["state"]["plan"]["queries_en"], ["my custom query"])   # 用户填写的优先，不被覆盖

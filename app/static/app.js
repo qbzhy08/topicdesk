@@ -28,11 +28,43 @@ async function init() {
   sel.innerHTML = graphs.map((g) => `<option value="${esc(g.name)}" ${g.name === "research" ? "selected" : ""}>${esc(GRAPH_NAME[g.name] || g.name)}</option>`).join("");
   await loadSourceChecks();
   $("#new-task").addEventListener("submit", submitTask);
+  setupTranslate();
   $("#import-form").addEventListener("submit", submitImport);
   window.addEventListener("hashchange", route);
   route();
   refreshList();
   setInterval(refreshList, 5000);
+}
+
+// ---- 中英文关键词自动翻译：主题填写后自动补全，用户可直接修改；手动改过的字段不再被覆盖
+const kwState = { edited: { keywords: false, en_keywords: false }, lastTopic: "" };
+
+function setupTranslate() {
+  const f = $("#new-task");
+  ["keywords", "en_keywords"].forEach((n) => f[n].addEventListener("input", () => { kwState.edited[n] = true; }));
+  f.topic.addEventListener("blur", () => { if (f.auto_translate.checked && f.topic.value.trim() !== kwState.lastTopic) translateKeywords(false); });
+  $("#kw-btn").onclick = () => translateKeywords(true);
+}
+
+async function translateKeywords(force) {
+  const f = $("#new-task");
+  const topic = f.topic.value.trim();
+  if (!topic) return;
+  kwState.lastTopic = topic;
+  const note = $("#kw-note");
+  note.textContent = "翻译中…";
+  // 手动重新翻译时，把用户已填写的词作为约束保留下来
+  const body = { topic, keywords: kwState.edited.keywords ? split(f.keywords.value) : [],
+    en_keywords: kwState.edited.en_keywords ? split(f.en_keywords.value) : [] };
+  try {
+    const r = await api("/api/keywords/suggest", { method: "POST", body });
+    if (force || !kwState.edited.keywords) f.keywords.value = r.terms_zh.join(", ");
+    if (force || !kwState.edited.en_keywords) f.en_keywords.value = r.queries_en.join(", ");
+    const doms = (r.domains || []).map((d) => DOMAIN_NAME[d] || d).join("、");
+    note.innerHTML = `${r.by === "llm" ? "大模型翻译" : "术语词典翻译"}${r.cached ? "（缓存）" : ""}；领域判断：${esc(doms)}`
+      + (r.alt_zh?.length || r.alt_en?.length ? `<br>备用说法（检索无结果时自动换用）：${esc([...(r.alt_zh || []), ...(r.alt_en || [])].join("、"))}` : "")
+      + ((r.notes || []).some((n) => n.includes("未收录")) ? `<br><span class="gap">${esc(r.notes.find((n) => n.includes("未收录")))}</span>` : "");
+  } catch (err) { note.textContent = "翻译失败：" + err.message; }
 }
 
 async function loadSourceChecks() {
@@ -59,6 +91,7 @@ async function submitTask(e) {
     this_time: f.get("tt_save") ? {} : thisTime,
     domains: f.getAll("domain").length ? f.getAll("domain") : undefined,
     keywords: split(f.get("keywords")), en_keywords: split(f.get("en_keywords")),
+    auto_translate: !!f.get("auto_translate"),
     sources: allChecked() ? undefined : f.getAll("src"), max_docs: Number(f.get("max_docs")), max_fetch: Number(f.get("max_fetch")),
     hitl_on_block: !!f.get("hitl_on_block"), ...extra } : extra;
   try {

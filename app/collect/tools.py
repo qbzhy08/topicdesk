@@ -26,3 +26,9 @@ def image_download(url: str, referer: str | None = None):
 @tool("llm", "调用大模型（OpenAI 兼容接口）")
 def llm_call(messages: list, json_mode: bool = True, max_tokens: int = 1500):
     return llm.chat(messages, json_mode=json_mode, max_tokens=max_tokens)
+
+
+@tool("translate_keywords", "中英文关键词互译与同义扩展（大模型优先，词典兜底）")
+def translate_keywords(topic: str, zh: list | None = None, en: list | None = None, use_llm: bool = True):
+    from .. import keywords
+    return keywords.suggest(topic, zh or [], en or [], use_llm=use_llm)

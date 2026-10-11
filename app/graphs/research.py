@@ -27,6 +27,7 @@ from ..collect import tools as _tools  # noqa: F401  注册工具
 from ..collect.dedup import canonical_url, parse_date
 from ..collect.fetch import FetchError
 from ..collect.images import store_images
+from ..keywords import is_english
 from ..collect.sources import (DOMAINS, guess_domains, is_primary, list_sources, relevance,
                                 source_domains, topic_terms)
 from ..collect.store import article_to_item, topic_last_run, upsert_document
@@ -172,11 +173,40 @@ def plan(ctx):
     for n in eff["notes"]:
         ctx.think(n)
 
-    terms_zh = list(dict.fromkeys(topic_terms(ctx.topic) + list(p.get("keywords") or [])))
+    english_topic = is_english(ctx.topic)
+    terms_zh = list(dict.fromkeys(([] if english_topic else topic_terms(ctx.topic)) + list(p.get("keywords") or [])))
     queries_en = list(p.get("en_keywords") or [])
+    if english_topic and ctx.topic not in queries_en:
+        queries_en.insert(0, ctx.topic)
     aspects = [dict(a) for a in DEFAULT_ASPECTS]
     prefs = eff["prefs"]
     llm_domains = []
+    alt_zh, alt_en = [], []
+    # ---- 中英文关键词自动翻译（默认开启）：缺哪种语言就补哪种；同义词留作检索无结果时自动调整
+    if p.get("auto_translate", True):
+        try:
+            tr = ctx.tool("translate_keywords", topic=ctx.topic, zh=list(p.get("keywords") or []),
+                          en=list(p.get("en_keywords") or []), use_llm=not p.get("no_llm"))
+            added_zh = [t for t in tr["terms_zh"] if t not in terms_zh]
+            added_en = [q for q in tr["queries_en"] if q not in queries_en]
+            if not p.get("keywords") or english_topic:
+                terms_zh = list(dict.fromkeys(terms_zh + added_zh))
+            else:
+                added_zh = []
+            if not p.get("en_keywords"):
+                queries_en = list(dict.fromkeys(queries_en + added_en))[:4]
+            else:
+                added_en = []
+            alt_zh, alt_en = tr.get("alt_zh") or [], tr.get("alt_en") or []
+            llm_domains = [x for x in tr.get("domains") or [] if x in DOMAINS] if tr.get("by") == "llm" else []
+            ctx.think(f"自动翻译（{'大模型' if tr.get('by') == 'llm' else '术语词典'}"
+                      f"{'，缓存' if tr.get('cached') else ''}）："
+                      + (f"补充中文词 {added_zh}；" if added_zh else "")
+                      + (f"补充英文检索式 {added_en}；" if added_en else "")
+                      + (f"备用说法 {alt_zh + alt_en}；" if alt_zh or alt_en else "")
+                      + "；".join(tr.get("notes") or []))
+        except Exception as e:
+            ctx.think(f"自动翻译失败（{str(e)[:60]}），按原关键词检索")
 
     def _vals(v):
         return [x.strip() for x in (re.split(r"[,，、;；]", v) if isinstance(v, str) else v or []) if str(x).strip()]
@@ -187,7 +217,7 @@ def plan(ctx):
                 {"role": "system", "content": "你只输出 JSON。"},
                 {"role": "user", "content": PLAN_PROMPT.format(topic=ctx.topic, memory=memory_note)}])
             d = res["data"]
-            llm_domains = [x for x in (d.get("domains") or []) if x in DOMAINS]
+            llm_domains = [x for x in (d.get("domains") or []) if x in DOMAINS] or llm_domains
             terms_zh = list(dict.fromkeys((d.get("core_terms_zh") or []) + list(p.get("keywords") or []))) or terms_zh
             queries_en = list(dict.fromkeys(queries_en + (d.get("queries_en") or [])))[:4]
             for i, a in enumerate(d.get("aspects") or []):
@@ -221,7 +251,8 @@ def plan(ctx):
     # 主题核心词也作为“概况”的判断依据
     aspects[0]["keywords"] = terms_zh + queries_en
     st["aspects"] = aspects
-    st["plan"] = {"terms_zh": terms_zh, "queries_en": queries_en, "by": plan_src}
+    st["plan"] = {"terms_zh": terms_zh, "queries_en": queries_en, "by": plan_src,
+                  "alt_zh": alt_zh, "alt_en": alt_en}
 
     # ---- 按领域选来源：用户明确指定 > 用户选择的领域 > 大模型判断 > 关键词规则
     domains = list(p.get("domains") or llm_domains or guess_domains(" ".join([ctx.topic] + terms_zh + queries_en)))
@@ -340,6 +371,27 @@ def decide(ctx):
                 new_terms, new_en, why = d.get("terms_zh") or [], d.get("queries_en") or [], d.get("why", "")
             except Exception as e:
                 why = f"LLM 失败（{str(e)[:60]}），改用规则"
+        if not new_terms and not new_en:
+            # 先用自动翻译给出的备用说法：哪个检索式没结果，就换同义词/其他译法
+            zero_en = [k.split(":", 2)[2] for k in st["zero"] if k.split(":")[1] in
+                       {s["id"] for s in list_sources() if (s["config"] or {}).get("lang") == "en"}]
+            used_alt = st.setdefault("used_alt", [])
+            for alt in st["plan"].get("alt_en") or []:
+                if alt in used_alt:
+                    continue
+                head = " ".join((st["plan"]["queries_en"][0].split() if st["plan"]["queries_en"] else [])[:2])
+                q = alt if len(alt.split()) >= 2 else f"{head} {alt}".strip()
+                new_en.append(q)
+                used_alt.append(alt)
+                if len(new_en) >= 2:
+                    break
+            for alt in st["plan"].get("alt_zh") or []:
+                if alt not in used_alt:
+                    new_terms.append([alt])
+                    used_alt.append(alt)
+            if new_en or new_terms:
+                why = (f"自动调整：{('检索式 ' + str(zero_en[:2]) + ' 无结果，') if zero_en else ''}"
+                       f"改用备用译法/同义词 {[' '.join(t) for t in new_terms] + new_en}")
         if not new_terms and not new_en:
             core = st["plan"]["terms_zh"][:1]
             for g in gaps:

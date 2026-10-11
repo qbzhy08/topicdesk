@@ -23,8 +23,13 @@
     <form id="new-task" class="card">
       <h2>新主题</h2>
       <label>主题<input name="topic" required placeholder="例如：开源大模型 长上下文 评测"></label>
-      <label>补充中文关键词（逗号分隔，可空）<input name="keywords" placeholder="例如：长上下文, 大海捞针"></label>
-      <label>英文检索式（逗号分隔；配置了大模型可留空）<input name="en_keywords" placeholder="例如：long context LLM benchmark"></label>
+      <label>中文关键词（逗号分隔，可修改）<input name="keywords" placeholder="填写主题后自动生成"></label>
+      <label>英文检索式（逗号分隔，可修改）<input name="en_keywords" placeholder="填写主题后自动翻译"></label>
+      <div class="kw-bar">
+        <label class="opt"><input type="checkbox" name="auto_translate" checked> 自动翻译中英文关键词</label>
+        <button type="button" class="ghost sm" id="kw-btn">⇄ 重新翻译</button>
+      </div>
+      <p class="small kw-note" id="kw-note"></p>
       <details>
         <summary>本次要求（默认只对本次生效）</summary>
         <label>关注重点<input name="tt_focus" placeholder="例如：复现结果, 大海捞针"></label>
