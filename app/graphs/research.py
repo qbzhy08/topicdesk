@@ -22,17 +22,17 @@ import time
 from urllib.parse import urlsplit
 from datetime import datetime, timedelta, timezone
 
-from .. import db, llm
+from .. import db, llm, ranking
 from .. import memory as mem
 from .. import memory_facts as mf
 from ..collect import tools as _tools  # noqa: F401  注册工具
-from ..collect.dedup import canonical_url, parse_date
+from ..collect.dedup import canonical_url, parse_date, title_sim
 from ..collect.fetch import FetchError
 from ..collect.images import store_images
 from ..keywords import is_english
 from ..collect.sources import (DOMAINS, guess_domains, in_window, is_primary, list_sources,
                                 source_domains, topic_terms, window_start)
-from ..collect.store import article_to_item, topic_last_run, upsert_document
+from ..collect.store import EVENT_TITLE_SIM, article_to_item, topic_last_run, upsert_document
 from ..harness import END, Graph, register_graph
 
 DEFAULT_ASPECTS = [
@@ -1011,7 +1011,177 @@ def remember(ctx):
         if added:
             ctx.think(f"出现 {new_conflicts} 处证据冲突，回到检索补充核验（{added} 个检索行动），之后重新评估")
             return "decide"
+    return "rank"
+
+
+# ---------------------------------------------------------------- 节点：rank / verify（Lv2 价值评估与重排序）
+
+def _pref_minutes(st: dict):
+    return (((st.get("memory") or {}).get("prefs") or {}).get("reading_minutes") or {}).get("value")
+
+
+def _rank_summary(d: dict) -> str:
+    m = d["metrics_auto"]
+    l5, l30 = d["lists"]["5"], d["lists"]["30"]
+    fmt = lambda x: "—" if x is None else f"{x:.2f}"  # noqa: E731
+    return (f"5 分钟速览 {len(l5['selected'])} 篇（{l5['used']} 分钟）；30 分钟深读 {len(l30['selected'])} 篇"
+            f"（{l30['used']} 分钟）。自动标注下 P@5：价值排序 {fmt(m['ours'].get('P@5'))}、按时间 "
+            f"{fmt(m['time'].get('P@5'))}、按热度 {fmt(m['popularity'].get('P@5'))}；重复率@10：价值排序 "
+            f"{fmt(m['ours'].get('dup@10'))}、按时间 {fmt(m['time'].get('dup@10'))}")
+
+
+def rank(ctx):
+    """对本次资料做价值评估：五维打分 → 时间预算内选榜（同一事件只留一篇）→ 与基线对比 → 检查榜首是否有可信度问题。"""
+    st, p = ctx.state, ctx.params
+    d = ranking.evaluate(ctx.task_id, ctx.topic, aspects=st["aspects"], min_rel=_min_rel(st),
+                         pref_minutes=_pref_minutes(st), weights=p.get("rank_weights"), trigger="初次评估")
+    st["ranking"] = {"versions": [d["version"]], "problems": d["problems"]}
+    ctx.think("价值评估（相关度 0.35、可信度 0.25、新颖性 0.2、时效性 0.2；阅读时间作为预算）：" + _rank_summary(d))
+    if d["problems"] and p.get("verify_top", True) and not st.get("_budget_exhausted"):
+        ctx.think("发现问题：速览榜前列有可信度不足的资料 →\n" +
+                  "\n".join(f"第 {x['rank']} 名「{x['title'][:40]}」：{x['issue']}" for x in d["problems"]) +
+                  "\n下一步补充核验：用标题关键词到其他来源找交叉印证，然后重新评估")
+        return "verify"
     return "report"
+
+
+def _corroborate_query(title: str) -> tuple[str, str]:
+    t = re.sub(r"[【】\[\]（）()《》“”\"'|｜!！?？#]", " ", title or "")
+    if is_english(t):
+        words = [w for w in re.findall(r"[A-Za-z0-9][\w.+-]*", t) if w.lower() not in GENERIC and len(w) > 2]
+        return " ".join(words[:5]), "en"
+    seg = [x for x in re.split(r"[：:，,。；;\s]+", t) if x]
+    core = max(seg, key=len) if seg else t
+    return core[:14], "zh"
+
+
+def _event_hosts(doc_id: str) -> set:
+    d = db.query_one("SELECT event_id, topic FROM documents WHERE id=?", (doc_id,))
+    if not d or not d["event_id"]:
+        return set()
+    rows = db.query("SELECT url FROM documents WHERE event_id=? AND topic=? AND status='active' AND duplicate_of IS NULL",
+                    (d["event_id"], d["topic"]))
+    return {urlsplit(r["url"]).netloc.lower().removeprefix("www.") for r in rows}
+
+
+def corroborate(ctx, problems: list[dict], *, task_id: str, topic: str, source_ids: list, window: dict,
+                plan: dict) -> tuple[list[dict], dict]:
+    """补充核验：对每条有问题的资料，用标题关键词到 2 个合适的来源检索，找报道同一事件的其他站点。
+    找到 → 独立来源数增加、可信度提升；找不到 → 标注“待核实”，价值分打折。返回 (核验记录, flags)。"""
+    by_id = {s["id"]: s for s in list_sources()}
+    ok = [sid for sid in (source_ids or []) if sid in by_id]
+    en_srcs = [s for s in ("hn", "openalex", "arxiv") if s in ok]
+    zh_srcs = [sid for sid in ok if (by_id[sid]["config"] or {}).get("lang", "zh") == "zh" and
+               (by_id[sid]["method"] == "api" or (by_id[sid]["config"] or {}).get("search_feed"))]
+    calls, meta, records = [], [], {}
+    for pr in problems:
+        q, lang = _corroborate_query(pr["title"])
+        rec = records.setdefault(pr["id"], {"id": pr["id"], "title": pr["title"], "issue": pr.get("issue"),
+                                            "queries": [], "found": [], "errors": [],
+                                            "hosts_before": sorted(_event_hosts(pr["id"]))})
+        if not q:
+            continue
+        for s in (en_srcs if lang == "en" else zh_srcs)[:2]:
+            since = (window or {}).get("since_academic" if s in ACADEMIC_SOURCES else "since")
+            calls.append(("source_search", dict(source_id=s, query=q, limit=10, terms=None, since=since)))
+            meta.append((pr, s, q))
+            rec["queries"].append(f"{s}「{q}」")
+    outs = ctx.tool_parallel(calls) if calls else []
+    doc_urls = {pr["id"]: canonical_url(db.query_one("SELECT url FROM documents WHERE id=?", (pr["id"],))["url"])
+                for pr in problems}
+    fake_st = {"plan": plan}
+    for (pr, s, q), (status, out) in zip(meta, outs):
+        rec = records[pr["id"]]
+        if status == "error":
+            rec["errors"].append(f"{s}：{getattr(out, 'kind', '')} {getattr(out, 'reason', str(out))[:60]}")
+            continue
+        for it in out["items"]:
+            if canonical_url(it["url"]) == doc_urls[pr["id"]]:
+                continue
+            sim = title_sim(it.get("title") or "", pr["title"])
+            if sim < 0.3:
+                continue
+            existing = db.query_one("SELECT id, event_id FROM documents WHERE canonical_url=? AND status='active'",
+                                    (canonical_url(it["url"]),))
+            if existing:        # 库里已有：只记录，不覆盖它的相关度等信息
+                rec["found"].append({"doc_id": existing["id"], "title": it.get("title"), "source": s,
+                                     "similarity": round(sim, 2), "action": "already_known", "relation": None})
+                continue
+            it["relevance"] = max(_rel(fake_st, it.get("title") or "", it.get("summary") or ""),
+                                  (db.query_one("SELECT meta FROM documents WHERE id=?", (pr["id"],))["meta"] or {})
+                                  .get("relevance") or 0 if sim >= EVENT_TITLE_SIM else 0)
+            r = upsert_document(it, topic, task_id=task_id)
+            rec["found"].append({"doc_id": r["doc_id"], "title": it.get("title"), "source": s,
+                                 "similarity": round(sim, 2), "action": r["action"], "relation": r.get("relation")})
+    flags = {}
+    for pid, rec in records.items():
+        after = _event_hosts(pid)
+        rec["hosts_after"] = sorted(after)
+        gained = len(after) - len(rec["hosts_before"])
+        if gained > 0:
+            rec["outcome"] = "corroborated"
+            flags[pid] = {"note": f"补充核验：新找到 {gained} 个站点报道同一事件（{'、'.join(sorted(set(after) - set(rec['hosts_before'])))}）"}
+        else:
+            rec["outcome"] = "unverified"
+            flags[pid] = {"unverified": True,
+                          "note": "补充核验未找到其他来源印证，标注“待核实”，价值分打 85 折"}
+    return list(records.values()), flags
+
+
+def verify(ctx):
+    """补充核验 → 重新评估：核验速览榜前列的可疑资料，再评估一次，记录榜单变化。"""
+    st = ctx.state
+    prev = ranking.latest(ctx.task_id)
+    recs, flags = corroborate(ctx, prev["problems"], task_id=ctx.task_id, topic=ctx.topic,
+                              source_ids=st.get("source_ids"), window=st.get("window"), plan=st["plan"])
+    flags = {**(prev.get("flags") or {}), **flags}
+    d = ranking.evaluate(ctx.task_id, ctx.topic, aspects=st["aspects"], min_rel=_min_rel(st),
+                         pref_minutes=_pref_minutes(st), weights=ctx.params.get("rank_weights"), flags=flags,
+                         trigger="补充核验后重新评估", extra={"verify": recs, "triggered_by": prev["problems"]},
+                         prev=prev)
+    st["ranking"]["versions"].append(d["version"])
+    st["ranking"]["verify"] = [{"title": r["title"][:40], "outcome": r["outcome"], "found": len(r["found"])} for r in recs]
+    moves = d.get("diff", {}).get("5", [])
+    ctx.observe("补充核验：" + "；".join(
+        f"「{r['title'][:24]}」{'找到交叉印证' if r['outcome'] == 'corroborated' else '未找到其他来源，标注待核实'}"
+        f"（检索 {len(r['queries'])} 次，相关结果 {len(r['found'])} 条）" for r in recs) +
+        f"。重新评估后速览榜变化 {len(moves)} 处：" +
+        "；".join(f"「{m['title'][:20]}」{m['from'] or '未入选'} → {m['to'] or '移出'}" for m in moves[:5]))
+    return "report"
+
+
+# ---------------------------------------------------------------- 手动重新评估（可选补充核验）
+
+def reassess(ctx):
+    """对某次检索任务重新评估：可指定要补充核验的资料；不核验时只按最新数据、标注、权重重排。"""
+    p = ctx.params
+    tid = p["task"]
+    t = db.query_one("SELECT topic, state FROM tasks WHERE id=?", (tid,))
+    tst = t["state"] or {}
+    prev = ranking.latest(tid)
+    flags = dict((prev or {}).get("flags") or {})
+    recs, problems = [], []
+    if p.get("verify"):
+        items = {it["id"]: it for it in (prev or {}).get("items", [])}
+        problems = [{"id": i, "title": items[i]["title"], "issue": "用户要求补充核验"} for i in p.get("doc_ids") or []
+                    if i in items] or (prev or {}).get("problems") or []
+        ctx.think(f"补充核验 {len(problems)} 篇：" + "；".join(x["title"][:30] for x in problems))
+        recs, f2 = corroborate(ctx, problems, task_id=tid, topic=t["topic"], source_ids=tst.get("source_ids"),
+                               window=tst.get("window"), plan=tst.get("plan") or {"terms_zh": [], "queries_en": []})
+        flags.update(f2)
+    d = ranking.evaluate(tid, t["topic"], aspects=tst.get("aspects") or [], min_rel=tst.get("min_rel", 0.4),
+                         pref_minutes=(prev or {}).get("pref_minutes"),
+                         weights=p.get("weights") or (prev or {}).get("weights"), flags=flags,
+                         trigger=p.get("trigger") or ("补充核验后重新评估" if p.get("verify") else "重新评估"),
+                         extra={"verify": recs, "by_task": ctx.task_id,
+                                "triggered_by": problems if p.get("verify") else []}, prev=prev)
+    ctx.state["report"] = {"kind": "reassess", "task": tid, "version": d["version"], "trigger": d["trigger"],
+                           "verify": recs, "diff": d.get("diff", {})}
+    ctx.observe(f"已生成第 {d['version']} 版评估：" + _rank_summary(d))
+    return END
+
+
+register_graph(Graph(name="reassess", start="reassess", nodes=dict(reassess=reassess)))
 
 
 # ---------------------------------------------------------------- 节点：report
@@ -1087,7 +1257,7 @@ def report(ctx):
                   for f in (mem.get(i) for i in fact_ids) if f][:30],
     }
     st["report"] = {
-        "quality": quality, "delivered_docs": top_docs,
+        "quality": quality, "delivered_docs": top_docs, "ranking": st.get("ranking"),
         "covered_at": st.get("covered_at"), "dropped_after_cover": st.get("dropped_after_cover", 0),
         "domains": st.get("domains"), "source_ids": st.get("source_ids"),
         "memory": memory_report,
@@ -1110,7 +1280,7 @@ def report(ctx):
 register_graph(Graph(
     name="research", start="plan", on_budget="images",
     nodes=dict(plan=plan, decide=decide, act=act, judge=judge, images=images, remember=remember,
-               report=report),
+               rank=rank, verify=verify, report=report),
 ))
 
 

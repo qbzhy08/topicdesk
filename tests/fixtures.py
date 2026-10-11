@@ -172,6 +172,13 @@ JUEJIN_PAGE = ("<html><head><title>长上下文大模型评测踩坑记录 - 掘
                "</article></body></html>")
 
 
+JUEJIN_CORROB = json.dumps({"err_no": 0, "err_msg": "success", "data": [
+    {"result_type": 2, "result_model": {"article_id": "7002", "article_info": {
+        "article_id": "7002", "title": "开源大模型长上下文能力遭质疑，复现评测结果不及预期",
+        "brief_content": "多个团队复现开源大模型长上下文评测，结果低于官方数据",
+        "ctime": str(int((NOW - timedelta(hours=2)).timestamp())), "view_count": 900, "digg_count": 12},
+        "author_user_info": {"user_name": "复现者"}}}], "cursor": "1", "has_more": False}, ensure_ascii=False)
+
 WALLSTCN_JSON = json.dumps({"code": 20000, "message": "OK", "data": {"count": 1, "next_cursor": "", "items": [
     {"id": 1, "title": "<em>股票</em>趋势模型回测：动量策略今年回撤加大", "content": "<p>" +
      "多家机构对动量类股票趋势策略进行回测，发现今年以来最大回撤达到 18%，高于过去五年均值。" * 20 + "</p>",
@@ -221,6 +228,8 @@ class FakeWeb:
                 return 200, {"content-type": "text/html"}, WAF_PAGE.encode(), url
             return 200, X, kr_feed().encode(), url
         if url.startswith("https://api.juejin.cn/search_api/v1/search") and method == "POST":
+            if "遭质疑" in json.dumps(json_body or {}, ensure_ascii=False) and self.state.get("corroborate"):
+                return 200, J, JUEJIN_CORROB.encode(), url
             return 200, J, JUEJIN_JSON.encode(), url
         if url == "https://juejin.cn/post/7001":
             return 200, H, JUEJIN_PAGE.encode(), url

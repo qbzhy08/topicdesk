@@ -215,7 +215,7 @@ CREATE TABLE IF NOT EXISTS article_versions (
 
 JSON_FIELDS = {
     "params", "state", "budget", "usage", "input", "output", "payload",
-    "response", "config", "health", "locator", "meta", "source", "derived_from", "detail",
+    "response", "config", "health", "locator", "meta", "source", "derived_from", "detail", "data",
 }
 
 
@@ -273,6 +273,24 @@ CREATE TABLE IF NOT EXISTS memory_events (
 CREATE INDEX IF NOT EXISTS idx_memev ON memory_events(memory_id, id);
 CREATE INDEX IF NOT EXISTS idx_mem_topic ON memories(scope, topic, status);
 CREATE INDEX IF NOT EXISTS idx_evidence_claim ON evidence(claim_id);
+-- Lv2：每次价值评估存一个版本（初评、补充核验后重评、用户标注后重评），用于对比“重新评估”前后的变化
+CREATE TABLE IF NOT EXISTS rankings (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    trigger TEXT NOT NULL,
+    data TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rankings_task ON rankings(task_id, version);
+-- 人工相关性标注（按主题），用于计算 P@K；没有人工标注时用自动标注（银标）并注明
+CREATE TABLE IF NOT EXISTS labels (
+    topic TEXT NOT NULL,
+    doc_id TEXT NOT NULL,
+    label INTEGER NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (topic, doc_id)
+);
 """
 
 

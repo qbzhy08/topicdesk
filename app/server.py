@@ -11,10 +11,11 @@ from flask import Flask, abort, jsonify, request, send_from_directory
 
 from . import config, db, graphs, llm  # noqa: F401  导入即注册编排图
 from . import memory as mem
+from . import ranking
 from .collect import sources as sources_mod
 from .collect.dedup import canonical_url
 from .config import ROOT
-from .harness import GRAPHS, create_task, resolve_hitl, rewind, runner
+from .harness import GRAPHS, create_task, resolve_hitl, rewind, run_task, runner
 
 app = Flask(__name__, static_folder=str(ROOT / "app" / "static"), static_url_path="/static")
 
@@ -299,6 +300,62 @@ def import_link():
                       params={"url": url, "mode": b.get("mode", "auto")})
     runner.start(tid)
     return jsonify(id=tid), 201
+
+
+# ---------------------------------------------------------------- Lv2 价值榜单
+
+@app.get("/api/tasks/<tid>/ranking")
+def get_ranking(tid):
+    """某次任务的价值评估：指定版本（默认最新）+ 全部版本列表 + 按当前人工标注重算的指标。"""
+    t = db.query_one("SELECT topic FROM tasks WHERE id=?", (tid,))
+    if not t:
+        abort(404)
+    hist = ranking.history(tid)
+    if not hist:
+        return jsonify(data=None, versions=[])
+    v = request.args.get("version", type=int)
+    row = next((h for h in hist if h["version"] == v), hist[-1])
+    data = row["data"]
+    return jsonify(data=data, eval=ranking.with_labels(tid, t["topic"], data), topic=t["topic"],
+                   versions=[{"version": h["version"], "trigger": h["trigger"], "created_at": h["created_at"]}
+                             for h in hist])
+
+
+@app.post("/api/labels")
+def post_label():
+    """人工相关性标注：label=1 相关，0 不相关，null 取消。"""
+    b = request.get_json(silent=True) or {}
+    if not b.get("topic") or not b.get("doc_id"):
+        return jsonify(error="需要 topic 和 doc_id"), 400
+    lab = b.get("label")
+    ranking.set_label(b["topic"], b["doc_id"], None if lab is None else int(bool(lab)))
+    return jsonify(ok=True)
+
+
+@app.post("/api/tasks/<tid>/rerank")
+def post_rerank(tid):
+    """重新评估。verify=true 时先补充核验（联网，后台执行，返回任务 id）；否则同步重排（不联网，立即返回新版本）。"""
+    t = db.query_one("SELECT topic, graph FROM tasks WHERE id=?", (tid,))
+    if not t or t["graph"] != "research":
+        return jsonify(error="只能对主题检索任务重新评估"), 400
+    if not ranking.latest(tid):
+        return jsonify(error="该任务还没有价值评估（可能是旧版本创建的任务，请重新检索）"), 400
+    b = request.get_json(silent=True) or {}
+    weights = b.get("weights")
+    if weights:
+        try:
+            weights = {k: float(weights[k]) for k in ranking.WEIGHTS if k in weights}
+        except (TypeError, ValueError):
+            return jsonify(error="权重必须是数字"), 400
+    params = {"task": tid, "verify": bool(b.get("verify")), "doc_ids": b.get("doc_ids") or [],
+              "weights": weights or None, "trigger": b.get("trigger")}
+    rid = create_task("reassess", t["topic"], params=params, budget={"max_tool_calls": 40, "max_steps": 5},
+                      parent_task_id=tid)
+    if params["verify"]:
+        runner.start(rid)
+        return jsonify(task_id=rid, async_=True), 201
+    run_task(rid)
+    return jsonify(task_id=rid, version=ranking.latest(tid)["version"]), 201
 
 
 @app.post("/api/recheck")

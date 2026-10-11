@@ -13,8 +13,8 @@ const STATUS = { pending: "排队中", running: "运行中", waiting_human: "等
   done: "已完成", failed: "失败", cancelled: "已取消", cancelling: "取消中" };
 const NOVELTY = { new: "新进展", update: "内容更新", background: "背景资料", duplicate: "重复报道" };
 const KIND = { full: "全文", excerpt: "节选", summary: "摘要" };
-const GRAPH_NAME = { research: "主题检索", import: "链接导入", recheck: "复查", demo: "演示" };
-const taskTitle = (t) => (t.graph === "recheck" ? "复查 · " : "") + (t.topic === "*" ? "全部主题" : t.topic);
+const GRAPH_NAME = { research: "主题检索", import: "链接导入", recheck: "复查", reassess: "重新评估", demo: "演示" };
+const taskTitle = (t) => ({ recheck: "复查 · ", reassess: "重新评估 · " }[t.graph] || "") + (t.topic === "*" ? "全部主题" : t.topic);
 const ACTIVE = new Set(["pending", "running", "cancelling"]);
 const fmtTime = (t) => t ? new Date(typeof t === "number" ? t * 1000 : t).toLocaleString("zh-CN", { hour12: false }) : "—";
 const split = (s) => (s || "").split(/[,，;；\n]/).map((x) => x.trim()).filter(Boolean);
@@ -229,6 +229,7 @@ function renderTask(t) {
   $("[data-f=state]", d).textContent = JSON.stringify(t.state, null, 2);
   renderHitl(t.hitl.filter((h) => h.status === "open"));
   renderReport(t.state.report, t.state);
+  if (t.graph === "research" && t.status === "done") loadRanking();
 }
 
 function recheckReport(rep) {
@@ -259,6 +260,12 @@ function recheckReport(rep) {
 function renderReport(rep, state) {
   const box = $("[data-f=report]");
   if (rep?.kind === "recheck") { box.innerHTML = recheckReport(rep); return; }
+  if (rep?.kind === "reassess") {
+    box.innerHTML = `<div class="card report"><h3>重新评估</h3><p>已为任务生成第 ${rep.version} 版评估（${esc(rep.trigger)}）。
+      <a href="#/task/${rep.task}">回到原任务查看价值榜单</a></p>
+      ${rep.verify?.length ? `<ul class="small">${rep.verify.map((r) => `<li>「${esc(r.title)}」：${r.outcome === "corroborated" ? "找到交叉印证" : "未找到印证，标注待核实"}</li>`).join("")}</ul>` : ""}</div>`;
+    return;
+  }
   if (!rep) {
     const cov = state?.coverage;
     box.innerHTML = cov ? `<div class="card"><h3>覆盖矩阵（进行中）</h3>${covTable(cov)}</div>` : "";
@@ -702,3 +709,172 @@ async function showSettings() {
 }
 
 init();
+
+// ---------------------------------------------------------------- Lv2 价值榜单
+const FACTORS = [["relevance", "相关"], ["credibility", "可信"], ["novelty", "新颖"], ["timeliness", "时效"]];
+const pct = (x) => (x == null ? "—" : (x * 100).toFixed(0) + "%");
+
+async function loadRanking(force = false) {
+  if (!current) return;
+  const id = current.id;
+  const v = current.rkVersion ? `?version=${current.rkVersion}` : "";
+  const res = await api(`/api/tasks/${id}/ranking${v}`).catch(() => null);
+  if (!res || current?.id !== id) return;
+  const sig = JSON.stringify([res.versions.length, res.data?.version, res.eval?.labeled_in_pool, Object.keys(res.eval?.labels || {}).length, Object.values(res.eval?.labels || {}).join("")]);
+  if (!force && sig === current.rkSig) return;
+  current.rkSig = sig;
+  current.rk = res;
+  renderRanking();
+}
+
+function rkItemRow(it, sel, labels, topic) {
+  const lab = labels[it.id];
+  const bars = FACTORS.map(([k, n]) => `<span class="fbar" title="${n} ${pct(it.features[k])}"><span class="box"><i style="height:${Math.round(it.features[k] * 100)}%"></i></span><small>${n}</small></span>`).join("");
+  const src = sourcesCache.find((s) => s.id === it.source_id)?.name || it.source_id;
+  return `<li class="rk-item">
+    <div class="rk-rank">${sel.rank}</div>
+    <div class="rk-body">
+      <a href="#/doc/${it.id}" class="rk-title">${esc(it.title)}</a>
+      <div class="small">${esc(src)} · ${fmtTime(it.published_at)} · ${sel.cost} 分钟
+        ${it.primary ? `<span class="tag pri">一手</span>` : ""}${it.independent > 1 ? `<span class="tag">${it.independent} 个来源</span>` : ""}
+        ${it.unverified ? `<span class="tag rel-lo">待核实</span>` : ""}${it.disputed ? `<span class="tag rel-lo">有争议</span>` : ""}</div>
+      <div class="small rk-why">${esc(sel.why)}</div>
+    </div>
+    <div class="rk-side">
+      <div class="rk-value" title="价值分">${it.value.toFixed(2)}</div>
+      <div class="fbars">${bars}</div>
+      <div class="rk-label">
+        <button class="mini ${lab === 1 ? "on" : ""}" data-label="1" data-doc="${it.id}" title="标注为相关">相关</button>
+        <button class="mini ${lab === 0 ? "on" : ""}" data-label="0" data-doc="${it.id}" title="标注为不相关">不相关</button>
+        <button class="mini" data-verify="${it.id}" title="到其他来源找交叉印证，然后重新评估">核验</button>
+      </div>
+    </div></li>`;
+}
+
+function rkListTab(d, key, labels, topic) {
+  const L = d.lists[key];
+  const items = Object.fromEntries(d.items.map((it) => [it.id, it]));
+  const desc = L.mode === "skim" ? "每篇按读标题和摘要约 0.6 分钟计，适合快速掌握动态" : "每篇按全文阅读时间计（超长文按 15 分钟封顶）";
+  return `<p class="small">预算 ${L.budget} 分钟，已用 ${L.used} 分钟，入选 ${L.selected.length} 篇。${desc}；同一事件只保留价值最高的一篇。</p>
+    <ol class="rk-list">${L.selected.map((s) => rkItemRow(items[s.id], s, labels, topic)).join("") || "<p class='empty'>没有可入选的资料</p>"}</ol>
+    <details class="rk-excl"><summary>未入选 ${L.excluded.length} 篇及原因</summary>
+      <ul class="small">${L.excluded.map((e) => `<li><a href="#/doc/${e.id}">${esc(items[e.id]?.title || e.id)}</a> — ${esc(e.why)}</li>`).join("")}</ul></details>`;
+}
+
+function rkBaselineTab(d, ev, labels) {
+  const m = ev.metrics;
+  const names = [["ours", "价值排序（我们）"], ["time", "按发布时间"], ["popularity", "按热度"]];
+  const rows = [["P@5", "P@5（前 5 篇中相关的比例）"], ["P@10", "P@10"], ["coverage@10", "子问题覆盖率（前 10）"],
+    ["dup@10", "重复率（前 10，越低越好）"], ["fresh@10", "7 天内占比（前 10）"], ["primary@10", "一手来源占比（前 10）"]];
+  const best = (k) => {
+    const vals = names.map(([n]) => m[n]?.[k]).filter((x) => x != null);
+    if (!vals.length) return null;
+    return k === "dup@10" ? Math.min(...vals) : Math.max(...vals);
+  };
+  const items = Object.fromEntries(d.items.map((it) => [it.id, it]));
+  const col = (n) => (d.orders[n] || []).slice(0, 10).map((id, i) => {
+    const it = items[id]; const lab = labels[id];
+    return `<li class="${lab === 1 ? "lab-yes" : lab === 0 ? "lab-no" : ""}"><span class="small">${i + 1}.</span> <a href="#/doc/${id}">${esc((it?.title || id).slice(0, 48))}</a>
+      <span class="rk-label inline"><button class="mini ${lab === 1 ? "on" : ""}" data-label="1" data-doc="${id}">相关</button><button class="mini ${lab === 0 ? "on" : ""}" data-label="0" data-doc="${id}">不相关</button></span></li>`;
+  }).join("");
+  return `<p class="small">三种排序用同一批资料。基线不做价值评估、不去重。P@K 优先用你的人工标注，未标注的用自动标注（大模型复核分 ≥2 或规则相关度 ≥0.6 视为相关）。
+    自动标注和价值排序都用了相关度信号，会偏向我们的方法，所以<b>人工标注越多，对比越可信</b>：已标注 ${ev.labeled_in_pool} / ${ev.pool.length} 篇（三种排序前 10 篇的并集）。</p>
+    <table class="tbl rk-metrics"><tr><th>指标</th>${names.map(([, n]) => `<th>${n}</th>`).join("")}</tr>
+    ${rows.map(([k, label]) => `<tr><td>${label}</td>${names.map(([n]) => {
+      const v = m[n]?.[k]; const hb = (k.startsWith("P@") && m[n]?.["human@" + k.slice(2)]) ? `<small>（人工 ${m[n]["human@" + k.slice(2)]}）</small>` : "";
+      return `<td class="${v != null && v === best(k) ? "best" : ""}">${pct(v)} ${hb}</td>`;
+    }).join("")}</tr>`).join("")}</table>
+    <div class="rk-cols">${names.map(([n, t]) => `<div><h5>${t} 前 10</h5><ol class="rk-mini">${col(n)}</ol></div>`).join("")}</div>`;
+}
+
+function rkProcessTab(d, res) {
+  const prob = d.problems || [];
+  const trig = d.triggered_by || [];
+  const ver = d.verify || [];
+  const diff = d.diff?.["5"] || [];
+  const later = res.versions.filter((v) => v.version > d.version);
+  const probList = (ps) => `<ul class="small">${ps.map((p) => `<li>第 ${p.rank ?? "?"} 名「${esc(p.title)}」：${esc(p.issue)}${p.credibility != null ? `（可信度 ${p.credibility}）` : ""}</li>`).join("")}</ul>`;
+  if (d.version === 1 || !d.diff_from) {
+    return `<ol class="rk-steps"><li><b>发现问题</b>：检查速览榜前 5 名的可信度
+      ${prob.length ? probList(prob) : `<p class="small">没有发现可信度问题。</p>`}</li>
+      <li><b>补充核验 → 重新评估</b>：${later.length ? `已完成，见 ${later.map((v) => `<a href="#" data-rkv="${v.version}">第 ${v.version} 版 · ${esc(v.trigger)}</a>`).join("、")}`
+        : `还没有做。点上方“补充核验并重新评估”，或在榜单里对单条资料点“核验”。`}</li></ol>`;
+  }
+  return `<ol class="rk-steps">
+    <li><b>发现问题</b>（第 ${d.diff_from} 版评估后）${trig.length ? probList(trig) : `<p class="small">本版由“${esc(d.trigger)}”触发，没有针对具体问题。</p>`}</li>
+    <li><b>补充核验</b>
+      ${ver.length ? `<ul class="small">${ver.map((r) => `<li>「${esc(r.title)}」：检索 ${r.queries.map(esc).join("、") || "无合适来源"}；
+        相关结果 ${r.found.length} 条${r.found.length ? `（${r.found.slice(0, 3).map((f) => esc((f.title || "").slice(0, 30)) + (f.action === "already_known" ? "，已在库中" : "")).join("；")}）` : ""}；
+        报道该事件的站点 ${r.hosts_before.length} → ${r.hosts_after.length}；
+        <b>${r.outcome === "corroborated" ? "找到交叉印证，可信度提升" : "未找到印证，标注待核实，价值分打 85 折"}</b></li>`).join("")}</ul>` : `<p class="small">本版未做补充核验（只按最新数据、标注或权重重排）。</p>`}</li>
+    <li><b>重新评估</b>：与第 ${d.diff_from} 版相比，速览榜变化 ${diff.length} 处
+      ${diff.length ? `<table class="tbl small"><tr><th>资料</th><th>名次</th><th>价值分</th><th>可信度</th></tr>${diff.map((x) => `<tr><td>${esc(x.title.slice(0, 50))}</td>
+        <td>${x.from ?? "未入选"} → ${x.to ?? "移出"}</td><td>${x.value_from?.toFixed(2) ?? "—"} → ${x.value_to?.toFixed(2) ?? "—"}</td>
+        <td>${x.cred_from ?? "—"} → ${x.cred_to ?? "—"}</td></tr>`).join("")}</table>` : ""}</li>
+    ${prob.length ? `<li><b>本版仍存在的问题</b>（可以继续核验）${probList(prob)}</li>` : ""}
+  </ol>`;
+}
+
+function renderRanking() {
+  const box = $("[data-f=ranking]");
+  const res = current?.rk;
+  if (!box) return;
+  if (!res?.data) { box.innerHTML = ""; return; }
+  const d = res.data, ev = res.eval, labels = ev.labels || {};
+  const keys = Object.keys(d.lists).sort((a, b) => +a - +b);
+  const tabs = [...keys.map((k) => [k, k === "5" ? "5 分钟速览" : k === "30" ? "30 分钟深读" : `你的 ${k} 分钟`]),
+    ["base", "基线对比与指标"], ["proc", "发现问题 → 核验 → 重评"]];
+  const tab = current.rkTab && tabs.some(([k]) => k === current.rkTab) ? current.rkTab :
+    (d.pref_minutes && d.lists[String(d.pref_minutes)] ? String(d.pref_minutes) : "5");
+  const w = d.weights;
+  box.innerHTML = `<div class="card ranking">
+    <div class="rk-head"><h3>价值榜单</h3>
+      <select data-rk="version">${res.versions.map((v) => `<option value="${v.version}" ${v.version === d.version ? "selected" : ""}>第 ${v.version} 版 · ${esc(v.trigger)}</option>`).join("")}</select>
+      <button class="ghost" data-rk="verify" title="对速览榜前列的可疑资料补充核验，然后重新评估">补充核验并重新评估</button>
+      <button class="ghost" data-rk="weights-toggle">调整权重</button></div>
+    <p class="small">价值分 = 相关度 ×${w.relevance} + 可信度 ×${w.credibility} + 新颖性 ×${w.novelty} + 时效性 ×${w.timeliness}；阅读时间作为预算；门槛 ${d.min_rel} 以下不入榜${d.pref_minutes ? `；你设置的阅读时间是 ${d.pref_minutes} 分钟` : ""}。</p>
+    <form class="rk-weights" data-rk="weights" hidden>${FACTORS.map(([k, n]) => `<label>${n}<input name="${k}" type="number" step="0.05" min="0" max="1" value="${w[k]}"></label>`).join("")}<button>按新权重重排</button></form>
+    <div class="tabs">${tabs.map(([k, n]) => `<button class="tab ${k === tab ? "on" : ""}" data-rktab="${k}">${n}</button>`).join("")}</div>
+    <div class="rk-pane">${tab === "base" ? rkBaselineTab(d, ev, labels) : tab === "proc" ? rkProcessTab(d, res) : rkListTab(d, tab, labels, res.topic)}</div>
+    <p class="small rk-msg" data-rk="msg"></p></div>`;
+  box.querySelectorAll("[data-rktab]").forEach((b) => b.onclick = () => { current.rkTab = b.dataset.rktab; renderRanking(); });
+  box.querySelector("[data-rk=version]").onchange = (e) => { current.rkVersion = +e.target.value; loadRanking(true); };
+  box.querySelectorAll("[data-rkv]").forEach((a) => a.onclick = (e) => { e.preventDefault(); current.rkVersion = +a.dataset.rkv; loadRanking(true); });
+  box.querySelector("[data-rk=weights-toggle]").onclick = () => { const f = box.querySelector("[data-rk=weights]"); f.hidden = !f.hidden; };
+  box.querySelector("[data-rk=weights]").onsubmit = (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    rerank({ weights: Object.fromEntries(FACTORS.map(([k]) => [k, Number(f.get(k))])), trigger: "调整权重后重新评估" });
+  };
+  box.querySelector("[data-rk=verify]").onclick = () => rerank({ verify: true });
+  box.querySelectorAll("[data-verify]").forEach((b) => b.onclick = () => rerank({ verify: true, doc_ids: [b.dataset.verify], trigger: "用户要求核验后重新评估" }));
+  box.querySelectorAll("[data-label]").forEach((b) => b.onclick = async () => {
+    const lab = +b.dataset.label, doc = b.dataset.doc;
+    const cur = labels[doc];
+    await api("/api/labels", { method: "POST", body: { topic: res.topic, doc_id: doc, label: cur === lab ? null : lab } });
+    loadRanking(true);
+  });
+}
+
+async function rerank(body) {
+  const msg = $("[data-rk=msg]");
+  const id = current.id;
+  if (msg) msg.textContent = body.verify ? "正在补充核验（联网检索），完成后自动显示新版本…" : "正在重新评估…";
+  try {
+    const r = await api(`/api/tasks/${id}/rerank`, { method: "POST", body });
+    refreshList();
+    current.rkVersion = null;
+    current.rkTab = "proc";
+    if (!body.verify) return loadRanking(true);
+    const before = current.rk?.versions.length || 0;
+    const wait = async (n = 0) => {
+      if (current?.id !== id) return;
+      const res = await api(`/api/tasks/${id}/ranking`).catch(() => null);
+      const t = await api(`/api/tasks/${r.task_id}`).catch(() => null);
+      if (res && res.versions.length > before) return loadRanking(true);
+      if (t && ["failed", "cancelled"].includes(t.status)) { if (msg) msg.textContent = `重新评估失败：${t.error || t.status}`; return; }
+      if (n < 60) setTimeout(() => wait(n + 1), 2000);
+    };
+    wait();
+  } catch (err) { if (msg) msg.textContent = err.message; }
+}
