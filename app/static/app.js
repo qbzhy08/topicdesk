@@ -394,6 +394,7 @@ function renderReport(rep, state) {
       ${rep.memory ? memoryReport(rep.memory) : ""}
       ${rep.domains ? `<p class="small">主题领域：${rep.domains.map((d) => DOMAIN_NAME[d] || d).join("、")}；选用来源 ${rep.source_ids?.length || 0} 个：${(rep.source_ids || []).map((id) => esc(sourcesCache.find((x) => x.id === id)?.name || id)).join("、")}</p>` : ""}
       ${rep.quality ? qualityReport(rep.quality) : ""}
+      ${rep.dynamic && !rep.dynamic.rendered && !rep.dynamic.failed ? `<p class="small"><b>动态页面</b>：本次没有遇到需要浏览器渲染的页面。<a href="#/library?how=browser">查看资料库里所有浏览器渲染过的资料</a></p>` : ""}
       ${rep.dynamic && (rep.dynamic.rendered || rep.dynamic.failed) ? `<p class="small"><b>动态页面</b>：${rep.dynamic.rendered} 篇普通抓取拿不到正文，改用浏览器渲染后成功${rep.dynamic.failed ? `；${rep.dynamic.failed} 篇浏览器也被拦截，保留摘要（可在资料页粘贴正文）` : ""}。
         ${rep.dynamic.example ? `例子：<a href="#/doc/${rep.dynamic.example.id}">${esc((rep.dynamic.example.title || "").slice(0, 40))}</a>` : ""}</p>` : ""}
       ${aspectPlanReport(state?.aspect_plan)}
@@ -536,6 +537,7 @@ async function showLibrary(qs) {
       <select name="content_kind"><option value="">全文/节选/摘要</option>${Object.entries(KIND).map(([k, v]) => `<option value="${k}" ${p.content_kind === k ? "selected" : ""}>${v}</option>`).join("")}</select>
       <select name="sort"><option value="time">按发布时间</option><option value="fetched" ${p.sort === "fetched" ? "selected" : ""}>按采集时间</option><option value="relevance" ${p.sort === "relevance" ? "selected" : ""}>按相关度</option></select>
       <select name="min_rel"><option value="">全部相关度</option><option value="0.4" ${p.min_rel === "0.4" ? "selected" : ""}>相关度 ≥ 0.4</option><option value="0.7" ${p.min_rel === "0.7" ? "selected" : ""}>相关度 ≥ 0.7</option></select>
+      <select name="how"><option value="">全部获取方式</option>${Object.entries(HOW_NAME).map(([k, v]) => `<option value="${k}" ${p.how === k ? "selected" : ""}>${v}</option>`).join("")}</select>
       <label class="opt"><input type="checkbox" name="hide_dup" value="1" ${p.hide_dup ? "checked" : ""}> 隐藏重复</label>
       <input name="q" placeholder="搜索标题/正文" value="${esc(p.q || "")}">
       ${p.task ? `<input type="hidden" name="task" value="${esc(p.task)}">` : ""}
@@ -576,6 +578,8 @@ function relTag(d) {
   return `<span class="tag ${cls}" title="${esc(d.judge_reason || "规则相关度")}">相关 ${v.toFixed(2)}${d.judge_reason ? " · " + esc(d.judge_reason) : ""}</span>`;
 }
 
+const HOW_NAME = { browser: "浏览器渲染（动态页面）", html: "网页抓取", api: "官方 / 开放接口", rss: "RSS 订阅", websearch: "搜索 API", human: "人工粘贴" };
+
 function docRow(d) {
   const src = sourcesCache.find((s) => s.id === d.source_id);
   return `<a class="doc-row ${d.duplicate_of ? "dup" : ""}" href="#/doc/${d.id}">
@@ -601,10 +605,78 @@ const secs = (ms) => (ms == null ? "" : ms < 100 ? "<0.1 s" : ms < 1000 ? `${ms}
 const ERR_KIND = { blocked: "被拦截（访问受限或验证页）", timeout: "超时", robots: "robots.txt 不允许", not_found: "页面不存在",
   network: "网络不可达", bad_content: "内容无法解析", rate_limit: "被限流", server: "服务器错误" };
 
+// 没有打开网页的资料（接口、RSS 全文、搜索摘要、复用）：说明它是怎么来的、为什么不需要 / 没有打开网页
+const API_WHY = {
+  arxiv: ["论文摘要", "arXiv 官方接口直接返回完整摘要，论文页是静态页面，不需要再打开"],
+  openalex: ["论文摘要", "OpenAlex 开放学术接口返回摘要和被引次数"],
+  pubmed: ["医学论文摘要", "PubMed 官方接口（E-utilities）批量返回摘要，网页常有验证页，不打开"],
+  github: ["仓库简介", "GitHub 官方接口返回简介、星标和最近推送时间；复查时也用接口比对，不打开网页"],
+  hn: ["讨论帖", "Hacker News 接口只有标题和分数，原文另外追踪"],
+  bilibili: ["视频简介", "B站公开搜索接口返回标题、简介、标签和播放量；视频内容本身需要语音转写"],
+  juejin: ["文章摘要", "掘金站内搜索接口"], wallstcn: ["文章", "华尔街见闻站内搜索接口，直接返回全文"],
+};
+
+function originCard(d) {
+  const m = d.meta || {};
+  const src = d.source || {};
+  const name = src.name || d.source_id;
+  const chars = (d.text || "").length;
+  const kept = (d.images || []).filter((i) => i.status === "kept").length;
+  const full = d.content_kind === "full";
+  let kind, line, badges = [], action = false, ok = true;
+  if (m.extract_method === "human" || m.provided_by === "human") {
+    kind = "人工提供"; line = "正文由你粘贴提供";
+  } else if (src.method === "websearch" || src.method === "search") {
+    kind = `${m.platform || name} · 搜索结果`;
+    if (m.summary_only) { line = `${m.platform || name}的正文需要登录才能查看，平台条款也不允许抓取，所以只保留搜索摘要`; action = true; ok = false; }
+    else if (!full) {
+      const rel = m.relevance;
+      line = rel != null && rel < 0.3 ? `标题和摘要与主题不太相关（相关度 ${rel.toFixed(2)}），没有打开原文，省下抓取时间`
+        : "搜索结果只有摘要，本次没有打开原文（抓全文数量已达上限，或排在后面）";
+      action = rel == null || rel >= 0.3; ok = false;
+    } else line = "通过搜索找到，正文完整";
+    badges.push("正规搜索 API");
+  } else if (src.method === "api" || API_WHY[d.source_id]) {
+    const [what, why] = API_WHY[d.source_id] || ["内容", `${name} 接口返回`];
+    kind = `${name} · 官方/开放接口`; line = why;
+    badges.push("官方 / 开放接口");
+    return cardShell(d, kind, `${what} ${chars.toLocaleString()} 字${kept ? ` · 配图 ${kept} 张` : ""}`,
+      `<span class="fc-ok">✓ ${what}完整</span>`, line, badges, false, m);
+  } else if (src.method === "rss") {
+    kind = `${name} · RSS 订阅`;
+    line = full ? "RSS 订阅里已经包含全文，不需要打开网页" : "RSS 只有摘要，本次没有打开原文（相关度不够高，或抓全文数量已达上限）";
+    action = !full; ok = full;
+    badges.push("公开订阅源");
+  } else { kind = name; line = "直接入库"; }
+  if (m.reused_from) line += `；本次复用了 ${fmtTime(m.reused_from)} 抓到的全文，没有重新联网`;
+  const status = ok ? `<span class="fc-ok">✓ ${full ? "已拿到全文" : "内容完整"}</span>` : `<span class="fc-warn">⚠ 只有${KIND_FULL[d.content_kind] || "摘要"}</span>`;
+  return cardShell(d, kind, `${KIND_FULL[d.content_kind] || ""} ${chars.toLocaleString()} 字${kept ? ` · 配图 ${kept} 张` : ""}`, status, line, badges, action, m);
+}
+
+function cardShell(d, kind, result, status, line, badges, action, m) {
+  return `<section class="card fetch-card">
+    <header><h3>采集过程</h3>${status}</header>
+    <p class="fc-kind">${esc(kind)}</p>
+    <p class="fc-result">${result}</p>
+    <ol class="fc-steps"><li class="ok one"><b>获取方式</b><span>${esc(line)}</span></li></ol>
+    <p class="fc-badges">${badges.map((b) => `<span class="tag">${esc(b)}</span>`).join("")}<span class="tag">未登录</span><span class="tag">未绕过验证码</span></p>
+    ${action ? pasteBox(d, false) : ""}
+    <details class="fc-tech"><summary>查看技术细节</summary><pre>${esc(JSON.stringify({ source: d.source_id, method: d.source?.method, extract_method: m.extract_method,
+      via: m.via, relevance: m.relevance, platform: m.platform, reused_from: m.reused_from }, null, 1))}</pre></details>
+  </section>`;
+}
+
+function pasteBox(d, dynamic) {
+  return `<div class="fc-action"><p><b>需要你帮忙：</b>${dynamic ? "浏览器也没能打开正文。" : ""}已保留${KIND_FULL[d.content_kind] || "摘要"}；
+      如果这篇重要，打开<a href="${esc(d.url)}" target="_blank" rel="noopener">原文</a>，把正文粘贴到这里：</p>
+      <textarea rows="4" data-paste placeholder="粘贴正文（至少 50 字）"></textarea>
+      <button class="ghost sm" data-paste-btn="${esc(d.id)}">保存为全文</button> <small data-paste-msg></small></div>`;
+}
+
 function fetchCard(d) {
   const m = d.meta || {};
   const att = m.fetch_attempts || [];
-  if (!att.length) return "";
+  if (!att.length) return originCard(d);
   const html = att.find((a) => a.mode === "html");
   const br = att.find((a) => a.mode === "browser");
   const human = att.find((a) => a.mode === "human");
@@ -648,10 +720,7 @@ function fetchCard(d) {
   const comply = `<p class="fc-badges">${robotsNo ? `<span class="tag">robots.txt 不允许 · 已停止</span>` : `<span class="tag">遵守 robots.txt</span>`}<span class="tag">未登录</span><span class="tag">未绕过验证码</span></p>`;
 
   // ⑥ 需要你做的：只在没拿到全文时出现
-  const action = !full ? `<div class="fc-action"><p><b>需要你帮忙：</b>${dynamic ? "浏览器也没能打开正文。" : "没能拿到正文。"}已保留${KIND_FULL[d.content_kind] || "摘要"}；
-      如果这篇重要，打开<a href="${esc(d.url)}" target="_blank" rel="noopener">原文</a>，把正文粘贴到这里：</p>
-      <textarea rows="4" data-paste placeholder="粘贴正文（至少 50 字）"></textarea>
-      <button class="ghost sm" data-paste-btn="${esc(d.id)}">保存为全文</button> <small data-paste-msg></small></div>` : "";
+  const action = !full ? pasteBox(d, dynamic) : "";
 
   return `<section class="card fetch-card">
     <header><h3>采集过程</h3>${status}</header>

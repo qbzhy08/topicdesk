@@ -393,3 +393,4 @@ small.muted, .muted { color: var(--muted); }
   .fc-steps li { grid-template-columns: 22px 80px 1fr; }
   .fc-steps .fc-t { display: none; }
 }
+.fc-steps li.one { grid-template-columns: 22px 80px 1fr; }

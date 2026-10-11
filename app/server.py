@@ -161,7 +161,7 @@ DOC_LIST_COLS = ("id, url, canonical_url, source_id, topic, title, author, publi
                  "content_kind, novelty, version, duplicate_of, event_id, status, LENGTH(text) chars, "
                  "json_extract(meta,'$.primary') primary_src, json_extract(meta,'$.relevance') relevance, "
                  "json_extract(meta,'$.relation') relation, json_extract(meta,'$.via_browser') via_browser, "
-                 "json_extract(meta,'$.judge.reason') judge_reason")
+                 "json_extract(meta,'$.judge.reason') judge_reason, json_extract(meta,'$.extract_method') how")
 
 
 @app.get("/api/topics")
@@ -185,6 +185,13 @@ def list_docs():
             where.append(f"{k}=?"); args.append(a[k])
     if a.get("min_rel"):
         where.append("COALESCE(json_extract(meta,'$.relevance'), 1) >= ?"); args.append(float(a["min_rel"]))
+    how = a.get("how")
+    if how == "browser":
+        where.append("json_extract(meta,'$.via_browser')=1")
+    elif how in ("api", "rss", "websearch", "html", "human"):
+        where.append("json_extract(meta,'$.extract_method')=?"); args.append(how)
+        if how == "html":
+            where.append("COALESCE(json_extract(meta,'$.via_browser'),0)=0")
     if a.get("hide_dup") == "1":
         where.append("duplicate_of IS NULL")
     if a.get("q"):

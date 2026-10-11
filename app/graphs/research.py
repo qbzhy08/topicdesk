@@ -957,7 +957,8 @@ def _after_search(ctx, a, status, res):
                 t, b = _norm(it.get("title") or ""), _norm(it.get("summary") or "")
                 g = _rel_en(a["query"], t, b) if a["query"].isascii() else _rel_zh(gap_words, t, b)
                 it["relevance"] = max(it["relevance"], round(g, 3))
-        r = _save(ctx, it, "api" if a["source"] in API_SOURCES else "rss")
+        r = _save(ctx, it, "api" if a["source"] in API_SOURCES or a["source"] == "bilibili"
+                  else "websearch" if a["source"] in SEARCH_RESULT_SOURCES else "rss")
         k = r["action"] + ("/" + r["novelty"] if r["action"] == "new" else "")
         counts[k] = counts.get(k, 0) + 1
         meta = it.get("meta") or {}
@@ -1020,7 +1021,8 @@ def act(ctx):
         _save(ctx, {"url": old["url"], "title": old["title"], "text": old["text"], "content_kind": "full",
                     "source_id": old["source_id"], "published_at": old["published_at"],
                     "author": old.get("author"), "primary": meta.get("primary"),
-                    "relevance": meta.get("relevance"), "meta": {}}, "reuse")
+                    "relevance": meta.get("relevance"),
+                    "meta": {"reused_from": old["fetched_at"]}}, meta.get("extract_method") or "html")
         reused.append(a["url"])
     if reused:
         ctx.observe(f"复用库中 {len(reused)} 篇最近抓过的全文，跳过联网：" + "、".join(u[:60] for u in reused))
