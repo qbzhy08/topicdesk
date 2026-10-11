@@ -110,7 +110,8 @@ class WriteTest(CollectBase):
         t_brief, _ = self.write("brief", no_llm=True)
         t_exp, _ = self.write("explainer", no_llm=True)
         b, e = t_brief["state"], t_exp["state"]
-        self.assertLessEqual(len(b["docs"]), 6)
+        own = [d for d in b["docs"] if not d["why"].startswith("记忆中事实")]
+        self.assertLessEqual(len(own), 6)                         # Skill 选材上限（另加记忆中事实的出处）
         self.assertNotEqual([s["heading"] for s in b["sections"]], [s["heading"] for s in e["sections"]])
         self.assertIn("五分钟", b["docs"][0]["why"])
         self.assertIn("三十分钟", e["docs"][0]["why"])
@@ -187,3 +188,21 @@ class WriteTest(CollectBase):
         self.assertIn('<mark class="chk-mark" data-chk="0">官方宣称支持 256K 上下文', html)
         self.assertEqual(html.count("chk-mark"), 1)
         self.assertIn('id="ref-1"', html)
+
+    def test_strip_meta_text(self):
+        md, removed = writing.strip_meta("官方宣称支持 128K[1]。关于这两项数据，目前公开资料未能确认其具体出处，本节暂不引用。\n\n"
+                                         "司美格鲁肽减重 15%（记忆中的事实）。\n\n| a | b |\n|---|---|\n| x | 素材中 |")
+        self.assertEqual(len(removed), 2)
+        self.assertIn("官方宣称支持 128K[1]。", md)
+        self.assertNotIn("本节暂不引用", md)
+        self.assertIn("| x | 素材中 |", md)                        # 表格不动
+
+    def test_memory_facts_bring_their_sources(self):
+        task, v = self.write("brief", no_llm=True)
+        st = task["state"]
+        with_refs = [f for f in st["facts"] if f.get("refs")]
+        self.assertTrue(with_refs)                                  # 记忆中的事实能标出处编号
+        n_ids = {d["n"]: d["id"] for d in st["docs"]}
+        for f in with_refs:
+            self.assertTrue(set(n_ids[n] for n in f["refs"]) & set(f["docs"]))
+

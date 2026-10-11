@@ -73,7 +73,8 @@ def _doc_rows(ids: list[str]) -> dict:
                                          f"WHERE id IN ({marks})", ids)}
 
 
-def select_material(research_task: str, skill: dict, extra_ids: list[str] | None = None) -> dict:
+def select_material(research_task: str, skill: dict, extra_ids: list[str] | None = None,
+                    extra_why: dict | None = None) -> dict:
     """按 Skill 选材：先取它指定的阅读清单，再按价值排序补足，并按 prefer 调整顺序。
     返回 {docs: [...], why: {doc_id: 入选理由}, skipped: [...]}。"""
     rk = ranking.latest(research_task)
@@ -111,7 +112,7 @@ def select_material(research_task: str, skill: dict, extra_ids: list[str] | None
     for e in extra_ids or []:
         if e not in chosen:
             chosen.append(e)
-            why[e] = "写作时发现缺口，补充检索得到"
+            why[e] = (extra_why or {}).get(e) or "写作时发现缺口，补充检索得到"
     rows = _doc_rows(chosen)
     docs = []
     for i in chosen:
@@ -135,8 +136,13 @@ def topic_facts(topic: str, mode: str = "all", limit: int = 12) -> list[dict]:
     order = {"verified_first": {"supported": 0, "unverified": 1, "disputed": 2},
              "disputed_first": {"disputed": 0, "supported": 1, "unverified": 2}}.get(mode, {})
     rows.sort(key=lambda m: order.get((m["meta"] or {}).get("verify"), 1))
-    return [{"id": m["id"], "content": m["content"], "verify": (m["meta"] or {}).get("verify", "unverified"),
-             "corrected_from": (m["meta"] or {}).get("previous_content")} for m in rows[:limit]]
+    out = []
+    for m in rows[:limit]:
+        ev = [r["doc_id"] for r in db.query("SELECT DISTINCT doc_id FROM evidence WHERE claim_id=? AND stance!='refute'",
+                                            (m["id"],))]
+        out.append({"id": m["id"], "content": m["content"], "verify": (m["meta"] or {}).get("verify", "unverified"),
+                    "corrected_from": (m["meta"] or {}).get("previous_content"), "docs": ev})
+    return out
 
 
 def excerpt(doc: dict, focus: str, budget: int = 700) -> str:
@@ -210,6 +216,10 @@ def best_quotes(claim: str, texts: dict, cites: list[int], k: int = 3) -> list[t
         for q in passages(texts.get(c, "")):
             cands.append((overlap(claim, q), q, c))
     cands.sort(key=lambda x: -x[0])
+    if not cands or cands[0][0] < 0.12:
+        # 字面几乎不重合（常见于中文句子对英文原文）：按字面挑段落没有意义，改给各出处的开头部分
+        lead = [(0.0, re.sub(r"\s+", " ", texts.get(c, ""))[:600], c) for c in cites if texts.get(c)]
+        return lead[:k]
     return cands[:k]
 
 
@@ -296,7 +306,7 @@ def semantic_batch(items: list[dict], docs: list[dict]) -> str:
     lines = []
     for k, it in enumerate(items, 1):
         qs = best_quotes(it["sentence"], texts, it["cites"], 3)
-        quotes = "\n".join(f"   原文{j}：{q[:200]}" for j, (_, q, _) in enumerate(qs, 1))
+        quotes = "\n".join(f"   原文{j}：{q[:600] if o < 0.12 else q[:240]}" for j, (o, q, _) in enumerate(qs, 1))
         lines.append(f"{k}. 句子：{CITE.sub('', it['sentence'])[:200]}\n{quotes}")
     return SEMANTIC_PROMPT.format(items="\n".join(lines))
 
@@ -349,3 +359,30 @@ def assemble(title: str, sections: list[dict], docs: list[dict], used: set[int],
     if refs:
         parts += ["", "## 参考资料", "", refs]
     return "\n".join(parts).strip() + "\n"
+
+
+# 写作说明混进正文（大模型把给它的指令当成内容写了出来）：这类句子直接删掉
+META_TEXT = re.compile(r"记忆中的事实|本节(暂不|不再|将|只|不)|暂不引用|素材(中|里|编号)|资料编号|出处编号|核对(发现|结果)|上一稿|"
+                       r"按(核对|要求)改写|根据(提示|要求)|（来源：记忆）|未能确认其具体出处")
+
+
+def strip_meta(md: str) -> tuple[str, list[str]]:
+    removed = []
+    out_lines = []
+    for line in (md or "").split("\n"):
+        if line.lstrip().startswith("|"):
+            out_lines.append(line)
+            continue
+        parts = re.split(r"(?<=[。！？!?])", line)
+        keep = []
+        for p in parts:
+            if p.strip() and META_TEXT.search(p):
+                removed.append(p.strip())
+            else:
+                keep.append(p)
+        new = "".join(keep)
+        if line.strip() and not new.strip(" -*>【分析】"):
+            continue          # 整行都是说明文字
+        out_lines.append(new)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out_lines)).strip(), removed
+

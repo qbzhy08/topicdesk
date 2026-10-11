@@ -56,12 +56,15 @@ SECTION_PROMPT = """你在按 Skill「{name}」写文章《{title}》中的一�
 1. 来自素材的事实、数字、引语，在句末加出处编号，例如“……扩展到 64K[2]。”；多个来源支持就写 [2][5]。
 2. 你自己的推断、评价、判断单独成段，段首写“【分析】”；分析里不要出现素材里没有的数字。
 3. 素材里没有的信息不要写；素材不足就写“目前公开资料未能确认……”，不要编造。
-4. 直接输出这一节的正文 Markdown，不要重复小标题，不要写“本节”“综上所述”。"""
+4. 记忆中的事实只是线索：要写其中的内容，就引用它标注的出处编号；没有出处编号的，不要写它的数字。
+5. 直接输出这一节的正文 Markdown，不要重复小标题。正文是给读者看的：不要出现“本节”“素材”“记忆中的事实”
+   “出处编号”“暂不引用”这类写作过程的说明，也不要写“综上所述”。"""
 
 CHECK_NAME = {"weak": "出处里找不到依据", "number": "数字对不上出处", "bad_cite": "出处编号不存在",
               "uncited": "有数字但没有出处", "analysis_num": "分析里有资料中没有的数字"}
 
-FIX_NOTE = """上一稿核对发现这些问题，请改写本节并修正（数字以出处原文为准；找不到依据的说法删掉或改成不确定的表述）：
+FIX_NOTE = """上一稿核对发现这些问题，请改写本节并修正：数字以出处原文为准；找不到依据的数字和说法直接删掉，
+或改成不含数字的定性表述。不要在正文里解释你删了什么、为什么删（读者看不到核对过程）：
 {items}"""
 
 
@@ -125,12 +128,25 @@ def load(ctx):
 def select(ctx):
     st = ctx.state
     sk = st["skill"]
-    mat = writing.select_material(st["research_task"], sk, st["extra_docs"])
+    # 记忆中的事实要能引用：把它们的出处资料也放进素材（最多 4 篇），事实标上出处编号
+    st["facts"] = writing.topic_facts(ctx.topic, sk["material"].get("facts", "all"))
+    base_ids = {d["id"] for d in writing.select_material(st["research_task"], sk)["docs"]}
+    fact_docs, fact_why = [], {}
+    for f in st["facts"]:
+        for did in f["docs"][:1]:
+            if did not in base_ids and did not in fact_docs and len(fact_docs) < 4:
+                fact_docs.append(did)
+                fact_why[did] = f"记忆中事实「{f['content'][:20]}…」的出处"
+    st["fact_docs"] = fact_docs
+    mat = writing.select_material(st["research_task"], sk, fact_docs + [x for x in st["extra_docs"] if x not in fact_docs],
+                                  extra_why=fact_why)
     names = _names()
     st["docs"] = [{k: v for k, v in d.items() if k != "text"} | {"label": writing.source_label(d, names),
                                                                  "chars": len(d["text"])} for d in mat["docs"]]
     st["ranking_version"] = mat["ranking_version"]
-    st["facts"] = writing.topic_facts(ctx.topic, sk["material"].get("facts", "all"))
+    n_of = {d["id"]: d["n"] for d in st["docs"]}
+    for f in st["facts"]:
+        f["refs"] = sorted({n_of[x] for x in f["docs"] if x in n_of})
     ctx.observe(f"按 Skill 选材 {len(st['docs'])} 篇（{'五分钟' if sk['material']['list'] == '5' else '三十分钟'}清单优先，"
                 f"偏好 {sk['material'].get('prefer') or '无'}）；记忆中的事实 {len(st['facts'])} 条：\n" +
                 "\n".join(f"[{d['n']}] {d['title'][:40]}（{d['why']}）" for d in st["docs"]))
@@ -148,7 +164,8 @@ def _materials_brief(docs) -> str:
 def _facts_text(facts) -> str:
     v = {"supported": "已核实", "unverified": "待核实", "disputed": "有争议", "refuted": "已否定"}
     return "\n".join(f"- [{v.get(f['verify'], f['verify'])}] {f['content']}" +
-                     (f"（已更正，原说法：{f['corrected_from'][:60]}）" if f.get("corrected_from") else "")
+                     (f"（已更正，原说法：{f['corrected_from'][:60]}）" if f.get("corrected_from") else "") +
+                     (f"——出处 {''.join(f'[{n}]' for n in f['refs'])}" if f.get("refs") else "——素材里没有它的出处，不要使用其中的数字")
                      for f in facts) or "（无）"
 
 
@@ -274,7 +291,7 @@ def gap(ctx):
         before = {d["id"] for d in st["docs"]}
         st["docs"] = [{k: v for k, v in d.items() if k != "text"} | {"label": writing.source_label(d, _names()),
                                                                      "chars": len(d["text"])}
-                      for d in writing.select_material(st["research_task"], st["skill"], st["extra_docs"])["docs"]]
+                      for d in writing.select_material(st["research_task"], st["skill"], (st.get("fact_docs") or []) + [x for x in st["extra_docs"] if x not in (st.get("fact_docs") or [])])["docs"]]
         new_n = [d["n"] for d in st["docs"] if d["id"] not in before]
         for g in logs:
             sec = next((x for x in st.get("sections") or [] if x["id"] == g.get("section")), None)
@@ -315,6 +332,10 @@ def _write_section(ctx, sec, docs, fix_items=None) -> str:
             facts="记忆中的事实：\n" + _facts_text(st["facts"]), fix=fix + prev)}])
         text = r["content"].strip()
         text = re.sub(r"^#+\s*" + re.escape(sec["heading"]) + r"\s*\n", "", text)
+        text, removed = writing.strip_meta(text)
+        if removed:
+            st["fixes"].append({"section": sec["id"], "why": "删掉混进正文的写作说明",
+                                "before": "；".join(removed)[:300], "after": "（已删除）"})
         return text
     return _rule_section(sec, docs, st, fix_items)
 
