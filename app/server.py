@@ -431,7 +431,12 @@ def test_websearch():
             out[name] = {"ok": False, "error": f"{e.kind}：{e.reason}"}
             if e.kind == "config":
                 break
-    return jsonify(ok=all(v["ok"] for v in out.values()), results=out, query=q)
+    cov = {site: out[name]["count"] for sid, (site, name) in WEB_PLATFORMS.items()
+           if site and name in out and out[name]["ok"]}
+    if cov:
+        websearch.save_coverage(websearch.settings()["provider"], cov)
+    skipped = [name for sid, (site, name) in WEB_PLATFORMS.items() if site and cov.get(site) == 0]
+    return jsonify(ok=all(v["ok"] for v in out.values()), results=out, query=q, skipped=skipped)
 
 
 # ---------------------------------------------------------------- 记忆

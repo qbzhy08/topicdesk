@@ -32,6 +32,7 @@ def settings() -> dict:
     if p.exists():
         try:
             d.update({k: v for k, v in json.loads(p.read_text()).items() if v})
+            d.setdefault("coverage", {})
         except (OSError, json.JSONDecodeError):
             pass
     return d
@@ -48,13 +49,33 @@ def public_settings() -> dict:
             "providers": PROVIDERS}
 
 
+def coverage() -> dict:
+    """当前搜索服务对各站点的收录情况（设置页“测试”的结果）：{site: 属于该站点的条数}。"""
+    s = settings()
+    return ((s.get("coverage") or {}).get(s["provider"]) or {})
+
+
+def not_covered(site: str | None) -> bool:
+    return bool(site) and coverage().get(site) == 0
+
+
+def save_coverage(provider: str, cov: dict):
+    p = _path()
+    d = json.loads(p.read_text()) if p.exists() else {}
+    d.setdefault("coverage", {})[provider] = cov
+    p.write_text(json.dumps(d))
+
+
 def save_settings(provider: str, api_key: str):
     if provider and provider not in PROVIDERS:
         raise ValueError(f"不支持的搜索服务：{provider}")
     old = settings()
     if api_key == "***":
         api_key = old.get("api_key", "")
-    _path().write_text(json.dumps({"provider": provider, "api_key": (api_key or "").strip()}))
+    d = {"provider": provider, "api_key": (api_key or "").strip()}
+    if old.get("coverage"):
+        d["coverage"] = old["coverage"]
+    _path().write_text(json.dumps(d))
 
 
 def _freshness(since: float | None) -> int | None:
@@ -77,7 +98,7 @@ def search(query: str, *, site: str | None = None, count: int = 10, since: float
     stats = stats if stats is not None else {}
     rows = _search(query, site=site, count=count, since=since)
     stats.update(raw=len(rows), matched=sum(_host_ok(x["url"], site) for x in rows), retried=False)
-    if site and rows and not stats["matched"] and settings()["provider"] != "brave":
+    if site and not stats["matched"] and settings()["provider"] != "brave":
         # 返回了结果但没有一条来自目标站点：多半是服务不支持站点限定参数，改用查询语法 site: 再试一次
         rows2 = _search(f"{query} site:{site}", site=None, count=count, since=since)
         stats.update(retried=True, raw=stats["raw"] + len(rows2),

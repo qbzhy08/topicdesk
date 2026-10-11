@@ -31,7 +31,7 @@ from ..collect.dedup import canonical_url, parse_date, title_sim
 from ..collect.fetch import FetchError
 from ..collect.images import store_images
 from ..keywords import is_english
-from ..collect.sources import (DOMAINS, guess_domains, in_window, is_primary, list_sources,
+from ..collect.sources import (DOMAINS, WEB_PLATFORMS, guess_domains, in_window, is_primary, list_sources,
                                 source_domains, topic_terms, window_start)
 from ..collect.store import EVENT_TITLE_SIM, article_to_item, topic_last_run, upsert_document
 from ..harness import END, Graph, register_graph
@@ -430,6 +430,9 @@ def plan(ctx):
             if s["method"] == "websearch" and not websearch.available():
                 st.setdefault("no_websearch", []).append(s["name"])
                 continue
+            if s["method"] == "websearch" and websearch.not_covered(WEB_PLATFORMS.get(s["id"], (None,))[0]):
+                st.setdefault("not_covered", []).append(s["name"])      # 设置页测试显示当前搜索服务不收录该平台
+                continue
             q = " ".join(terms_zh[:2]) or ctx.topic
             _push(st, _search_action(s["id"], q, terms_zh, f"{s['name']}检索「{q}」", prio=55))
         elif lang == "en":
@@ -439,6 +442,8 @@ def plan(ctx):
                 _push(st, _search_action(s["id"], q, None, f"英文来源检索「{q}」"))
     if st.get("no_websearch"):
         ctx.think(f"未配置搜索 API，跳过 {'、'.join(st['no_websearch'])}（在“设置”页填写 key 后可用）")
+    if st.get("not_covered"):
+        ctx.think(f"当前搜索服务不收录 {'、'.join(st['not_covered'])}（设置页测试结果），跳过，不浪费调用")
     if not queries_en:
         st["failures"].append({"type": "plan", "kind": "missing_en_keywords",
                                "reason": "没有英文关键词（未配置 LLM 且未填写），跳过 arXiv/HN/GitHub"})
@@ -1348,6 +1353,8 @@ def report(ctx):
         omissions.append(f"{b} 近期持续失败，本次未检索")
     if any(s["method"] == "rss" for s in srcs.values()):
         omissions.append("RSS 只包含各站最新几十篇，更早的中文报道需要站内搜索或链接导入")
+    if st.get("not_covered"):
+        omissions.append(f"当前搜索服务不收录：{'、'.join(st['not_covered'])}，这些平台的内容需要换搜索服务或手动导入")
     if st.get("no_websearch"):
         omissions.append(f"未配置搜索 API，没有检索：{'、'.join(st['no_websearch'])}（设置页填写 key 后可用）")
     so = [d for d in docs if (d["meta"] or {}).get("summary_only") and not d["duplicate_of"]]

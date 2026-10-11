@@ -125,3 +125,24 @@ class EmptyReasonTest(CollectBase):
         h2 = db.query_one("SELECT health FROM sources WHERE id='zhihu'")["health"]
         self.assertEqual(h2["last_count"], 1)
         self.assertIsNone(h2["last_note"])
+
+
+class CoverageTest(CollectBase):
+    def test_uncovered_platform_is_skipped_after_test(self):
+        from app import server
+        websearch.save_settings("bocha", "test-key")
+        c = server.app.test_client()
+        r = c.post("/api/settings/websearch/test", json={"query": "极创工作室"}).json
+        self.assertIn("百度贴吧", r["skipped"])                     # 测试数据里贴吧没有任何结果
+        self.assertNotIn("小红书", r["skipped"])
+        self.assertTrue(websearch.not_covered("tieba.baidu.com"))
+        websearch.save_settings("bocha", "***")                    # 改设置不丢收录记录
+        self.assertTrue(websearch.not_covered("tieba.baidu.com"))
+        tid = create_task("research", "极创工作室 男娘", params={"no_llm": True, "max_docs": 30, "verify_top": False},
+                          budget={"max_tool_calls": 150, "max_steps": 150})
+        self.assertEqual(run_task(tid), "done")
+        st = db.query_one("SELECT state FROM tasks WHERE id=?", (tid,))["state"]
+        self.assertIn("百度贴吧", st["not_covered"])
+        calls = db.query("SELECT input FROM tool_calls WHERE task_id=? AND tool='source_search'", (tid,))
+        self.assertFalse(any(c["input"]["source_id"] == "tieba" for c in calls))
+        self.assertTrue(any("不收录" in o for o in st["report"]["omissions"]))

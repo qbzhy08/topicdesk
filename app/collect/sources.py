@@ -718,7 +718,9 @@ def search(source_id: str, query: str, limit: int = 15, terms: list[str] | None 
     if raw and not items:
         note = f"返回 {raw} 条，全部早于时间窗口，已过滤"
     elif not raw and not note:
-        note = f"对「{query[:20]}」没有匹配结果"
+        note = (f"最新文章中没有与「{query[:20]}」相关的（RSS 只含各站最新几十篇，属正常）"
+                if src["method"] == "rss" and not (src["config"] or {}).get("search_feed")
+                else f"对「{query[:20]}」没有匹配结果")
     record_health(source_id, True, n=len(items), note=None if items else note)
     return items
 
