@@ -155,6 +155,8 @@ const store = {
   set(k, v) { try { localStorage.setItem("td:" + k, JSON.stringify(v)); } catch { /* 隐私模式等 */ } },
 };
 
+let routedOnce = false;
+
 function route() {
   if (current?.timer) clearTimeout(current.timer);
   if (current?.liveTimer) clearInterval(current.liveTimer);
@@ -162,7 +164,10 @@ function route() {
   const form = $("#new-task");
   if (form && !$("#composer-holder").contains(form)) $("#composer-holder").append(form);   // 离开前收回，保留事件和已填内容
   const h = location.hash || "#/";
-  if (h === "#/" && store.get("lastTask")) {
+  const firstLoad = !routedOnce;
+  routedOnce = true;
+  // 新打开网页：显示新主题输入框；在应用内从其他页面点回“任务”：恢复上次的任务
+  if (h === "#/" && !firstLoad && store.get("lastTask")) {
     location.replace(`#/task/${store.get("lastTask")}`);
     return;
   }
