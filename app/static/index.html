@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>主题编辑台</title>
-<link rel="stylesheet" href="/static/style.css?v=1012c">
+<link rel="stylesheet" href="/static/style.css?v=1012e">
 </head>
 <body>
 <header class="masthead">
@@ -59,12 +59,17 @@
   <div data-f="ranking"></div>
   <div data-f="report"></div>
   <details class="card rewind">
-    <summary>回退到某一步重跑</summary>
+    <summary>从某一步重新执行</summary>
+    <p class="small">选一步，<b>从这一步往后重新执行</b>，任务已有的中间结果都保留。输入没变的检索、抓取和大模型调用直接用上次的结果，
+      只有受你改动影响的部分才会真正重做。所以它适合在你<b>改了某样东西之后</b>用，或者任务中途失败时从失败处接着跑。</p>
+    <ul class="small rewind-eg" data-f="rewind-eg"></ul>
     <div class="row">
       <select data-f="rewind-node"></select>
-      <input data-f="rewind-inv" placeholder="要失效的中间结果键，逗号分隔（可空）">
-      <button data-act="rewind" class="ghost">回退并执行</button>
+      <button data-act="rewind" class="ghost">从这一步重新执行</button>
     </div>
+    <details class="small"><summary>高级：同时清掉某些中间结果</summary>
+      <input data-f="rewind-inv" placeholder="要清掉的中间结果键名，逗号分隔，例如 verdicts（可空）">
+      <p class="muted">清掉后这些结果会重新计算，而不是沿用上一次的。键名见页面底部“任务内记忆”。</p></details>
   </details>
   <h2 class="section">任务轨迹</h2>
   <ol class="timeline" data-f="timeline"></ol>
@@ -122,6 +127,6 @@
     </details>
   </form>
 </div>
-<script src="/static/app.js?v=1012c"></script>
+<script src="/static/app.js?v=1012e"></script>
 </body>
 </html>

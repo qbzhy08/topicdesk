@@ -25,6 +25,11 @@ class FakeWriter:
     def __call__(self, messages, json_mode=False, max_tokens=1500, **_):
         p = messages[-1]["content"]
         self.calls.append(p)
+        if "能否由给出的“出处原文”支持" in p:       # 语义核对：改写过的句子判为支持，其余不支持
+            n = len(re.findall(r"^\d+\. 句子：", p, re.M))
+            res = [{"i": i + 1, "verdict": "supported" if "差距" in seg else "unsupported", "reason": "测试"}
+                   for i, seg in enumerate(re.split(r"^\d+\. 句子：", p, flags=re.M)[1:n + 1])]
+            return {"content": "", "_cost": 0, "data": {"results": res}}
         if "列提纲" in p:
             ids = re.findall(r"- id=(\w+)｜", p)
             return {"content": "", "_cost": 0, "data": {
@@ -145,3 +150,40 @@ class WriteTest(CollectBase):
         fixes = writing.autofix_citations(secs, rep)
         self.assertEqual(len(fixes), 1)
         self.assertIn("下降[2]。", secs[0]["md"])
+
+    def test_semantic_and_tables(self):
+        docs = [{"n": 1, "text": "监管层表示，将对程序化交易实施更严格的报备管理。"}]
+        secs = [{"id": "a", "md": "监管部门准备收紧对程序化交易的备案要求[1]。\n\n"
+                                  "| 维度 | 一方 | 另一方 |\n|---|---|---|\n| 监管 | 收紧程序化交易报备管理[1] | 目前没有找到公开的反驳 |\n\n"
+                                  "【分析】这意味着高频策略成本上升[1]。"}]
+        rep = writing.check(secs, docs)
+        st = {i["sentence"]: i["status"] for i in rep["items"]}
+        self.assertEqual(st["监管部门准备收紧对程序化交易的备案要求[1]。"], "weak")
+        self.assertNotIn("| 监管 | 收紧程序化交易报备管理[1] | 目前没有找到公开的反驳 |", st)   # 表格按单元格核对
+        self.assertIn("收紧程序化交易报备管理[1]", st)
+        self.assertNotIn("维度", " ".join(st))                                            # 表头不核对
+        self.assertEqual(st["【分析】这意味着高频策略成本上升[1]。"], "analysis")          # 分析段只核数字
+        v = {"监管部门准备收紧对程序化交易的备案要求[1]。": {"verdict": "supported", "reason": "同义"}}
+        rep2 = writing.check(secs, docs, v)
+        self.assertEqual({i["sentence"]: i["status"] for i in rep2["items"]}["监管部门准备收紧对程序化交易的备案要求[1]。"],
+                         "semantic")
+        self.assertGreater(rep2["summary"]["support_rate"], rep["summary"]["support_rate"])
+
+    def test_gap_relevance_filter(self):
+        from app.graphs.write import _relevant
+        st = {"terms": ["量化", "A股"]}
+        self.assertFalse(_relevant(st, "量化 成交占比 数据", {"title": "CAE技术在汽车轻量化设计中的应用", "summary": ""}))
+        self.assertTrue(_relevant(st, "量化 成交占比 数据", {"title": "A股量化成交占比降至两成", "summary": "量化成交数据"}))
+
+
+    def test_problem_sentences_marked_in_article(self):
+        from app import mdrender
+        from app.server import _mark_problems
+        md = "# 标题\n\n## 一\n\n官方宣称支持 256K 上下文[1]。另一句正常[2]。\n\n## 参考资料\n\n1. [a](http://a)\n2. [b](http://b)\n"
+        meta = {"refmap": {"5": 1, "7": 2},
+                "check": {"items": [{"status": "number", "sentence": "官方宣称支持 256K 上下文[5]。"},
+                                    {"status": "supported", "sentence": "另一句正常[7]。"}]}}
+        html = mdrender.render(_mark_problems(md, meta))
+        self.assertIn('<mark class="chk-mark" data-chk="0">官方宣称支持 256K 上下文', html)
+        self.assertEqual(html.count("chk-mark"), 1)
+        self.assertIn('id="ref-1"', html)

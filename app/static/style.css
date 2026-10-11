@@ -476,9 +476,27 @@ button.linkish { background: none; color: var(--info); padding: 0; font-size: 12
 .sk-struct { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .sk-struct i { font-style: normal; font-size: 11px; border: 1px solid var(--line); border-radius: 10px; padding: 0 7px; color: var(--muted); }
 .art-list { padding-left: 18px; } .art-list li { margin: 4px 0; }
-.art-layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 22px; align-items: start; }
-@media (max-width: 980px) { .art-layout { grid-template-columns: 1fr; } }
-.art-side .card { margin-top: 0; margin-bottom: 12px; }
+.art-layout { display: grid; grid-template-columns: minmax(0, 760px) minmax(300px, 400px); gap: 24px; align-items: start; }
+.art-side { position: sticky; top: 12px; margin: 0; padding: 0; max-height: calc(100vh - 24px); display: flex; flex-direction: column; overflow: hidden; }
+.side-tabs { display: flex; border-bottom: 1px solid var(--line); flex: none; }
+.side-tabs button { flex: 1; background: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0; color: var(--muted);
+  padding: 10px 4px; font-size: 13px; cursor: pointer; }
+.side-tabs button.on { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+.side-tabs i { font-style: normal; font-size: 11px; background: var(--paper); border-radius: 9px; padding: 0 6px; margin-left: 2px; }
+.side-pane { overflow-y: auto; padding: 12px 14px 16px; }
+.chk.bad .chk-s { cursor: pointer; display: block; margin-top: 4px; }
+.chk.bad .chk-s:hover { text-decoration: underline; }
+.chk details summary { font-size: 12px; color: var(--muted); cursor: pointer; margin-top: 2px; }
+.chk details p { margin: 4px 0; font-size: 12px; }
+.all-chk { margin-top: 10px; }
+.art-body mark.chk-mark { background: none; color: inherit; text-decoration: underline wavy color-mix(in srgb, var(--accent) 70%, transparent);
+  text-underline-offset: 4px; text-decoration-thickness: 1px; }
+.flash { animation: flashbg 1.6s ease-out; }
+@keyframes flashbg { 0%, 30% { background: color-mix(in srgb, var(--warn) 45%, transparent); } 100% { background: transparent; } }
+@media (max-width: 1100px) {
+  .art-layout { grid-template-columns: 1fr; }
+  .art-side { position: static; max-height: none; }
+}
 .stats.sm { grid-template-columns: repeat(4, 1fr); } .stats.sm b { font-size: 18px; }
 .chk { padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 13px; overflow-wrap: anywhere; }
 .chk:last-child { border-bottom: 0; }
@@ -503,3 +521,16 @@ button.linkish { background: none; color: var(--info); padding: 0; font-size: 12
 .art-body figure { margin: 16px 0; } .art-body figure img { width: 100%; height: auto; border-radius: 4px; }
 .art-body figcaption { font: 12px/1.6 var(--sans); color: var(--muted); margin-top: 4px; }
 @media (max-width: 600px) { .art-body { padding: 16px; font-size: 16px; } .art-body h1 { font-size: 22px; } }
+.btn.primary { background: var(--accent); color: #fff; border: 1px solid var(--accent); font-weight: 600; }
+.btn.primary:hover { filter: brightness(1.06); }
+.btn.big { padding: 12px 22px; font-size: 16px; border-radius: 6px; white-space: nowrap; }
+.cta { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.cta-text { min-width: 0; flex: 1; } .cta-text h3 { margin: 2px 0 6px; font-size: 20px; }
+.write-panel:has(.cta) { border-left: 3px solid var(--accent); }
+.art-list { display: flex; flex-direction: column; gap: 8px; padding: 0; }
+.art-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--line);
+  border-radius: 6px; text-decoration: none; color: inherit; }
+.art-item:hover { border-color: var(--accent); }
+.art-item > span:first-child { display: flex; flex-direction: column; min-width: 0; }
+.art-item .btn { padding: 5px 12px; font-size: 13px; flex: none; }
+.art-layout .art-body > h1:first-child { display: none; }

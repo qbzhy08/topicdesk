@@ -733,8 +733,27 @@ def get_article(aid):
     v = db.query_one("SELECT * FROM article_versions WHERE article_id=? AND version=?", (aid, ver))
     versions = db.query("SELECT version, note, created_at FROM article_versions WHERE article_id=? ORDER BY version", (aid,))
     if v:
-        v["html"] = mdrender.render(v["markdown"])
+        v["html"] = mdrender.render(_mark_problems(v["markdown"], v.get("meta") or {}))
     return jsonify(article=_article_row(a), version=v, versions=versions)
+
+
+PROBLEM_STATUS = {"weak", "number", "bad_cite", "uncited", "analysis_num"}
+
+
+def _mark_problems(md: str, meta: dict) -> str:
+    """把核对有问题的句子在正文里标出来（⟦m序号⟧…⟦/m⟧，渲染为下划线），右栏点一下就能定位到原句。
+    核对记录用的是素材编号，正文用的是重排后的出处编号，先换算再查找。"""
+    import re as _re
+    refmap = meta.get("refmap") or {}
+    body, sep, refs = md.partition("\n## 参考资料")
+    items = (meta.get("check") or {}).get("items") or []
+    for k, it in enumerate(items):
+        if it.get("status") not in PROBLEM_STATUS:
+            continue
+        sent = _re.sub(r"\[(\d+)\]", lambda m: f"[{refmap.get(m.group(1), m.group(1))}]", it["sentence"])
+        if sent and sent in body:
+            body = body.replace(sent, f"⟦m{k}⟧{sent}⟦/m⟧", 1)
+    return body + sep + refs
 
 
 # ---------------------------------------------------------------- 记忆验证演示（回放模式）

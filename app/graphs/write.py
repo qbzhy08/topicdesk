@@ -18,6 +18,7 @@ from .. import db, llm, writing
 from .. import memory as mem
 from .. import skills as skills_mod
 from ..collect.sources import list_sources
+from ..collect.dedup import title_sim
 from ..collect.store import article_to_item, upsert_document
 from ..harness import END, Graph, register_graph
 
@@ -33,7 +34,10 @@ OUTLINE_PROMPT = """你是一位编辑。用下面的素材，按 Skill「{name}
 {{"title": "文章标题（具体、不夸张，不超过 28 字）",
   "sections": [{{"id": "节的 id", "heading": "小标题", "points": ["这一节要讲的要点，一句话"], "sources": [1, 3]}}],
   "gaps": [{{"section": "节的 id", "question": "缺什么资料", "query": "检索词（2-6 个中文字或 2-4 个英文词）"}}]}}
-gaps：只有某一节的目标在素材里明显找不到依据时才列（最多 2 个），否则给空数组。"""
+检索阶段已经覆盖的子问题：{covered}
+检索阶段已经专门补检过、仍然缺资料的方向（不要再列为缺口，写作时如实说明资料不足）：{tried}
+gaps：只有某一节的目标在素材里完全找不到依据、而且不属于上面两类时才列（最多 2 个），否则给空数组。
+多数情况下素材已经够用，应给空数组。"""
 
 SECTION_PROMPT = """你在按 Skill「{name}」写文章《{title}》中的一节。
 读者：{reader}
@@ -54,7 +58,7 @@ SECTION_PROMPT = """你在按 Skill「{name}」写文章《{title}》中的一�
 3. 素材里没有的信息不要写；素材不足就写“目前公开资料未能确认……”，不要编造。
 4. 直接输出这一节的正文 Markdown，不要重复小标题，不要写“本节”“综上所述”。"""
 
-CHECK_NAME = {"weak": "出处里找不到相近表述", "number": "数字对不上出处", "bad_cite": "出处编号不存在",
+CHECK_NAME = {"weak": "出处里找不到依据", "number": "数字对不上出处", "bad_cite": "出处编号不存在",
               "uncited": "有数字但没有出处", "analysis_num": "分析里有资料中没有的数字"}
 
 FIX_NOTE = """上一稿核对发现这些问题，请改写本节并修正（数字以出处原文为准；找不到依据的说法删掉或改成不确定的表述）：
@@ -89,6 +93,13 @@ def load(ctx):
     rs = rt["state"] or {}
     st["terms"] = ((rs.get("plan") or {}).get("terms_zh") or [])[:6]
     st["source_ids"] = ((rs.get("report") or {}).get("source_ids") or [])
+    st["source_hits"] = ((rs.get("report") or {}).get("by_source") or {})
+    # 检索阶段已经定向补检过、仍然缺资料的子问题：写作时不再重复检索，如实写“资料不足”
+    st["research_gaps"] = [{"name": g["name"], "queries": [q.split("：", 1)[-1] for q in g.get("queries") or []]}
+                           for g in (rs.get("gap_log") or {}).values() if g.get("status") == "insufficient"]
+    st["covered"] = [v["name"] for v in ((rs.get("report") or {}).get("coverage") or {}).values()
+                     if v.get("have", 0) >= v.get("need", 1)]
+    st["verdicts"] = {}
     rec = mem.recall(ctx.user_id, ctx.topic, f"skill:{sk['id']}", 600, ctx.task_id, record_use=True)
     prefs = [x for x in rec["preferences"] if (x["meta"] or {}).get("type") in ("style", "background", "focus", "exclude")
              or x["kind"] == "feedback"]
@@ -154,7 +165,10 @@ def outline(ctx):
                 "role": "user", "content": OUTLINE_PROMPT.format(
                     name=sk["name"], reader=sk["reader"], length=sk["length"],
                     structure="\n".join(f"- id={s['id']}｜{s['heading']}：{s['goal']}" for s in sk["structure"]),
-                    materials=_materials_brief(docs), facts=_facts_text(st["facts"]))}], max_tokens=1800)["data"]
+                    materials=_materials_brief(docs), facts=_facts_text(st["facts"]),
+                    covered="、".join(st.get("covered") or []) or "（无记录）",
+                    tried="、".join(g["name"] for g in st.get("research_gaps") or []) or "（无）")}],
+                max_tokens=1800)["data"]
             title = str(d.get("title") or "")[:40] or None
             by = {x.get("id"): x for x in d.get("sections") or [] if isinstance(x, dict)}
             valid = {x["n"] for x in docs}
@@ -179,58 +193,97 @@ def outline(ctx):
     return "draft"
 
 
+SEARCHABLE = ("api", "websearch")
+ACADEMIC = {"arxiv", "openalex", "pubmed"}
+
+
 def _gap_sources(st) -> list[dict]:
-    srcs = [s for s in list_sources() if s["id"] in st["source_ids"]]
-    good = [s for s in srcs if s["method"] in ("api", "websearch") or (s["config"] or {}).get("search_feed")]
-    return (good or srcs)[:3]
+    """补检用哪些来源：检索阶段贡献资料最多、并且支持按关键词搜索的前 3 个；学术库只有在它确实贡献过资料时才用。"""
+    hits = st.get("source_hits") or {}
+    srcs = [s for s in list_sources() if s["id"] in st["source_ids"] and
+            (s["method"] in SEARCHABLE or (s["config"] or {}).get("search_feed"))]
+    srcs = [s for s in srcs if s["id"] not in ACADEMIC or hits.get(s["id"], 0) >= 2]
+    srcs.sort(key=lambda s: (-hits.get(s["id"], 0), s["id"] != "web_search"))
+    return srcs[:3]
+
+
+def _relevant(st, query: str, it: dict) -> bool:
+    """补检结果是否相关：检索词至少命中 2 个（只有 1-2 个词时全部命中），并且包含主题核心词。
+    避免“量化”命中“汽车轻量化”这类同字异义。"""
+    blob = f"{it.get('title')} {it.get('summary')}".lower()
+    words = [w.lower() for w in re.split(r"\s+", query) if len(w) >= 2]
+    need = len(words) if len(words) <= 2 else 2
+    hit = sum(1 for w in words if w in blob)
+    topic_ok = any(t.lower() in blob for t in (st.get("terms") or [])[:5]) or not st.get("terms")
+    return hit >= need and topic_ok
 
 
 def gap(ctx):
-    """补充检索：提纲缺资料或核对找不到依据时，回到信息源检索，新资料加入素材后重新选材。"""
+    """补充检索：并行查询（不同来源同时进行），新资料加入素材后重新选材。
+    检索阶段已经补检过仍无资料的方向直接跳过，不重复花时间。"""
     st = ctx.state
     st["gap_round"] += 1
     queue, st["gap_queue"] = st.get("gap_queue") or [], []
-    added = []
+    known = [k for g in st.get("research_gaps") or [] for k in [g["name"]] + g["queries"]]
+    todo = []
     for g in queue:
+        dup = next((k for k in known if title_sim(g["query"], k) >= 0.5 or g["query"] in k), None)
+        if dup:
+            st["gap_log"].append({**g, "sources": [], "found": [], "skipped": f"检索阶段已补检过「{dup}」仍无资料，跳过"})
+        else:
+            todo.append(g)
+    srcs = _gap_sources(st)
+    calls = [("source_search", dict(source_id=s["id"], query=g["query"], limit=6)) for g in todo for s in srcs]
+    results = ctx.tool_parallel(calls) if calls else []
+    known_ids = {d["id"] for d in st["docs"]} | set(st["extra_docs"])
+    picks, logs = [], []
+    for gi, g in enumerate(todo):
         log = {**g, "sources": [], "found": []}
-        words = [w for w in re.split(r"\s+", g["query"]) if w]
-        for s in _gap_sources(st):
-            try:
-                res = ctx.tool("source_search", source_id=s["id"], query=g["query"], limit=6)
-            except Exception as e:  # noqa: BLE001
-                log["sources"].append(f"{s['name']} 失败：{str(e)[:40]}")
+        cands = []
+        for si, src in enumerate(srcs):
+            status, out = results[gi * len(srcs) + si]
+            if status != "ok":
+                log["sources"].append(f"{src['name']} 失败：{str(out)[:40]}")
                 continue
-            log["sources"].append(f"{s['name']} {res['count']} 条")
-            for it in res["items"]:
-                blob = f"{it.get('title')} {it.get('summary')}".lower()
-                if not any(w.lower() in blob for w in words) and writing.overlap(g["query"], blob) < 0.5:
-                    continue
-                if it.get("content_kind") != "full":
-                    try:
-                        art = ctx.tool("page_fetch", url=it["url"])
-                        it = {**it, **article_to_item(art, it["url"], base=it)}
-                    except Exception:  # noqa: BLE001  抓不到全文就用摘要
-                        pass
-                it.setdefault("meta", {})["extract_method"] = "gap"
-                r = upsert_document(it, ctx.topic, task_id=ctx.task_id)
-                if r["doc_id"] not in st["extra_docs"] and r["doc_id"] not in [d["id"] for d in st["docs"]]:
-                    st["extra_docs"].append(r["doc_id"])
-                    added.append(r["doc_id"])
-                    log["found"].append((it.get("title") or it["url"])[:50])
-                if len(log["found"]) >= 3:
-                    break
-            if len(log["found"]) >= 3:
-                break
-        st["gap_log"].append(log)
-    ctx.observe("补充检索：" + "；".join(f"「{g['query']}」→ {len(g['found'])} 篇（{'、'.join(g['sources'])}）"
-                                     for g in st["gap_log"][-len(queue):]))
-    if st.get("after_gap") == "fix":       # 核对阶段发起的补检：带着新资料去改写
-        st["after_gap"] = None
+            ok = [it for it in out["items"] if _relevant(st, g["query"], it)]
+            log["sources"].append(f"{src['name']} {out['count']} 条，相关 {len(ok)} 条")
+            cands += ok
+        picks.append((log, cands[:3]))
+        logs.append(log)
+    # 只有摘要的结果并行抓全文
+    need_fetch = [it for _, cs in picks for it in cs if it.get("content_kind") != "full" and it.get("url")]
+    fetched = dict(zip([it["url"] for it in need_fetch],
+                       ctx.tool_parallel([("page_fetch", {"url": it["url"]}) for it in need_fetch]) if need_fetch else []))
+    for log, cs in picks:
+        for it in cs:
+            st_, art = fetched.get(it["url"], (None, None))
+            if st_ == "ok":
+                it = {**it, **article_to_item(art, it["url"], base=it)}
+            it.setdefault("meta", {})["extract_method"] = "gap"
+            r = upsert_document(it, ctx.topic, task_id=ctx.task_id)
+            if r["doc_id"] not in known_ids:
+                known_ids.add(r["doc_id"])
+                st["extra_docs"].append(r["doc_id"])
+                log["found"].append((it.get("title") or it["url"])[:50])
+    st["gap_log"] += logs
+    ctx.observe("补充检索（并行）：" + "；".join(
+        f"「{g['query']}」→ {len(g['found'])} 篇（{'、'.join(g['sources'])}）" for g in logs) +
+        "".join(f"；{g['skipped']}" for g in st["gap_log"] if g.get("skipped") and g in st["gap_log"][-len(queue):]))
+    if any(g["found"] for g in logs):
+        # 新资料追加在素材末尾（已有编号不变），挂到提出缺口的那一节；不重新列提纲，省一次大模型调用
+        before = {d["id"] for d in st["docs"]}
         st["docs"] = [{k: v for k, v in d.items() if k != "text"} | {"label": writing.source_label(d, _names()),
                                                                      "chars": len(d["text"])}
                       for d in writing.select_material(st["research_task"], st["skill"], st["extra_docs"])["docs"]]
+        new_n = [d["n"] for d in st["docs"] if d["id"] not in before]
+        for g in logs:
+            sec = next((x for x in st.get("sections") or [] if x["id"] == g.get("section")), None)
+            if sec and sec["sources"]:
+                sec["sources"] = sorted(set(sec["sources"]) | set(new_n))
+    if st.get("after_gap") == "fix":       # 核对阶段发起的补检：带着新资料去改写
+        st["after_gap"] = None
         return "fix"
-    return "select"
+    return "draft"
 
 
 # ---------------------------------------------------------------- draft
@@ -317,31 +370,64 @@ def draft(ctx):
 
 # ---------------------------------------------------------------- check / fix
 
+def _check(ctx, docs):
+    """字面核对 → 字面不像的句子交给大模型对照出处原文判断意思是否一致（结果缓存在 state，改写后只核新句子）。"""
+    st = ctx.state
+    rep = writing.check(st["sections"], docs, st["verdicts"])
+    pending = [i for i in rep["items"] if i["status"] == "weak" and i["sentence"] not in st["verdicts"]]
+    if pending and _use_llm(ctx):
+        for k in range(0, len(pending), 15):
+            chunk = pending[k:k + 15]
+            try:
+                d = ctx.tool("llm", messages=[{"role": "system", "content": "你只输出 JSON。"},
+                                              {"role": "user", "content": writing.semantic_batch(chunk, docs)}],
+                             max_tokens=1500)["data"]
+            except Exception as e:  # noqa: BLE001
+                ctx.think(f"语义核对失败（{str(e)[:60]}），这些句子按字面核对结果处理")
+                break
+            for r in d.get("results") or []:
+                try:
+                    it = chunk[int(r.get("i")) - 1]
+                except (TypeError, ValueError, IndexError):
+                    continue
+                st["verdicts"][it["sentence"]] = {"verdict": r.get("verdict"), "reason": str(r.get("reason") or "")[:40]}
+        rep = writing.check(st["sections"], docs, st["verdicts"])
+    return rep
+
+
+SERIOUS = ("number", "bad_cite", "uncited", "analysis_num", "weak")
+
+
+def _serious(ctx, rep):
+    probs = writing.problems(rep, SERIOUS)
+    if _use_llm(ctx):
+        return probs           # weak 已经过大模型语义核对，仍判不支持才算
+    return [i for i in probs if i["status"] != "weak" or i.get("overlap", 1) < 0.2]
+
+
 def check(ctx):
     st = ctx.state
     docs = _docs(st)
-    rep = writing.check(st["sections"], docs)
+    rep = _check(ctx, docs)
     fixes = writing.autofix_citations(st["sections"], rep)
     if fixes:
         st["fixes"] += fixes
-        rep = writing.check(st["sections"], docs)
+        rep = _check(ctx, docs)
     st["check"] = rep
     s = rep["summary"]
-    ctx.observe(f"逐句核对：带出处 {s['cited']} 句，出处支持 {s['supported']} 句（{(s['support_rate'] or 0) * 100:.0f}%），"
-                f"数字对不上 {s['number']}，表述找不到依据 {s['weak']}，无出处的数字 {s['uncited']}，分析段 {s['analysis']} 段"
-                + (f"；自动改正出处 {len(fixes)} 处" if fixes else ""))
-    probs = writing.problems(rep, ("number", "bad_cite", "uncited", "analysis_num", "weak"))
-    serious = [i for i in probs if i["status"] != "weak" or i.get("overlap", 1) < 0.2]
+    ctx.observe(f"逐句核对：带出处 {s['cited']} 句，字面支持 {s['supported']}、改写后意思一致 {s['semantic']}"
+                f"（支持率 {(s['support_rate'] or 0) * 100:.0f}%），数字对不上 {s['number']}，找不到依据 {s['weak']}，"
+                f"无出处的数字 {s['uncited']}，分析 {s['analysis']} 句" + (f"；自动改正出处 {len(fixes)} 处" if fixes else ""))
+    serious = _serious(ctx, rep)
     if serious and st["fix_round"] == 0:
         st["fix_round"] = 1
         # 分析里编的数字只需改写；来源结论找不到依据才值得回到检索核验
-        unresolved = [i for i in serious if not i.get("alt") and i["status"] != "analysis_num"]
+        unresolved = [i for i in serious if not i.get("alt") and i["status"] in ("number", "weak")]
         if unresolved and st["gap_round"] < 2:
-            # 资料里找不到依据：回到检索核验这些说法
             qs = []
             for i in unresolved[:2]:
-                core = " ".join(i.get("numbers", [])[:2] + st["terms"][:2])
-                if core.strip():
+                core = " ".join(i.get("numbers", [])[:1] + st["terms"][:2])
+                if core.strip() and core not in [q["query"] for q in qs]:
                     qs.append({"query": core[:30], "why": f"核验「{i['sentence'][:40]}」", "section": i["section"]})
             if qs:
                 st["gap_queue"] = qs
@@ -355,9 +441,9 @@ def check(ctx):
 def fix(ctx):
     st = ctx.state
     docs = _docs(st)
-    rep = writing.check(st["sections"], docs)
+    rep = _check(ctx, docs)
     by_sec = {}
-    for i in writing.problems(rep, ("number", "bad_cite", "uncited", "analysis_num", "weak")):
+    for i in _serious(ctx, rep):
         by_sec.setdefault(i["section"], []).append(i)
     for sec in st["sections"]:
         items = by_sec.get(sec["id"])
@@ -377,7 +463,7 @@ def fix(ctx):
                                                              "note": i.get("note")} for i in items[:6]],
                             "why": "；".join(f"{CHECK_NAME.get(i['status'], i['status'])}：{i['sentence'][:30]}" for i in items[:4]),
                             "before": before[:300], "after": sec["md"][:300], "rewrite": True})
-    ctx.observe(f"按核对结果改写 {len(by_sec)} 节：{'、'.join(by_sec)}")
+    ctx.observe(f"按核对结果改写 {len(by_sec)} 节：{'、'.join(next(x['heading'] for x in st['sections'] if x['id'] == k) for k in by_sec)}")
     return "check"
 
 

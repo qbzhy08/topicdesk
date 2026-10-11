@@ -172,76 +172,133 @@ def references_md(docs: list[dict], used: set[int], names: dict | None = None) -
 
 # ---------------------------------------------------------------- 事实核对
 
-def check(sections: list[dict], docs: list[dict]) -> dict:
+def _units(md: str):
+    """把一节正文切成核对单元：(文本, 是否分析)。表格按单元格拆开（第一列是维度名、表头行不核对）。"""
+    out = []
+    for para in re.split(r"\n\s*\n", md or ""):
+        p = para.strip()
+        if not p or p.startswith("#") or p.startswith("{{img:"):
+            continue
+        is_analysis = p.lstrip("> -*").startswith(ANALYSIS)
+        table_rows = 0
+        for line in p.split("\n"):
+            ln = line.strip()
+            if ln.startswith("|"):
+                if re.match(r"^\|?[\s:|-]+\|?$", ln):
+                    continue
+                table_rows += 1
+                if table_rows == 1:          # 表头
+                    continue
+                cells = [c.strip() for c in ln.strip("|").split("|")]
+                for c in cells[1:]:
+                    out.append((c, False))
+                continue
+            for s in re.split(r"(?<=[。！？!?])", ln):
+                out.append((s.strip(" -*>"), is_analysis))
+    return [(u, a) for u, a in out if len(CITE.sub("", u).strip()) >= 8]
+
+
+def passages(text: str) -> list[str]:
+    """出处的候选段落：单句 + 相邻两句（改写常常把两句合成一句）。"""
+    ss = sentences(text)
+    return ss + [ss[i] + ss[i + 1] for i in range(len(ss) - 1)]
+
+
+def best_quotes(claim: str, texts: dict, cites: list[int], k: int = 3) -> list[tuple[float, str, int]]:
+    cands = []
+    for c in cites:
+        for q in passages(texts.get(c, "")):
+            cands.append((overlap(claim, q), q, c))
+    cands.sort(key=lambda x: -x[0])
+    return cands[:k]
+
+
+def check(sections: list[dict], docs: list[dict], verdicts: dict | None = None) -> dict:
     """逐句核对。每句的结果：
-       supported   有出处，出处原文里有相近表述，数字都能在出处里找到
-       weak        有出处，但出处里找不到相近表述（可能是概括过度或引错）
+       supported   有出处，出处原文里有相近表述（字面），数字都能在出处里找到
+       semantic    字面不像，但大模型对照出处原文判断意思一致（改写/概括）
+       weak        有出处，但出处里找不到依据（字面不像，大模型也判断不支持，或没配置大模型）
        number      有出处，但句中某个数字在出处里找不到（最危险：数字写错或张冠李戴）
        bad_cite    出处编号不存在
-       uncited     不是【分析】段，却有数字或具体事实而没有出处
+       uncited     不是分析，却有数字而没有出处
+       analysis    【分析】段（引用了出处的分析只核对数字）
        analysis_num【分析】段里出现了资料里没有的数字
+    verdicts：{句子: {"verdict": supported/partial/unsupported, "reason"}}，来自大模型语义核对。
     返回 {items, summary, used}。"""
+    verdicts = verdicts or {}
     by_n = {d["n"]: d for d in docs}
+    texts = {d["n"]: d["text"] for d in docs}
     norm = {d["n"]: _norm(d["text"]) for d in docs}
-    sents_by = {d["n"]: sentences(d["text"]) for d in docs}
     all_norm = "\n".join(norm.values())
     items, used = [], set()
     for sec in sections:
-        for para in re.split(r"\n\s*\n", sec.get("md") or ""):
-            p = para.strip()
-            if not p or p.startswith("#") or p.startswith("{{img:") or p.startswith("|---"):
-                continue
-            is_analysis = p.lstrip("> -*").startswith(ANALYSIS)
-            for s in re.split(r"(?<=[。！？!?])|\n", p):
-                s = s.strip(" -*>")
-                if len(CITE.sub("", s).strip()) < 8 or set(s) <= set("|- :"):
+        for s, is_analysis in _units(sec.get("md") or ""):
+            cites = [int(x) for x in CITE.findall(s)]
+            nums = numbers(s)
+            it = {"section": sec["id"], "sentence": s, "cites": cites, "numbers": nums, "analysis": is_analysis}
+            if cites:
+                used.update(c for c in cites if c in by_n)
+                bad = [c for c in cites if c not in by_n]
+                if bad:
+                    it.update(status="bad_cite", note=f"出处编号 {bad} 不存在")
+                    items.append(it)
                     continue
-                cites = [int(x) for x in CITE.findall(s)]
-                nums = numbers(s)
-                it = {"section": sec["id"], "sentence": s, "cites": cites, "numbers": nums, "analysis": is_analysis}
-                if cites:
-                    used.update(c for c in cites if c in by_n)
-                    bad = [c for c in cites if c not in by_n]
-                    if bad:
-                        it.update(status="bad_cite", note=f"出处编号 {bad} 不存在")
-                        items.append(it)
-                        continue
-                    best, quote, qdoc = 0.0, "", None
-                    for c in cites:
-                        for q in sents_by[c]:
-                            o = overlap(s, q)
-                            if o > best:
-                                best, quote, qdoc = o, q, c
-                    missing = [n for n in nums if not any(num_in(n, norm[c]) for c in cites)]
-                    it.update(quote=quote[:220], quote_doc=qdoc, overlap=round(best, 2), missing=missing)
-                    if missing:
-                        other = [d["n"] for d in docs if all(num_in(n, norm[d["n"]]) for n in missing)]
-                        it.update(status="number", note=f"数字 {missing} 在出处 {cites} 里找不到"
-                                  + (f"；资料 {other[:3]} 里有，可能引错了出处" if other else ""), alt=other[:3])
-                    elif best >= 0.35:
-                        it["status"] = "supported"
-                    else:
-                        it.update(status="weak", note=f"出处里没有找到相近的表述（相似度 {best:.2f}）")
+                top = best_quotes(s, texts, cites)
+                best, quote, qdoc = top[0] if top else (0.0, "", None)
+                missing = [n for n in nums if not any(num_in(n, norm[c]) for c in cites)]
+                it.update(quote=quote[:220], quote_doc=qdoc, overlap=round(best, 2), missing=missing)
+                v = verdicts.get(s) or {}
+                if missing:
+                    other = [d["n"] for d in docs if all(num_in(n, norm[d["n"]]) for n in missing)]
+                    it.update(status="number", note=f"数字 {missing} 在出处 {cites} 里找不到"
+                              + (f"；资料 {other[:3]} 里有，可能引错了出处" if other else ""), alt=other[:3])
                 elif is_analysis:
-                    missing = [n for n in nums if not num_in(n, all_norm)]
-                    it["status"] = "analysis_num" if missing else "analysis"
-                    if missing:
-                        it["note"] = f"分析里的数字 {missing} 在资料中找不到"
-                elif nums:
-                    src = [d["n"] for d in docs if all(num_in(n, norm[d["n"]]) for n in nums)]
-                    it.update(status="uncited", note=f"有数字 {nums} 但没有出处" +
-                              (f"；资料 {src[:3]} 里有这些数字" if src else "；资料里也找不到"), alt=src[:3])
+                    it["status"] = "analysis"
+                elif best >= 0.35:
+                    it["status"] = "supported"
+                elif v.get("verdict") in ("supported", "partial"):
+                    it.update(status="semantic", note=("意思一致" if v["verdict"] == "supported" else "基本一致")
+                              + (f"：{v.get('reason')}" if v.get("reason") else ""))
                 else:
-                    it["status"] = "plain"
-                items.append(it)
-    keys = ("supported", "weak", "number", "bad_cite", "uncited", "analysis", "analysis_num", "plain")
+                    it.update(status="weak", note=(f"大模型对照原文判断不支持：{v.get('reason')}" if v.get("verdict")
+                                                   else f"出处里没有找到相近的表述（字面相似度 {best:.2f}）"))
+            elif is_analysis:
+                missing = [n for n in nums if not num_in(n, all_norm)]
+                it["status"] = "analysis_num" if missing else "analysis"
+                if missing:
+                    it["note"] = f"分析里的数字 {missing} 在资料中找不到"
+            elif nums:
+                src = [d["n"] for d in docs if all(num_in(n, norm[d["n"]]) for n in nums)]
+                it.update(status="uncited", note=f"有数字 {nums} 但没有出处" +
+                          (f"；资料 {src[:3]} 里有这些数字" if src else "；资料里也找不到"), alt=src[:3])
+            else:
+                it["status"] = "plain"
+            items.append(it)
+    keys = ("supported", "semantic", "weak", "number", "bad_cite", "uncited", "analysis", "analysis_num", "plain")
     summary = {k: sum(1 for i in items if i["status"] == k) for k in keys}
-    cited = summary["supported"] + summary["weak"] + summary["number"] + summary["bad_cite"]
+    cited = summary["supported"] + summary["semantic"] + summary["weak"] + summary["number"] + summary["bad_cite"]
     summary["cited"] = cited
-    summary["support_rate"] = round(summary["supported"] / cited, 3) if cited else None
+    summary["support_rate"] = round((summary["supported"] + summary["semantic"]) / cited, 3) if cited else None
     summary["problems"] = summary["weak"] + summary["number"] + summary["bad_cite"] + summary["uncited"] + \
         summary["analysis_num"]
     return {"items": items, "summary": summary, "used": sorted(used)}
+
+
+SEMANTIC_PROMPT = """判断每条“文章句子”能否由给出的“出处原文”支持。允许改写、概括、合并多句；
+但主体、动作、数字、时间、因果方向必须和原文一致，原文没说的推断不算支持。
+{items}
+只输出 JSON：{{"results": [{{"i": 1, "verdict": "supported", "reason": "不超过 20 字"}}]}}
+verdict 只能是 supported（支持）/ partial（大体支持，有轻微引申）/ unsupported（不支持或原文没有）。"""
+
+
+def semantic_batch(items: list[dict], docs: list[dict]) -> str:
+    texts = {d["n"]: d["text"] for d in docs}
+    lines = []
+    for k, it in enumerate(items, 1):
+        qs = best_quotes(it["sentence"], texts, it["cites"], 3)
+        quotes = "\n".join(f"   原文{j}：{q[:200]}" for j, (_, q, _) in enumerate(qs, 1))
+        lines.append(f"{k}. 句子：{CITE.sub('', it['sentence'])[:200]}\n{quotes}")
+    return SEMANTIC_PROMPT.format(items="\n".join(lines))
 
 
 def problems(rep: dict, kinds=("number", "bad_cite", "uncited", "analysis_num", "weak")) -> list[dict]:

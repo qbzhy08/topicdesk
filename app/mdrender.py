@@ -18,6 +18,7 @@ def _inline(s: str, cite_href: str = "#ref-") -> str:
     s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
     s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
     s = CITE.sub(lambda m: f'<sup class="cite"><a href="{cite_href}{m.group(1)}">{m.group(1)}</a></sup>', s)
+    s = re.sub(r"⟦m(\d+)⟧", r'<mark class="chk-mark" data-chk="\1">', s).replace("⟦/m⟧", "</mark>")
     return s
 
 

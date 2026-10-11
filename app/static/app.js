@@ -338,7 +338,10 @@ function renderTask(t) {
 
   const g = graphs.find((x) => x.name === t.graph);
   const sel = $("[data-f=rewind-node]", d);
-  if (g && !sel.options.length) sel.innerHTML = g.nodes.map((n) => `<option>${esc(n)}</option>`).join("");
+  if (g && !sel.options.length) {
+    sel.innerHTML = g.nodes.map((n) => `<option value="${esc(n)}">${esc(NODE_NAME[n] || n)}（${esc(n)}）</option>`).join("");
+    $("[data-f=rewind-eg]", d).innerHTML = (REWIND_EG[t.graph] || []).map((x) => `<li>${x}</li>`).join("");
+  }
   $("[data-f=state]", d).textContent = JSON.stringify(t.state, null, 2);
   renderHitl(t.hitl.filter((h) => h.status === "open"));
   // 写作入口先渲染：报告或榜单渲染出错时不能连带它也不显示
@@ -355,6 +358,19 @@ function showPanelError(f, name, err) {
     <p class="small muted">请截图发给开发者。其他部分不受影响。</p></div>`;
   if (current && f === "write") current.writeLoaded = null;
 }
+
+const NODE_NAME = { plan: "理解主题、拆子问题", decide: "决定下一步", act: "检索与抓取", judge: "复核相关度", images: "挑选配图",
+  remember: "核验事实、写入记忆", rank: "价值排序", verify: "补充核验", report: "生成报告",
+  load: "读取 Skill 和记忆", select: "选材", outline: "列提纲", gap: "补充检索", draft: "逐节写作", check: "逐句核对",
+  fix: "按核对结果改写", save: "保存文章", recheck: "复查页面", reassess: "重新评估" };
+const REWIND_EG = {
+  write: ["改了 Skill 文件或写作偏好 → 从“读取 Skill 和记忆”重跑：按新的要求重新选材、列提纲、写作",
+    "检索任务后来补充或重评了资料 → 从“选材”重跑，用新的素材重写",
+    "写作中途失败（比如大模型超时）→ 从失败的那一步接着跑，前面的步骤不重做"],
+  research: ["改了长期偏好（关注重点、排除内容）→ 从“理解主题、拆子问题”重跑，抓过的网页直接复用",
+    "只想重新生成报告 → 从“生成报告”重跑",
+    "任务中途失败 → 从失败的那一步接着跑，不用从头检索"],
+};
 
 // ---------------------------------------------------------------- Lv3：写作入口
 let skillsCache = null;
@@ -377,8 +393,9 @@ async function loadWritePanel(t) {
       <span class="sk-struct">${x.structure.map((s) => `<i>${esc(s.heading)}</i>`).join("")}</span></label>`).join("")}</div>
     ${sk.errors?.length ? `<p class="small gap">有 Skill 文件格式不对，没有加载：${sk.errors.map(esc).join("；")}</p>` : ""}
     <div class="row"><button id="write-go">开始写作</button><small class="muted" id="write-msg"></small></div>
-    ${arts.length ? `<h4>已写的文章</h4><ul class="art-list">${arts.map((a) => `<li><a href="#/article/${a.id}">${esc(a.title || "（写作中）")}</a>
-      <small class="muted">${esc(a.skill_name || a.skill)} · 第 ${a.current_version} 版 · ${fmtTime(a.updated_at)}${a.support_rate != null ? ` · 出处支持率 ${Math.round(a.support_rate * 100)}%` : ""}</small></li>`).join("")}</ul>` : ""}
+    ${arts.length ? `<h4>已写的文章</h4><div class="art-list">${arts.map((a) => `<a class="art-item" href="#/article/${a.id}">
+      <span><b>${esc(a.title || "（写作中）")}</b><small class="muted">${esc(a.skill_name || a.skill)} · 第 ${a.current_version} 版 · ${fmtTime(a.updated_at)}${a.support_rate != null ? ` · 出处支持率 ${Math.round(a.support_rate * 100)}%` : ""}</small></span>
+      <span class="btn primary">打开 →</span></a>`).join("")}</div>` : ""}
   </div>`;
   $$(".skill-card input", box).forEach((r) => r.onchange = () => {
     $$(".skill-card", box).forEach((c) => c.classList.toggle("on", c.contains(r) && r.checked));
@@ -404,10 +421,10 @@ function renderWriteTask(t) {
   const s = st.check?.summary;
   box.innerHTML = `<div class="card write-panel">
     <p class="small"><a href="#/task/${esc(t.params?.research_task || "")}">← 回到检索任务</a>${st.skill ? ` · Skill「${esc(st.skill.name)}」v${esc(st.skill.version)}` : ""}</p>
-    ${res ? `<h3>${esc(st.title)}</h3>
+    ${res ? `<div class="cta"><div class="cta-text"><p class="kicker">文章已写好 · 第 ${res.version} 版</p><h3>${esc(st.title)}</h3>
       <p class="chips"><span class="chip">素材 <b>${st.docs?.length || 0}</b></span><span class="chip">出处支持率 <b>${s?.support_rate != null ? Math.round(s.support_rate * 100) + "%" : "—"}</b></span>
-      <span class="chip">自动改正 <b>${(st.fixes || []).length}</b></span><span class="chip">补充检索 <b>${(st.gap_log || []).length}</b></span><span class="chip">遗留问题 <b>${s?.problems ?? 0}</b></span></p>
-      <a class="btn" href="#/article/${res.article_id}">打开文章 →</a>`
+      <span class="chip">自动改正 <b>${(st.fixes || []).length}</b></span><span class="chip">补充检索 <b>${(st.gap_log || []).filter((g) => !g.skipped).length}</b></span><span class="chip">待你确认 <b>${s?.problems ?? 0}</b></span></p></div>
+      <a class="btn primary big" href="#/article/${res.article_id}">打开文章 →</a></div>`
     : `<p class="small">${st.title ? `正在写《${esc(st.title)}》` : "正在准备写作"}，完成后这里会出现文章链接。</p>`}</div>`;
 }
 
@@ -1039,8 +1056,8 @@ async function showMemoryHome(qs) {
 }
 
 // ---------------------------------------------------------------- 文章
-const CHECK_NAME = { supported: "出处支持", weak: "出处里找不到相近表述", number: "数字对不上出处", bad_cite: "出处编号不存在",
-  uncited: "有数字但没有出处", analysis: "分析（无需出处）", analysis_num: "分析里有资料中没有的数字", plain: "一般叙述" };
+const CHECK_NAME = { supported: "出处支持", semantic: "改写后意思一致", weak: "出处里找不到依据", number: "数字对不上出处", bad_cite: "出处编号不存在",
+  uncited: "有数字但没有出处", analysis: "分析", analysis_num: "分析里有资料中没有的数字", plain: "一般叙述" };
 const CHECK_BAD = new Set(["weak", "number", "bad_cite", "uncited", "analysis_num"]);
 
 async function showArticle(id, ver) {
@@ -1053,38 +1070,76 @@ async function showArticle(id, ver) {
   const refOf = (n) => m.refmap?.[String(n)] ?? n;
   const renum = (t) => (t || "").replace(/\[(\d+)\]/g, (_, n) => `[${refOf(n)}]`);
   const docs = (m.docs || []).slice().sort((x, y) => (x.ref ?? 99) - (y.ref ?? 99));
-  const items = (m.check?.items || []).filter((i) => i.status !== "plain");
-  const bad = items.filter((i) => CHECK_BAD.has(i.status));
+  const all = (m.check?.items || []).map((it, k) => ({ ...it, k }));
+  const items = all.filter((i) => i.status !== "plain");
+  const bad = all.filter((i) => CHECK_BAD.has(i.status));
+  const fixes = m.fixes || [], gaps = m.gap_log || [];
+  const tab = store.get("artTab") || "check";
+  const secName = (sid) => (m.sections || []).find((x) => x.id === sid)?.heading || sid;
+  const panes = {
+    check: `<div class="stats sm"><div><b>${s.support_rate != null ? Math.round(s.support_rate * 100) + "%" : "—"}</b><small>出处支持率</small></div>
+        <div><b>${s.cited ?? 0}</b><small>带出处</small></div><div><b>${s.semantic ?? 0}</b><small>改写一致</small></div>
+        <div><b class="${s.problems ? "gap" : "ok"}">${s.problems ?? 0}</b><small>待你确认</small></div></div>
+      <p class="small muted">先按字面核对出处和每个数字；字面不像的句子再让大模型对照原文判断意思是否一致。下面列出的句子在正文里有下划线，点一下跳过去。</p>
+      ${bad.length ? bad.map((i) => `<div class="chk bad" data-goto="${i.k}"><span class="tag rel-lo">${CHECK_NAME[i.status]}</span>
+          <span class="chk-s">${esc(renum(i.sentence))}</span>
+          <details><summary>原因与出处原文</summary>${i.note ? `<p>${esc(renum(i.note))}</p>` : ""}${i.quote ? `<p class="muted">出处原文：${esc(i.quote)}</p>` : ""}</details></div>`).join("")
+        : `<p class="small ok">✓ 没有数字对不上、缺出处或找不到依据的句子</p>`}
+      <details class="small all-chk"><summary>全部 ${items.length} 句的核对结果</summary>${items.map((i) => `<div class="chk"><span class="tag ${CHECK_BAD.has(i.status) ? "rel-lo" : ""}">${CHECK_NAME[i.status]}</span>
+        ${esc(renum(i.sentence))}${i.quote && i.status !== "supported" ? `<br><small class="muted">出处原文：${esc(i.quote)}</small>` : ""}</div>`).join("")}</details>`,
+    fixes: fixes.length ? fixes.map((f) => `<div class="chk small">${f.rewrite
+        ? `<b>按核对结果改写「${esc(secName(f.section))}」</b>${(f.items || []).map((i) => `<br><small class="muted">${CHECK_NAME[i.status] || esc(i.status)}：${esc(renum(i.sentence))}</small>`).join("")}`
+        : `<b>${esc(f.why)}</b><br><s>${esc(renum(f.before))}</s><br>→ ${esc(renum(f.after))}`}</div>`).join("")
+      : `<p class="small muted">写作中没有需要改正的地方。</p>`,
+    gaps: gaps.length ? gaps.map((g) => `<div class="chk small"><b>「${esc(g.query)}」</b> ${esc(g.why || "")}<br>
+        ${g.skipped ? `<small class="muted">${esc(g.skipped)}</small>` : `<small class="muted">${esc((g.sources || []).join("；"))}</small><br>${g.found?.length ? "找到：" + g.found.map(esc).join("；") : "没有找到新资料"}`}</div>`).join("")
+      : `<p class="small muted">素材够用，写作时没有补充检索。</p>`,
+    docs: `<p class="small muted">按 Skill 的选材规则从价值排序里选出；带编号的是正文引用了的。</p>` +
+      docs.map((x) => `<div class="chk small">${x.ref ? `<b>[${x.ref}]</b> ` : `<span class="muted">未引用</span> `}<a href="#/doc/${x.id}">${esc(x.title)}</a><br><small class="muted">${esc(x.label || "")} · ${esc(x.why || "")}</small></div>`).join(""),
+  };
+  const TABS = [["check", "核对", bad.length], ["fixes", "改动", fixes.length], ["gaps", "补检", gaps.length], ["docs", "素材", docs.length]];
   el.innerHTML = `
-    <div class="detail-head"><div><p class="kicker">文章 · ${esc(m.skill?.name || a.skill)} v${esc(m.skill?.version || "")}</p><h1>${esc(a.title || "")}</h1>
+    <div class="detail-head art-head"><div><p class="kicker">文章 · ${esc(m.skill?.name || a.skill)} v${esc(m.skill?.version || "")}</p><h1>${esc(a.title || "")}</h1>
       <p class="meta">第 ${v.version} 版（${esc(v.note || "")}，${fmtTime(v.created_at)}）
         ${d.versions.length > 1 ? `<select id="art-ver">${d.versions.map((x) => `<option value="${x.version}" ${x.version === v.version ? "selected" : ""}>第 ${x.version} 版 · ${esc(x.note || "")}</option>`).join("")}</select>` : ""}
-        · <a href="#/task/${esc(m.research_task || "")}">检索任务</a> · <a href="#/task/${esc(a.task_id || "")}">写作过程</a></p></div></div>
+        · <a href="#/task/${esc(m.research_task || "")}">检索任务</a> · <a href="#/task/${esc(a.task_id || "")}">写作过程</a>
+        · <span title="Skill 文件内容指纹：同一版本号下内容改过也能看出来">Skill 指纹 <code>${esc(m.skill?.fingerprint || "")}</code></span>
+        · 提纲${m.outline_by === "llm" ? "大模型" : "规则"}，正文${m.draft_by === "llm" ? "大模型写作" : "规则摘编"}</p>
+      ${(m.prefs || []).length ? `<p class="meta">用到的写作偏好/反馈：${m.prefs.map(esc).join("；")}</p>` : ""}</div></div>
     <div class="art-layout">
       <article class="art-body">${v.html || ""}</article>
-      <aside class="art-side">
-        <div class="card"><h3>事实核对</h3>
-          <div class="stats sm"><div><b>${s.support_rate != null ? Math.round(s.support_rate * 100) + "%" : "—"}</b><small>出处支持率</small></div>
-            <div><b>${s.cited ?? 0}</b><small>带出处的句子</small></div><div><b>${s.analysis ?? 0}</b><small>分析句</small></div>
-            <div><b class="${s.problems ? "gap" : "ok"}">${s.problems ?? 0}</b><small>遗留问题</small></div></div>
-          <p class="small muted">逐句检查：出处原文里有没有相近表述；句中每个数字能不能在出处里找到；没出处的数字、分析里编造的数字。不依赖大模型。</p>
-          ${bad.length ? `<h4>需要你看一下</h4>${bad.map((i) => `<div class="chk bad"><span class="tag rel-lo">${CHECK_NAME[i.status]}</span> ${esc(i.sentence)}
-            ${i.note ? `<br><small>${esc(i.note)}</small>` : ""}${i.quote ? `<br><small class="muted">出处原文：${esc(i.quote)}</small>` : ""}</div>`).join("")}` : `<p class="small ok">✓ 没有发现数字对不上或缺出处的句子</p>`}
-          <details class="small"><summary>逐句核对明细（${items.length} 句）</summary>${items.map((i) => `<div class="chk"><span class="tag ${CHECK_BAD.has(i.status) ? "rel-lo" : ""}">${CHECK_NAME[i.status]}</span>
-            ${esc(i.sentence.replace(/\[(\d+)\]/g, (_, n) => `[${refOf(n)}]`))}${i.quote ? `<br><small class="muted">出处原文：${esc(i.quote)}</small>` : ""}</div>`).join("")}</details>
-        </div>
-        ${(m.fixes || []).length ? `<div class="card"><h3>写作中改正了什么</h3>${m.fixes.map((f) => `<div class="chk small">${f.rewrite ? `<b>按核对结果改写「${esc((m.sections || []).find((x) => x.id === f.section)?.heading || f.section)}」</b>${(f.items || []).map((i) => `<br><small class="muted">${CHECK_NAME[i.status] || esc(i.status)}：${esc(renum(i.sentence))}</small>`).join("") || `<br><small class="muted">${esc(f.why)}</small>`}`
-          : `<b>${esc(f.why)}</b><br><s>${esc(renum(f.before))}</s><br>→ ${esc(renum(f.after))}`}</div>`).join("")}</div>` : ""}
-        ${(m.gap_log || []).length ? `<div class="card"><h3>写作中补充检索</h3>${m.gap_log.map((g) => `<div class="chk small"><b>「${esc(g.query)}」</b> ${esc(g.why || "")}<br>
-          <small class="muted">${esc((g.sources || []).join("；"))}</small><br>${g.found?.length ? "找到：" + g.found.map(esc).join("；") : "没有找到新资料"}</div>`).join("")}</div>` : ""}
-        <div class="card"><h3>素材（${docs.length} 篇）</h3><p class="small muted">按 Skill 的选材规则从价值排序里选出；带编号的是正文引用了的。</p>
-          ${docs.map((x) => `<div class="chk small">${x.ref ? `<b>[${x.ref}]</b> ` : `<span class="muted">未引用</span> `}<a href="#/doc/${x.id}">${esc(x.title)}</a><br><small class="muted">${esc(x.label || "")} · ${esc(x.why || "")}</small></div>`).join("")}</div>
-        <div class="card"><h3>Skill</h3><p class="small">「${esc(m.skill?.name || "")}」v${esc(m.skill?.version || "")}，内容指纹 <code>${esc(m.skill?.fingerprint || "")}</code>；
-          提纲由${m.outline_by === "llm" ? "大模型" : "规则"}生成，正文由${m.draft_by === "llm" ? "大模型写作" : "规则摘编（未配置大模型）"}。</p>
-          ${(m.prefs || []).length ? `<p class="small">用到的写作偏好/反馈：${m.prefs.map(esc).join("；")}</p>` : ""}</div>
+      <aside class="art-side card">
+        <div class="side-tabs">${TABS.map(([k, n, c]) => `<button class="${k === tab ? "on" : ""}" data-tab="${k}">${n}${c ? ` <i>${c}</i>` : ""}</button>`).join("")}</div>
+        <div class="side-pane">${panes[tab] || panes.check}</div>
       </aside>
     </div>`;
   $("#art-ver") && ($("#art-ver").onchange = (e) => location.hash = `#/article/${id}?v=${e.target.value}`);
+  $$(".side-tabs button", el).forEach((b) => b.onclick = () => {
+    store.set("artTab", b.dataset.tab);
+    $$(".side-tabs button", el).forEach((x) => x.classList.toggle("on", x === b));
+    $(".side-pane", el).innerHTML = panes[b.dataset.tab];
+    $(".side-pane", el).scrollTop = 0;
+    bindGoto();
+  });
+  // 出处上标：页内跳到参考资料（不能改 location.hash，否则会触发路由）
+  $$(".art-body sup.cite a", el).forEach((x) => x.onclick = (e) => {
+    e.preventDefault();
+    const li = $(`.art-body #ref-${x.getAttribute("href").split("-").pop()}`, el);
+    if (li) { li.scrollIntoView({ behavior: "smooth", block: "center" }); flash(li); }
+  });
+  function bindGoto() {
+    $$("[data-goto]", el).forEach((row) => row.querySelector(".chk-s").onclick = () => {
+      const mk = $(`.art-body mark[data-chk="${row.dataset.goto}"]`, el);
+      if (mk) { mk.scrollIntoView({ behavior: "smooth", block: "center" }); flash(mk); }
+    });
+  }
+  bindGoto();
+}
+
+function flash(node) {
+  node.classList.remove("flash");
+  void node.offsetWidth;
+  node.classList.add("flash");
 }
 
 // ---------------------------------------------------------------- 记忆验证演示（固定样例回放）
