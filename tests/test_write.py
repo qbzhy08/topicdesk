@@ -266,3 +266,37 @@ class IllustrateTest(WriteBase):
 def fixtures_png(w, h):
     from tests import fixtures
     return fixtures.png(w, h)
+
+
+class ImageClarityTest(WriteBase):
+    def test_hires_upgrade(self):
+        from app.collect import images
+        small, big = "https://mmbiz.qpic.cn/mmbiz_png/abc/640?wx_fmt=png", "https://mmbiz.qpic.cn/mmbiz_png/abc/0?wx_fmt=png"
+        self.web.images[small] = fixtures_png(640, 360)
+        self.web.images[big] = fixtures_png(1600, 900)
+        self.assertEqual(images.hires_candidates(small), [big])
+        r = images.download_best(small)
+        self.assertEqual((r["width"], r["url"], r["upgraded_from"]), (1600, big, "640×360"))
+        self.assertEqual(images.hires_candidates("https://img.ithome.com/a.png"), [])
+
+    def test_chartlike_not_cover(self):
+        from PIL import Image, ImageDraw
+        from app import config, illustrate as ill
+        im = Image.new("RGB", (1200, 700), "white")
+        d = ImageDraw.Draw(im)
+        for y in range(40, 680, 18):                 # 满屏小字一样的细线
+            for x in range(40, 1160, 60):
+                d.text((x, y), "量化 12%", fill="black")
+        im.save(config.IMAGE_DIR / "chart_text.png")
+        q = ill.quality("images/chart_text.png", 1200, 700, "")
+        self.assertTrue(q["chartlike"], q)
+        cand = {"id": "x", "local_path": "images/chart_text.png", "width": 1200, "height": 700, "url": "", "phash": None,
+                "caption": "人形机器人下游应用场景", "context_text": "", "doc_title": "人形机器人"}
+        self.assertIsNone(ill.pick_cover([cand], set(), ["人形机器人"]))
+
+    def test_numbers_next_to_chinese(self):
+        nums = writing.numbers("去年全年产能已超1000台，截至2026年5月累计下线约11,000台，占比30%")
+        self.assertIn("1000台", nums)
+        self.assertIn("11,000台", nums)
+        self.assertIn("30%", nums)
+        self.assertTrue(writing.num_in("11,000台", writing._norm("累计下线约11000台")))

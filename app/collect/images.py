@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import re
 
 from .. import config, db
 from .fetch import FetchError, fetcher
@@ -22,6 +23,43 @@ def ahash(im) -> str:
 
 def hamming(a: str, b: str) -> int:
     return bin(int(a, 16) ^ int(b, 16)).count("1")
+
+
+HIRES_RULES = [
+    # 公众号图片：/640?wx_fmt=… 是 640 宽的压缩版，/0? 是原图
+    (re.compile(r"(mmbiz\.qpic\.cn/.+?)/\d{2,4}(\?|$)"), r"\1/0\2"),
+    # 知乎：_720w / _b / _hd 等是缩放版，_r 是原图
+    (re.compile(r"(zhimg\.com/.+?)_(?:\d+w|b|hd|l|xl|qhd|180x120)(\.\w+)"), r"\1_r\2"),
+    # 新浪图床：/mw690/ /thumb150/ 等 → /large/
+    (re.compile(r"(sinaimg\.cn)/(?:mw\d+|thumb\d+|orj\d+|bmiddle|small)/"), r"\1/large/"),
+    # 阿里云 OSS、七牛、腾讯云的在线缩放参数
+    (re.compile(r"[?&](?:x-oss-process|imageView2|imageMogr2|imageslim)[^#]*"), ""),
+    # 头条/抖音系：~tplv-xxx-resize:640:0.image
+    (re.compile(r"~tplv-[\w-]+(?::\d+)*(?::\d+)?\.(?:image|webp|jpeg|png)"), ""),
+    # 文件名里的尺寸后缀：xxx_640x360.jpg、xxx-300x200.png（WordPress 缩略图）
+    (re.compile(r"[-_]\d{2,4}x\d{2,4}(\.(?:jpe?g|png|webp))"), r"\1"),
+]
+
+
+def hires_candidates(url: str) -> list[str]:
+    """同一张图可能的原图地址（去掉 CDN 的缩放参数）。只返回和原地址不同的。"""
+    out = []
+    for pat, rep in HIRES_RULES:
+        u = pat.sub(rep, url)
+        if u != url and u not in out:
+            out.append(u.rstrip("?&"))
+    return out
+
+
+def download_best(url: str, referer: str | None = None) -> dict:
+    """先试原图地址，比给出的地址更大才用；否则用给出的地址。结果里 upgraded_from 记录升级前的尺寸。"""
+    base = download(url, referer)
+    for u in hires_candidates(url)[:2]:
+        alt = download(u, referer)
+        if alt.get("ok") and (alt.get("width") or 0) > (base.get("width") or 0) * 1.15:
+            alt.update(url=u, upgraded_from=f"{base.get('width')}×{base.get('height')}" if base.get("width") else "无法下载")
+            return alt
+    return base
 
 
 def download(url: str, referer: str | None = None) -> dict:

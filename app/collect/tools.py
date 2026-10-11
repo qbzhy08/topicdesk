@@ -33,7 +33,7 @@ def arxiv_status(ids: list):
 
 @tool("image_download", "下载图片并做清晰度、尺寸、宽高比检查", cacheable=True)
 def image_download(url: str, referer: str | None = None):
-    return images_mod.download(url, referer=referer)
+    return images_mod.download_best(url, referer=referer)
 
 
 @tool("llm", "调用大模型（OpenAI 兼容接口）")

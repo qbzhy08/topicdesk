@@ -1178,6 +1178,20 @@ async function showArticle(id, ver) {
     });
   }
   bindGoto();
+  // 点图片看大图：先适应屏幕，再点一次看 100% 原始像素；按 Esc 或点空白处关闭
+  $$(".art-body figure img", el).forEach((img) => img.onclick = () => {
+    const box = document.createElement("div");
+    box.className = "lightbox";
+    const cap = img.closest("figure")?.querySelector("figcaption")?.textContent || "";
+    box.innerHTML = `<img src="${img.getAttribute("src")}" alt=""><p>${esc(cap)}<br>原始尺寸 ${img.naturalWidth}×${img.naturalHeight} · 再点一次图片看 100% 原始像素 · Esc 关闭</p>`;
+    const big = box.querySelector("img");
+    big.onclick = (e) => { e.stopPropagation(); big.classList.toggle("full"); };
+    const close = () => { box.remove(); document.removeEventListener("keydown", onKey); };
+    const onKey = (e) => { if (e.key === "Escape") close(); };
+    box.onclick = close;
+    document.addEventListener("keydown", onKey);
+    document.body.append(box);
+  });
 }
 
 function flash(node) {

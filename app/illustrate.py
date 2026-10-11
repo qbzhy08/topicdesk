@@ -47,12 +47,20 @@ def quality(local_path: str, width: int | None, height: int | None, url: str = "
         g = g.resize((640, max(1, int(640 * h / w))) if w >= h else (max(1, int(640 * w / h)), 640))
     lap = g.filter(ImageFilter.Kernel((3, 3), [0, 1, 0, 1, -4, 1, 0, 1, 0], 1, 128))
     sharp = round(ImageStat.Stat(lap).var[0], 1)
+    # 文字图表/信息图：大面积接近白色的底 + 很多细小笔画。这类图缩小后字看不清，不适合当封面
+    hist = g.histogram()
+    white = sum(hist[236:]) / max(1, sum(hist))
+    chartlike = white > 0.42 and sharp > 300
     if sharp < 25:
         issues.append(f"模糊（清晰度 {sharp}，低于 25）")
     elif sharp < 60:
         warn.append(f"略模糊（清晰度 {sharp}）")
     if w < 480 or h < 270:
         issues.append(f"尺寸偏小 {w}×{h}，放大后会糊")
+    elif w < 900:
+        warn.append(f"宽 {w} 像素，在宽屏上会按原尺寸显示（不拉伸）")
+    if chartlike and w < 1200:
+        warn.append("文字较多的图表，分辨率不高时小字可能看不清（点图片可看原图）")
     bpp = len(data) / max(1, w * h)
     if (im.format or "").upper() in ("JPEG", "WEBP") and bpp < 0.02:
         warn.append(f"压缩较重（{bpp:.3f} 字节/像素）")
@@ -60,7 +68,8 @@ def quality(local_path: str, width: int | None, height: int | None, url: str = "
         issues.append("链接带缩略图/裁切参数，可能不是完整原图")
     if w / h > 3.2 or h / w > 2.2:
         issues.append(f"宽高比 {w}:{h} 过于极端，可能是长条或被裁切")
-    return {"ok": not issues, "sharpness": sharp, "issues": issues, "warn": warn, "w": w, "h": h}
+    return {"ok": not issues, "sharpness": sharp, "issues": issues, "warn": warn, "w": w, "h": h,
+            "chartlike": chartlike, "white": round(white, 2)}
 
 
 # ---------------------------------------------------------------- 候选与放置
@@ -111,7 +120,8 @@ def place(cands: list[dict], sections: list[dict], docs: list[dict], need: int,
                 if para.lstrip().startswith("|"):
                     continue
                 cites = n is not None and f"[{n}]" in para
-                sc = score(im, para, cites)
+                # 分辨率加分：同样相关时优先清晰的大图（最多 +0.08）
+                sc = round(score(im, para, cites) + min(im["quality"]["w"], 1600) / 20000, 3)
                 options.append((sc, im, si, pi, cites))
     options.sort(key=lambda x: -x[0])
     figs, used_img, used_sec, hashes = [], set(), set(), []
@@ -151,14 +161,14 @@ def place(cands: list[dict], sections: list[dict], docs: list[dict], need: int,
 
 
 def pick_cover(cands: list[dict], used: set, topic_terms: list[str]) -> dict | None:
-    """封面：横图（宽高比 1.3-2.4）、宽度 ≥ 640、清晰，和主题词相关度最高；正文已用的图（及其近似图）不当封面。"""
+    """封面：横图（宽高比 1.3-2.4）、宽度 ≥ 960、清晰、不是文字图表，和主题词相关度最高；正文已用的图（及其近似图）不当封面。"""
     best, best_s = None, -1
     terms = " ".join(topic_terms)
     used_hash = [c["phash"] for c in cands if c["id"] in used and c.get("phash")]
     for im in cands:
         q = im.get("quality") or quality(im["local_path"], im.get("width"), im.get("height"), im.get("url"))
-        if not q["ok"] or im["id"] in used or q["w"] < 640 or not 1.3 <= q["w"] / q["h"] <= 2.4:
-            continue
+        if not q["ok"] or im["id"] in used or q["w"] < 960 or not 1.3 <= q["w"] / q["h"] <= 2.4 or q.get("chartlike"):
+            continue      # 封面：横版照片类、宽 ≥ 960；满是小字的图表不当封面
         if im.get("phash") and any(hamming(im["phash"], h) <= 6 for h in used_hash):
             continue
         s = writing.overlap(terms, _img_text(im) + (im.get("doc_title") or "")) + min(q["w"], 1600) / 4000
@@ -275,14 +285,18 @@ def number_items(check_items: list[dict], limit: int = 4) -> list[dict]:
     for it in check_items:
         if it["status"] != "supported" or it.get("analysis") or not it["numbers"]:
             continue
-        num = max(it["numbers"], key=len)
-        if num in seen or DATE.search(num + "年"):
+        nums = [n for n in it["numbers"] if not re.fullmatch(r"(19|20)\d{2}年?|\d{1,2}月|\d{1,2}日", n)]
+        if not nums:
+            continue
+        num = max(nums, key=len)
+        if num in seen:
             continue
         sent = writing.CITE.sub("", it["sentence"]).strip("。")
-        i = sent.find(num)
-        label = sent[max(0, i - 16):i].strip("，,、 ") or sent[:20]
+        # 说明文字：数字所在的那个分句（去掉数字本身），读者看得出这个数字是什么
+        clause = next((c for c in re.split(r"[，,；;：:]", sent) if num.replace(" ", "") in c.replace(" ", "")), sent)
+        label = clause.replace(num, "").strip(" ，,、") or clause
         seen.add(num)
-        out.append({"num": num, "label": label[-22:], "cites": it["cites"], "section": it["section"]})
+        out.append({"num": num, "label": label[:26], "cites": it["cites"], "section": it["section"]})
         if len(out) >= limit:
             break
     return out

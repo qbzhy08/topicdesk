@@ -559,6 +559,30 @@ def illustrate(ctx):
         if not bad:
             break
         banned |= {f["image_id"] for f in bad}
+    # 已选中的图如果是 CDN 压缩版，换成原图（检索阶段存下的可能是缩略版）
+    from ..collect.images import hires_candidates
+
+    def upgrade(fig_or_img, key="image_id"):
+        iid = fig_or_img.get(key) or fig_or_img.get("id")
+        row = db.query_one("SELECT * FROM images WHERE id=?", (iid,)) if iid else None
+        if not row or not hires_candidates(row["url"]):
+            return None
+        try:
+            res = ctx.tool("image_download", url=row["url"], referer=row.get("url"))
+        except Exception:  # noqa: BLE001
+            return None
+        if res.get("ok") and res.get("upgraded_from") and (res.get("width") or 0) > (row["width"] or 0):
+            db.update("images", "id", iid, {"local_path": res["local_path"], "width": res["width"], "height": res["height"],
+                                            "sha256": res["sha256"], "phash": res["phash"]})
+            return res
+        return None
+    for f in figs:
+        up = upgrade(f)
+        if up:
+            f.update(src="/media/" + up["local_path"], w=up["width"], h=up["height"])
+            f.setdefault("warn", [])
+            f["warn"] = [w for w in f["warn"] if "像素" not in w and "分辨率" not in w]
+            f["why"] += f"；已从压缩版 {up['upgraded_from']} 换成原图 {up['width']}×{up['height']}"
     for f in figs:
         src = _names_short(f["source_id"])
         cap = (f["orig_caption"] or "").strip()
@@ -623,6 +647,9 @@ def illustrate(ctx):
     # ---- 封面
     cov = ill.pick_cover(cands, {f["image_id"] for f in figs}, st["terms"])
     if cov:
+        up = upgrade(cov, "id")
+        if up:
+            cov = {**cov, "local_path": up["local_path"], "width": up["width"], "height": up["height"]}
         st["cover"] = {"kind": "photo", "image_id": cov["id"], "src": "/media/" + cov["local_path"], "url": cov["url"],
                        "doc_title": cov["doc_title"], "doc_id": cov["doc_id"],
                        "caption": ((cov.get("caption") or "").strip() or "封面图") + f"（图源：{_names_short(cov['source_id'])}《{cov['doc_title'][:24]}》）",

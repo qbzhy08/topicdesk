@@ -16,7 +16,7 @@ from .collect.dedup import parse_date
 CITE = re.compile(r"\[(\d{1,2})\]")
 ANALYSIS = "【分析】"
 # 需要核对的“硬信息”：数字（含单位）、百分比、年份、版本号
-NUM = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?\s?(?:%|％|[kKMBG]\b|[kK](?=[一-鿿])|万|亿|倍|年|月|日|个|款|篇|分|美元|元)?)")
+NUM = re.compile(r"(?<![A-Za-z0-9_.,])(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s?(%|％|[kKMBG]\b|[kK](?=[\u4e00-\u9fff])|万亿|亿元|万元|万|亿|倍|年|月|日|个|款|篇|分|美元|元|台|家|人|项|次|辆|件|名|条|种|米)?")
 NOISE_NUMS = {"1", "2", "3", "4", "5"}        # 序号、“两三句”这类小数字不当成需要出处的数字
 
 
@@ -37,8 +37,8 @@ def overlap(claim: str, quote: str) -> float:
 def numbers(text: str) -> list[str]:
     out = []
     for m in NUM.finditer(CITE.sub("", text)):
-        n = m.group(1).replace(" ", "")
-        core = re.match(r"\d+(?:\.\d+)?", n).group(0)
+        n = (m.group(1) + (m.group(2) or "")).replace(" ", "")
+        core = re.match(r"[\d,]+(?:\.\d+)?", n).group(0).replace(",", "")
         if core in NOISE_NUMS and n == core:
             continue
         out.append(n)
@@ -50,10 +50,13 @@ def num_in(n: str, text_norm: str) -> bool:
     n = _norm(n)
     if n in text_norm:
         return True
-    core = re.match(r"\d+(?:\.\d+)?", n).group(0)
-    unit = n[len(core):]
-    if unit in ("年", "月", "日", "个", "款", "篇", "分"):
-        return re.search(rf"(?<!\d){re.escape(core)}(?!\d)", text_norm) is not None
+    raw = re.match(r"[\d,]+(?:\.\d+)?", n).group(0)
+    core, unit = raw.replace(",", ""), n[len(raw):]
+    plain = text_norm.replace(",", "")          # 11,000 与 11000 视为同一个数
+    if core + unit in plain:
+        return True
+    if unit in ("年", "月", "日", "个", "款", "篇", "分", "台", "家", "人", "项", "次", "辆", "件", "名", "条", "种", "米"):
+        return re.search(rf"(?<![\d.]){re.escape(core)}(?![\d.])", plain) is not None
     return False
 
 
