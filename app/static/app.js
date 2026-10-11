@@ -38,8 +38,8 @@ async function init() {
   });
   setupTranslate();
   $("#import-form").addEventListener("submit", submitImport);
-  window.addEventListener("hashchange", route);
   setupHistNav();
+  window.addEventListener("hashchange", route);
   route();
   refreshList();
   setInterval(refreshList, 5000);
@@ -158,21 +158,89 @@ const store = {
   set(k, v) { try { localStorage.setItem("td:" + k, JSON.stringify(v)); } catch { /* 隐私模式等 */ } },
 };
 
-// ---- 页面内的返回 / 前进按钮（等同浏览器的后退、前进；页面都是 # 路由，历史记录天然可用）
+// ---- 页面内的返回 / 前进（固定在内容区顶部，滚动到哪都能点）
+// 等同浏览器的后退、前进；返回时恢复之前看到的位置；旁边显示“上一页 › 当前页”，点上一页名称也能返回
+const PAGE_KIND = [[/^#\/task\//, "任务"], [/^#\/article\//, "文章"], [/^#\/doc\//, "资料"], [/^#\/library/, "资料库"],
+  [/^#\/memory\/demo/, "记忆演示"], [/^#\/memory\//, "记忆"], [/^#\/memory/, "记忆"], [/^#\/sources/, "信息源"],
+  [/^#\/settings/, "设置"]];
+const hist = { labels: {}, scroll: {}, traverse: false, last: location.hash || "#/" };
+try { Object.assign(hist.labels, JSON.parse(sessionStorage.getItem("td:labels") || "{}")); } catch { /* */ }
+
+function pageKind(h) {
+  h = h || "#/";
+  for (const [re, n] of PAGE_KIND) if (re.test(h)) return n;
+  return "新主题";
+}
+function pageLabel(h) { return hist.labels[h] || pageKind(h); }
+
 function setupHistNav() {
-  const back = $("#nav-back"), fwd = $("#nav-fwd");
-  const nav = window.navigation;              // Chrome/Edge 支持，可判断能否后退/前进
+  const back = $("#nav-back"), fwd = $("#nav-fwd"), prev = $("#hist-prev"), cur = $("#hist-cur");
+  const nav = window.navigation;              // Chrome/Edge：可判断能否后退/前进、上一页是哪
+  try { history.scrollRestoration = "manual"; } catch { /* */ }
+  const hashOf = (e) => { try { return new URL(e.url).hash || "#/"; } catch { return null; } };
   const sync = () => {
+    const h = location.hash || "#/";
+    cur.textContent = pageLabel(h);
     if (nav && "canGoBack" in nav) {
       back.disabled = !nav.canGoBack;
       fwd.disabled = !nav.canGoForward;
+      const i = nav.currentEntry?.index ?? -1;
+      const pe = i > 0 ? nav.entries()[i - 1] : null;
+      const ph = pe && hashOf(pe);
+      prev.hidden = !ph || ph === h;
+      if (ph) { prev.textContent = pageLabel(ph); prev.title = `返回：${pageLabel(ph)}`; }
+      back.title = ph ? `返回：${pageLabel(ph)}（Alt+←）` : "返回（Alt+←）";
+      const ne = nav.canGoForward ? nav.entries()[i + 1] : null;
+      const nh = ne && hashOf(ne);
+      fwd.title = nh ? `前进：${pageLabel(nh)}（Alt+→）` : "前进（Alt+→）";
     }
   };
-  back.onclick = () => history.back();
-  fwd.onclick = () => history.forward();
-  window.addEventListener("hashchange", () => setTimeout(sync, 0));
-  nav?.addEventListener?.("currententrychange", sync);
+  const go = (d) => { hist.traverse = true; d < 0 ? history.back() : history.forward(); };
+  back.onclick = () => go(-1);
+  fwd.onclick = () => go(1);
+  prev.onclick = () => go(-1);
+  nav?.addEventListener?.("navigate", (e) => { if (e.navigationType === "traverse") hist.traverse = true; });
+  window.addEventListener("popstate", () => { if (!nav) hist.traverse = true; });
+  // 离开前记下滚动位置（hashchange 在 route 之前注册，先执行）
+  window.addEventListener("hashchange", () => {
+    hist.scroll[hist.last] = window.scrollY;
+    hist.last = location.hash || "#/";
+    const restore = hist.traverse ? hist.scroll[hist.last] : 0;
+    hist.traverse = false;
+    restoreScroll(restore || 0);
+    setTimeout(sync, 0);
+  });
+  // 页面内容渲染出来后，用标题作为这一页的名字（任务名、文章标题等）
+  let t = null;
+  new MutationObserver(() => {
+    clearTimeout(t);
+    t = setTimeout(() => {
+      const h = location.hash || "#/";
+      const title = ($("#detail h1")?.textContent || "").trim();
+      const kind = pageKind(h);
+      const label = title && kind !== "新主题" ? `${kind}：${title.length > 28 ? title.slice(0, 28) + "…" : title}` : kind;
+      if (hist.labels[h] !== label) {
+        hist.labels[h] = label;
+        try { sessionStorage.setItem("td:labels", JSON.stringify(hist.labels)); } catch { /* */ }
+        sync();
+      }
+    }, 120);
+  }).observe($("#detail"), { childList: true, subtree: true, characterData: true });
   sync();
+}
+
+// 内容是异步渲染的：等页面够高了再滚回去（最多等 3 秒）
+function restoreScroll(y) {
+  if (!y) { window.scrollTo(0, 0); return; }
+  const t0 = Date.now();
+  const tick = () => {
+    if (document.documentElement.scrollHeight - window.innerHeight >= y - 4 || Date.now() - t0 > 3000) {
+      window.scrollTo(0, y);
+      return;
+    }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
 }
 
 let routedOnce = false;

@@ -8,13 +8,7 @@
 </head>
 <body>
 <header class="masthead">
-  <div class="mast-left">
-    <span class="histnav">
-      <button type="button" id="nav-back" title="返回上一页（Alt+←）" aria-label="返回">&#8592;</button>
-      <button type="button" id="nav-fwd" title="前进到下一页（Alt+→）" aria-label="前进">&#8594;</button>
-    </span>
-    <a href="#/" class="brand">主题编辑台<span>TopicDesk</span></a>
-  </div>
+  <a href="#/" class="brand">主题编辑台<span>TopicDesk</span></a>
   <nav id="nav">
     <a href="#/" data-nav="tasks">任务</a>
     <a href="#/library" data-nav="library">资料库</a>
@@ -39,9 +33,18 @@
     <ul id="task-list" class="task-list"></ul>
   </aside>
 
-  <section id="detail" class="detail">
-    <div class="empty">从左侧提交一个主题，或打开已有任务。<br>任务进度保存在本地数据库，刷新页面不会丢失。</div>
-  </section>
+  <div class="detail-col">
+    <nav class="histbar" id="histbar" aria-label="页面历史">
+      <span class="histnav">
+        <button type="button" id="nav-back" title="返回（Alt+←）" aria-label="返回">&#8592;</button>
+        <button type="button" id="nav-fwd" title="前进（Alt+→）" aria-label="前进">&#8594;</button>
+      </span>
+      <span class="hist-crumb"><button type="button" class="hist-prev" id="hist-prev" hidden></button><b id="hist-cur"></b></span>
+    </nav>
+    <section id="detail" class="detail">
+      <div class="empty">从左侧提交一个主题，或打开已有任务。<br>任务进度保存在本地数据库，刷新页面不会丢失。</div>
+    </section>
+  </div>
 </main>
 
 <template id="tpl-detail">
