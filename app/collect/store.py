@@ -64,12 +64,32 @@ def topic_last_run(topic: str, exclude_task: str | None = None) -> float | None:
     return row["t"] if row and row["t"] else None
 
 
+TITLE_MAX = 160
+
+
+def clean_title(t: str | None) -> str | None:
+    """标题清洗：合并空白；去掉 GitHub 页面标题前缀；超长截断。
+    有的仓库把整篇 README 填进“简介”，GitHub 页面标题会带上它，不截断就会变成几千字的标题。"""
+    if not t:
+        return t
+    t = re.sub(r"\s+", " ", t).strip()
+    t = re.sub(r"^GitHub - ", "", t)
+    if len(t) > TITLE_MAX:
+        cut = t[:TITLE_MAX]
+        # 尽量在句读或空格处截断
+        m = re.search(r"^(.{60,})[。.!！?？;；:：,，\s]", cut)
+        t = (m.group(1) if m else cut).rstrip(" ,，:：;；-—#*") + "…"
+    return t
+
+
 def upsert_document(item: dict, topic: str, *, task_id: str | None = None,
                     last_run_at: float | None = None) -> dict:
     """返回 {doc_id, action, novelty, relation, related_id}。
     action: new / unchanged / enriched / updated
     novelty: new(新进展) / update(内容更新) / background(背景资料) / duplicate(重复报道)
     """
+    if item.get("title"):
+        item = {**item, "title": clean_title(item["title"])}
     url = item["url"]
     canon = canonical_url(url)
     basis = _basis(item)

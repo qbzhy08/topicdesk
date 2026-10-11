@@ -195,3 +195,11 @@ code { font-family: var(--mono); font-size: 12px; background: var(--paper); padd
   .tag.rel-mid { background: #3d3216; color: #f0d27a; }
   .tag.rel-lo { background: #3f2222; color: #f0a5a5; }
 }
+
+/* 标题最多两行，超出省略（完整标题在详情页） */
+.doc-main b, .tbl td a {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; overflow-wrap: anywhere;
+}
+.tbl .col-why { min-width: 9em; width: 18%; }
+.tbl .col-out { min-width: 10em; width: 26%; }

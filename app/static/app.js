@@ -247,8 +247,8 @@ function recheckReport(rep) {
       <div><b>${rep.summary?.unchanged || 0}</b><small>无变化</small></div>
       <div><b>${rep.summary?.failed || 0}</b><small>失败</small></div>
     </div>
-    ${items.length ? `<table class="tbl"><tr><th>页面</th><th>为什么复查</th><th>结果</th></tr>${items.map((r) => `
-      <tr><td><a href="#/doc/${r.new_doc_id || r.doc_id}">${esc(r.title || r.url)}</a></td><td class="small">${esc(r.why || "")}</td>
+    ${items.length ? `<table class="tbl"><tr><th>页面</th><th class="col-why">为什么复查</th><th class="col-out">结果</th></tr>${items.map((r) => `
+      <tr><td><a href="#/doc/${r.new_doc_id || r.doc_id}">${esc(r.title || r.url)}</a></td><td class="small col-why">${esc(r.why || "")}</td>
       <td><span class="tag ${r.outcome === "updated" ? "nv-update" : ""}">${OUT[r.outcome] || esc(r.outcome)}</span>
       ${r.version ? ` v${r.version}` : ""}${r.note ? `<br><small>${esc(r.note)}</small>` : ""}${r.error ? `<br><small>${esc(r.error)}</small>` : ""}
       ${r.change ? `<br><small>${changeTxt(r.change)}</small>` : ""}</td></tr>`).join("")}</table>`

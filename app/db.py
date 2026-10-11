@@ -284,6 +284,9 @@ def init_db():
         if col not in cols:
             c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
     c.executescript(EXTRA_SCHEMA)
+    # 修复旧数据：超长标题（如整篇 README 被当成仓库简介）截断
+    c.execute("UPDATE documents SET title = substr(replace(title, 'GitHub - ', ''), 1, 160) || '…' "
+              "WHERE length(title) > 200")
     c.commit()
 
 

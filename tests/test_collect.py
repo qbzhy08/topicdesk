@@ -586,3 +586,14 @@ class RecheckScopeTest(CollectBase):
         self.assertIn("有新提交", gh2["note"])
         fetched2 = [c["input"]["url"] for c in db.query("SELECT input FROM tool_calls WHERE task_id=? AND tool='page_fetch'", (r2,))]
         self.assertIn("https://github.com/example/longeval", fetched2)
+
+
+class TitleTest(CollectBase):
+    def test_overlong_title_truncated(self):
+        long = "GitHub - a/b: # Application card: " + "GitHub Copilot Chat responsibly. " * 200
+        r = store.upsert_document({"url": "https://github.com/a/b", "title": long, "text": "x" * 100,
+                                   "content_kind": "full", "source_id": "web"}, "T")
+        t = db.query_one("SELECT title FROM documents WHERE id=?", (r["doc_id"],))["title"]
+        self.assertLessEqual(len(t), 161)
+        self.assertTrue(t.endswith("…"))
+        self.assertFalse(t.startswith("GitHub - "))
