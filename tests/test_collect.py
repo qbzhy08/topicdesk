@@ -355,3 +355,66 @@ class EarlyStopTest(CollectBase):
         self.assertLessEqual(fetched_after, 1)                 # 覆盖后最多再补抓 1 篇
         thoughts = " ".join(s["thought"] or "" for s in db.query("SELECT thought FROM steps WHERE task_id=?", (tid,)))
         self.assertIn("所有子问题已覆盖", thoughts)
+
+
+class GapFillTest(CollectBase):
+    """缺口补检：先扩充同义词用已有资料判断；仍不足的只做少量定向检索；补不上就标注，不反复全量检索。"""
+
+    def _fake_chat(self, messages, **kw):
+        text = messages[-1]["content"]
+        if "信息检索规划助手" in text:
+            data = {"domains": ["tech"], "core_terms_zh": ["长上下文"], "queries_en": ["long context LLM"],
+                    "aspects": [
+                        {"name": "上下文窗口扩展与位置外推技术", "keywords": ["位置外推"],
+                         "search_en": "long context RoPE extrapolation", "search_zh": "位置外推"},
+                        {"name": "长上下文评测方法新进展", "keywords": ["评测方法论"]},
+                        {"name": "监管政策", "keywords": ["监管"]}], "notes": "test"}
+        elif "还没有覆盖下面这些子问题" in text:
+            self.gap_prompts.append(text)
+            data = {"why": "补同义词", "gaps": [
+                {"id": "llm0", "keywords": ["YaRN", "RoPE scaling"]},
+                {"id": "llm1", "keywords": ["needle in a haystack", "multi-hop benchmark"]},
+                {"id": "llm2", "keywords": ["合规"], "search_en": "long context regulation"}]}
+        else:
+            raise RuntimeError("translate: not needed in test")
+        return {"content": json.dumps(data), "data": data, "usage": {}, "_cost": 0}
+
+    def test_targeted_gap_fill(self):
+        from app import llm
+        self.gap_prompts = []
+        old = (llm.available, llm.chat)
+        llm.available, llm.chat = (lambda: True), self._fake_chat
+        try:
+            tid = create_task("research", "开源大模型 长上下文 评测",
+                              params={"max_docs": 40, "en_keywords": ["long context LLM"],
+                                      "sources": ["ithome", "juejin", "arxiv", "hn", "github"]},
+                              budget={"max_tool_calls": 300, "max_steps": 300})
+            self.assertEqual(run_task(tid), "done")
+        finally:
+            llm.available, llm.chat = old
+        task = db.query_one("SELECT * FROM tasks WHERE id=?", (tid,))
+        rep = task["state"]["report"]
+        gaps = {g["id"]: g for g in rep["gaps"]}
+        # 评测方法：补充同义词后，已抓到的博客（needle in a haystack）就能覆盖，不额外检索
+        self.assertEqual(gaps["llm1"]["status"], "closed")
+        self.assertEqual(gaps["llm1"]["queries"], [])
+        # 位置外推：定向检索 arXiv 找到 YaRN 论文后补上；检索数量很少
+        self.assertEqual(gaps["llm0"]["status"], "closed")
+        self.assertLessEqual(len(gaps["llm0"]["queries"]), 4)
+        self.assertTrue(any("RoPE extrapolation" in q for q in gaps["llm0"]["queries"]))
+        self.assertGreaterEqual(rep["coverage"]["llm0"]["have"], 1)
+        # 监管：找不到就标注“暂无足够资料”，只补检一次
+        self.assertEqual(gaps["llm2"]["status"], "insufficient")
+        self.assertTrue(any("暂无足够资料" in o for o in rep["omissions"]))
+        self.assertEqual(len(self.gap_prompts), 1)
+        searches = db.query("SELECT input FROM tool_calls WHERE task_id=? AND tool='source_search'", (tid,))
+        self.assertLessEqual(len(searches), 5 * 2 + 4 * 3)     # 初始检索 + 每个缺口 ≤4 个定向检索
+
+    def test_kw_hit(self):
+        from app.graphs.research import _kw_hit
+        blob = "we use rope scaling for position interpolation of llms；外推位置编码的方法".lower()
+        self.assertTrue(_kw_hit("position interpolation", blob))
+        self.assertTrue(_kw_hit("interpolation of position", blob))      # 多词不要求相邻
+        self.assertTrue(_kw_hit("位置外推", blob))                        # 中文二元组覆盖
+        self.assertFalse(_kw_hit("rag", "average storage"))              # 不做子串误判（短词仍是原文匹配）
+        self.assertFalse(_kw_hit("x", blob))

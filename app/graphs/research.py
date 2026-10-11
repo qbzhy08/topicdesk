@@ -63,7 +63,27 @@ def _doc_hits(doc: dict, aspect: dict) -> bool:
         d = parse_date(doc.get("published_at"))
         return bool(d and datetime.now(timezone.utc) - d <= timedelta(days=14))
     blob = f"{doc.get('title') or ''} {(doc.get('text') or '')[:6000]}".lower()
-    return any(kw.lower() in blob for kw in aspect.get("keywords", []))
+    return any(_kw_hit(kw, blob) for kw in aspect.get("keywords", []))
+
+
+def _kw_hit(kw: str, blob: str) -> bool:
+    """关键词命中：原文出现；英文多词短语各词都出现（不要求相邻，如 position ... interpolation）；
+    中文长词按二元组覆盖 ≥0.75（“位置外推”能匹配“外推位置编码”）。"""
+    k = (kw or "").strip().lower()
+    if len(k) < 2:
+        return False
+    if k.isascii() and len(k) <= 5 and re.fullmatch(r"[a-z0-9-]+", k):
+        # 短英文词/缩写（RAG、RoPE、YaRN）按整词匹配，避免 rag 命中 average
+        return bool(re.search(rf"(?<![a-z0-9]){re.escape(k)}s?(?![a-z0-9])", blob))
+    if k in blob:
+        return True
+    if k.isascii():
+        words = [w for w in re.split(r"[^a-z0-9]+", k) if len(w) > 2]
+        return len(words) >= 2 and all(re.search(rf"\b{re.escape(w)}", blob) for w in words)
+    if len(k) < 4:
+        return False
+    grams = {k[i:i + 2] for i in range(len(k) - 1)}
+    return sum(g in blob for g in grams) / len(grams) >= 0.6
 
 
 def _task_docs(task_id: str) -> list[dict]:
@@ -131,11 +151,14 @@ general=综合新闻/政策/社会。系统会按领域选择信息源。
 中文来源是各领域媒体 RSS（按关键词过滤最新文章）和站内搜索（掘金、华尔街见闻等）。中文核心词要用中文媒体
 实际常用的说法，短（2-5 字）、常见，不要自造少见词组。
 英文来源是 arXiv、OpenAlex、PubMed、Hacker News、GitHub 等（检索式要短，2-4 个英文词）。
-子问题的 keywords 同时给中文和英文，因为资料有中有英。
+子问题的 keywords 用来判断一篇资料是否覆盖了该子问题，要给 8-12 个：中文常用说法 + 英文术语
++ 常见缩写/代表性方法名（例如“位置外推”还要给 RoPE、ALiBi、YaRN、extrapolation、position interpolation）。
+每个子问题再给一条英文检索式 search_en（2-4 词，含主题词）和一个中文检索词 search_zh（2-6 字）。
 只输出 JSON：
 {{"domains": ["finance"],
   "core_terms_zh": ["主题核心词，2-4个，越短越好"],
-  "aspects": [{{"name": "子问题", "keywords": ["判断资料是否覆盖该子问题的中英文关键词"]}}],
+  "aspects": [{{"name": "子问题", "keywords": ["中英文关键词、术语、缩写"],
+               "search_en": "英文检索式", "search_zh": "中文检索词"}}],
   "queries_en": ["英文检索式，2-4 条"],
   "notes": "一句话说明检索策略"}}"""
 
@@ -226,7 +249,9 @@ def plan(ctx):
             for i, a in enumerate(d.get("aspects") or []):
                 if a.get("name") and a.get("keywords"):
                     aspects.append({"id": f"llm{i}", "name": a["name"], "kind": "keywords",
-                                    "need": 1, "keywords": a["keywords"][:12]})
+                                    "need": 1, "keywords": [str(k) for k in a["keywords"]][:16],
+                                    "search_en": str(a.get("search_en") or "")[:60],
+                                    "search_zh": str(a.get("search_zh") or "")[:12]})
             plan_src = "llm"
             ctx.think(f"LLM 规划：{d.get('notes', '')}")
         except Exception as e:  # LLM 失败不影响流程
@@ -337,10 +362,60 @@ def plan(ctx):
 
 # ---------------------------------------------------------------- 节点：decide
 
-REFINE_PROMPT = """主题「{topic}」的检索还有缺口：{gaps}。
-已经用过的检索：{tried}。其中无结果的：{zero}。
-请给出新的检索词：中文词要短（RSS 过滤用，1-3 个词），英文检索式 2-4 个词。只输出 JSON：
-{{"terms_zh": [...], "queries_en": [...], "why": "一句话"}}"""
+GAP_PROMPT = """主题「{topic}」的资料还没有覆盖下面这些子问题（括号里是目前判断覆盖用的关键词）：
+{gaps}
+已经用过、没有结果的检索：{zero}。
+对每个子问题：
+1) 补充 6-10 个判断覆盖用的同义说法：中文常用说法、英文术语、缩写、代表性方法/数据集名，不要重复已有的；
+2) 给一条新的英文检索式 search_en（2-4 词，包含主题词）和一个中文检索词 search_zh（2-6 字）。
+只输出 JSON：{{"gaps": [{{"id": "子问题 id", "keywords": [...], "search_en": "...", "search_zh": "..."}}],
+"why": "一句话"}}"""
+
+EN_GAP_SOURCES = {"science": ["arxiv", "openalex", "pubmed"], "default": ["arxiv", "openalex", "hn", "github"]}
+
+
+def _gap_actions(st: dict, a: dict) -> list[dict]:
+    """针对单个缺口的定向检索：只用 2 个最合适的英文源 + 2 个中文站内搜索，而不是所有来源全查一遍。"""
+    by_id = {s["id"]: s for s in list_sources()}
+    ok = [sid for sid in st.get("source_ids", []) if sid not in st["disabled"] and sid in by_id]
+    plan = st["plan"]
+    q_en0 = (plan.get("queries_en") or [""])[0]
+    head_en = " ".join(q_en0.split()[:2])
+    core_zh = (plan.get("terms_zh") or [""])[0]
+    used_alt = st.setdefault("used_alt", [])
+    kind = a.get("kind")
+    en_q = zh_q = ""
+    if kind == "any":                               # 概况不足：多半是译法不对，换备用说法
+        alt = next((x for x in plan.get("alt_en") or [] if x not in used_alt), "")
+        if alt:
+            used_alt.append(alt)
+            en_q = alt if len(alt.split()) >= 2 else f"{head_en} {alt}".strip()
+        zh_q = next((x for x in plan.get("alt_zh") or [] if x not in used_alt), "") or core_zh
+        used_alt.append(zh_q)
+    elif kind in ("primary", "recent"):
+        en_q, zh_q = q_en0, core_zh
+    else:
+        kws = a.get("keywords") or []
+        en_kw = next((k for k in kws if k.isascii() and k.lower() not in head_en.lower()), "")
+        en_q = a.get("search_en") or (f"{head_en} {' '.join(en_kw.split()[:2])}".strip() if en_kw else "")
+        zh_kw = next((k for k in kws if not k.isascii() and 2 <= len(k) <= 6), "")
+        zh_q = a.get("search_zh") or zh_kw
+        if zh_q and core_zh and core_zh not in zh_q:
+            zh_q = f"{core_zh} {zh_q}"
+    pref = ["github", "arxiv", "openalex"] if kind == "primary" else \
+        ["hn", "arxiv", "github"] if kind == "recent" else \
+        EN_GAP_SOURCES["science" if "science" in (st.get("domains") or []) else "default"]
+    en_srcs = [s for s in pref if s in ok][:2]
+    zh_srcs = [sid for sid in ok if (by_id[sid]["config"] or {}).get("lang", "zh") == "zh" and
+               (by_id[sid]["method"] == "api" or (by_id[sid]["config"] or {}).get("search_feed"))][:2]
+    why = f"定向补缺口「{a['name']}」"
+    acts = []
+    if en_q:
+        acts += [_search_action(s, en_q, None, f"{why}：{en_q}", prio=60) for s in en_srcs]
+    if zh_q:
+        terms = [t for t in zh_q.split() if t]
+        acts += [_search_action(s, zh_q, terms, f"{why}：{zh_q}", prio=60) for s in zh_srcs]
+    return acts
 
 
 def decide(ctx):
@@ -351,6 +426,10 @@ def decide(ctx):
     n_docs = len(_task_docs(ctx.task_id))
     gaps = _gaps(cov)
     cov_txt = "；".join(f"{v['name']} {v['have']}/{v['need']}" for v in cov.values())
+    for g, log in st.get("gap_log", {}).items():          # 定向补检的缺口：记录何时补上、花了多久
+        if log["status"] == "open" and g not in gaps:
+            log.update(status="closed", seconds=round(time.time() - log["t0"], 1))
+            ctx.think(f"缺口「{log['name']}」已补上（{log['how']}，用时 {log['seconds']}s）")
 
     queue = [a for a in st["queue"] if not (a["type"] == "search" and a["source"] in st["disabled"])]
     pending_fetch = any(a["type"] == "fetch" for a in queue) and st["fetches"] < p.get("max_fetch", 15)
@@ -360,7 +439,7 @@ def decide(ctx):
         return "images"
     if n_docs >= max_docs:
         # 达到上限后不再扩量：只补全文，以及还没轮到的来源各查一次（保证来源多样性）
-        queue = [a for a in queue if a["type"] == "fetch" or a.get("initial")]
+        queue = [a for a in queue if a["type"] == "fetch" or a.get("initial") or a.get("gap")]
     if p.get("max_fetch", 15) <= st["fetches"]:
         queue = [a for a in queue if a["type"] != "fetch"]
 
@@ -415,80 +494,76 @@ def decide(ctx):
         ctx.think(f"覆盖：{cov_txt}。下一步并行执行 {len(batch)} 个行动 →\n" + "\n".join(lines))
         return "act"
 
-    # 队列空：根据缺口调整关键词
-    if gaps and st["refine_round"] < p.get("max_refine", 2):
+    # 队列空：还有缺口 → 逐个缺口定向补检（每个缺口最多 gap_tries 次，之后标记“暂无足够资料”）
+    gap_log = st.setdefault("gap_log", {})
+    tries_cap = p.get("gap_tries", 1)
+    active = [g for g in gaps if gap_log.get(g, {}).get("tries", 0) < tries_cap]
+    if active and st["refine_round"] < p.get("max_refine", 2):
         st["refine_round"] += 1
-        names = [cov[g]["name"] for g in gaps]
-        tried = [k for k in st["done"] if k.startswith("search:")]
-        new_terms, new_en, why = [], [], ""
+        asp = {a["id"]: a for a in st["aspects"]}
+        for g in active:
+            log = gap_log.setdefault(g, {"name": cov[g]["name"], "t0": time.time(), "tries": 0,
+                                         "queries": [], "added_keywords": [], "status": "open", "how": ""})
+            log["tries"] += 1
+        why = ""
+        # 第一步（不联网）：让大模型补充同义词/英文术语/缩写，先用已有资料重新判断覆盖
         if llm.available() and not p.get("no_llm"):
             try:
-                d = ctx.tool("llm", messages=[{"role": "user", "content": REFINE_PROMPT.format(
-                    topic=ctx.topic, gaps=names, tried=tried[-12:], zero=st["zero"][-8:])}])["data"]
-                new_terms, new_en, why = d.get("terms_zh") or [], d.get("queries_en") or [], d.get("why", "")
+                desc = "\n".join(f"- id={g}：{asp[g]['name']}（{'、'.join(asp[g].get('keywords', [])[:10]) or '无'}）"
+                                 for g in active)
+                d = ctx.tool("llm", messages=[{"role": "user", "content": GAP_PROMPT.format(
+                    topic=ctx.topic, gaps=desc, zero=[k.split(':', 2)[-1] for k in st["zero"][-8:]])}])["data"]
+                why = d.get("why", "")
+                for x in d.get("gaps") or []:
+                    a = asp.get(x.get("id"))
+                    if not a or a["id"] not in active:
+                        continue
+                    new_kw = [str(k) for k in x.get("keywords") or [] if str(k) not in a.setdefault("keywords", [])]
+                    a["keywords"] = (a["keywords"] + new_kw)[:28]
+                    gap_log[a["id"]]["added_keywords"] += new_kw
+                    if x.get("search_en"):
+                        a["search_en"] = str(x["search_en"])[:60]
+                    if x.get("search_zh"):
+                        a["search_zh"] = str(x["search_zh"])[:12]
             except Exception as e:
-                why = f"LLM 失败（{str(e)[:60]}），改用规则"
-        if not new_terms and not new_en:
-            # 先用自动翻译给出的备用说法：哪个检索式没结果，就换同义词/其他译法
-            zero_en = [k.split(":", 2)[2] for k in st["zero"] if k.split(":")[1] in
-                       {s["id"] for s in list_sources() if (s["config"] or {}).get("lang") == "en"}]
-            used_alt = st.setdefault("used_alt", [])
-            for alt in st["plan"].get("alt_en") or []:
-                if alt in used_alt:
-                    continue
-                head = " ".join((st["plan"]["queries_en"][0].split() if st["plan"]["queries_en"] else [])[:2])
-                q = alt if len(alt.split()) >= 2 else f"{head} {alt}".strip()
-                new_en.append(q)
-                used_alt.append(alt)
-                if len(new_en) >= 2:
-                    break
-            for alt in st["plan"].get("alt_zh") or []:
-                if alt not in used_alt:
-                    new_terms.append([alt])
-                    used_alt.append(alt)
-            if new_en or new_terms:
-                why = (f"自动调整：{('检索式 ' + str(zero_en[:2]) + ' 无结果，') if zero_en else ''}"
-                       f"改用备用译法/同义词 {[' '.join(t) for t in new_terms] + new_en}")
-        if not new_terms and not new_en:
-            core = st["plan"]["terms_zh"][:1]
-            for g in gaps:
-                kws = [k for k in next(a for a in st["aspects"] if a["id"] == g)["keywords"]
-                       if not k.isascii()][:1]
-                if core and kws:
-                    new_terms.append(core + kws)
-            if not new_terms and len(st["plan"]["terms_zh"]) > 1:
-                new_terms = [[t] for t in st["plan"]["terms_zh"]]   # 放宽：单个核心词
-            why = why or "规则：核心词 + 缺口子问题的关键词；无结果时放宽为单个核心词"
-        added = 0
-        for s in list_sources():
-            if s["id"] in st["disabled"] or s["id"] == "web":
-                continue
-            if s["id"] not in st.get("source_ids", [s["id"]]):
-                continue
-            lang = (s["config"] or {}).get("lang")
-            if s["method"] == "rss" and lang == "zh":
-                for t in new_terms[:3]:
-                    t = t if isinstance(t, list) else [t]
-                    q = " ".join(t)
-                    if (s["config"] or {}).get("search_feed"):
-                        q = t[-1]          # 站内搜索：用缺口关键词单独检索
-                    added += _push(st, _search_action(s["id"], q, t,
-                                                      f"补缺口 {names}：调整关键词为 {t}", prio=45))
-            elif s["method"] == "api" and lang == "zh":
-                for t in new_terms[:3]:
-                    t = t if isinstance(t, list) else [t]
-                    q = " ".join(t)
-                    added += _push(st, _search_action(s["id"], q, t,
-                                                      f"补缺口 {names}：调整关键词为 {t}", prio=45))
-            elif lang == "en":
-                for q in new_en[:2]:
-                    added += _push(st, _search_action(s["id"], q, None, f"补缺口 {names}：{q}", prio=45))
-        ctx.think(f"覆盖：{cov_txt}。缺口：{names}。第 {st['refine_round']} 次调整关键词（{why}），"
-                  f"新增 {added} 个行动")
-        if added:
+                why = f"大模型补充关键词失败（{str(e)[:60]}），按已有关键词定向检索"
+            cov2 = _coverage(ctx)
+            closed = [g for g in active if cov2[g]["have"] >= cov2[g]["need"]]
+            for g in closed:
+                gap_log[g].update(status="closed", how="扩充同义词后已有资料即可覆盖，未额外检索",
+                                  seconds=round(time.time() - gap_log[g]["t0"], 1))
+            if closed:
+                st["coverage"] = cov = cov2
+                cov_txt = "；".join(f"{v['name']} {v['have']}/{v['need']}" for v in cov.values())
+                ctx.think(f"扩充同义词/英文术语后，已有资料就覆盖了：{[cov2[g]['name'] for g in closed]}（未额外检索）")
+            active = [g for g in active if g not in closed]
+        # 第二步：剩下的缺口，每个只发 ≤4 个定向检索（2 个英文源 + 2 个中文站内搜索），一批并行
+        added, lines = 0, []
+        for g in active:
+            acts = _gap_actions(st, asp[g])
+            n = 0
+            for a in acts:
+                a["gap"] = g
+                if _push(st, a):
+                    n += 1
+                    gap_log[g]["queries"].append(f"{a['source']}：{a['query']}")
+            gap_log[g]["how"] = "定向检索"
+            added += n
+            lines.append(f"「{asp[g]['name']}」→ {n} 个检索：" + "；".join(f"{a['source']}「{a['query']}」" for a in acts))
+        if active:
+            ctx.think(f"覆盖：{cov_txt}。第 {st['refine_round']} 轮定向补缺口"
+                      + (f"（{why}）" if why else "") + "：\n" + "\n".join(lines))
+        if added or not active:
             return "decide"
-    ctx.think(f"覆盖：{cov_txt}。" + (f"仍有缺口 {[cov[g]['name'] for g in gaps]}，但关键词调整次数已用完，"
-                                     "停止并在报告中说明" if gaps else "覆盖足够，停止检索"))
+    gave_up = []
+    for g in gaps:
+        log = gap_log.setdefault(g, {"name": cov[g]["name"], "t0": time.time(), "tries": 0, "queries": [],
+                                     "added_keywords": [], "status": "open", "how": "未定向检索（轮次已用完）"})
+        if log["status"] == "open":
+            log.update(status="insufficient", seconds=round(time.time() - log["t0"], 1))
+        gave_up.append(log["name"])
+    ctx.think(f"覆盖：{cov_txt}。" + (f"缺口 {gave_up} 定向补检后仍无足够资料，不再重复检索，在报告中标注“暂无足够资料”"
+                                     if gaps else "覆盖足够，停止检索"))
     return "images"
 
 
@@ -602,13 +677,22 @@ def _after_search(ctx, a, status, res):
     # 单来源配额：避免某个来源（如站内搜索一次返回很多条）占满资料上限、挤掉其他来源
     quota = p.get("per_source", max(6, p.get("max_docs", 40) // 4))
     used = st.setdefault("per_source", {}).get(a["source"], 0)
-    skipped = max(0, len(items) - max(0, quota - used))
-    items = items[:max(0, quota - used)]
+    if a.get("gap"):          # 定向补缺口：配额用完也允许再收 3 条，否则缺口永远补不上
+        room = max(0, quota - used) + 3
+    else:
+        room = max(0, quota - used)
+    skipped = max(0, len(items) - room)
+    items = items[:room]
     st["per_source"][a["source"]] = used + len(items)
     counts = {}
+    gap_words = [w for w in re.split(r"[^\w一-鿿]+", a.get("query") or "") if len(w) > 1] \
+        if a.get("gap") else []
     for it in items:
         if it.get("relevance") is None:
             it["relevance"] = _rel(st, it.get("title") or "", it.get("summary") or "")
+            if gap_words:     # 定向检索的结果按该缺口的检索词判断相关度（主检索式的词未必出现）
+                it["relevance"] = max(it["relevance"],
+                                      relevance(gap_words, it.get("title") or "", it.get("summary") or ""))
         r = _save(ctx, it, "api" if a["source"] in API_SOURCES else "rss")
         k = r["action"] + ("/" + r["novelty"] if r["action"] == "new" else "")
         counts[k] = counts.get(k, 0) + 1
@@ -806,7 +890,7 @@ def report(ctx):
         omissions.append("RSS 只包含各站最新几十篇，更早的中文报道需要站内搜索或链接导入")
     gaps = [v["name"] for v in cov.values() if v["have"] < v["need"]]
     if gaps:
-        omissions.append(f"覆盖不足的子问题：{gaps}")
+        omissions.append(f"暂无足够资料的子问题（已定向补检，不再重复检索）：{gaps}")
     mstats = st.get("mem_stats", {})
     fact_ids = st.get("mem_facts", [])
     top_docs = [d["id"] for d in sorted(docs, key=lambda d: -((d["meta"] or {}).get("relevance") or 0))
@@ -838,6 +922,8 @@ def report(ctx):
         "by_source": by("source_id"), "by_kind": by("content_kind"), "by_novelty": by("novelty"),
         "coverage": cov, "failures": st["failures"], "image_stats": st.get("image_stats"),
         "actions_done": len(st["done"]), "refine_rounds": st["refine_round"],
+        "gaps": [{"id": g, **{k: v for k, v in log.items() if k != "t0"}}
+                 for g, log in st.get("gap_log", {}).items()],
         "plan": st["plan"], "omissions": omissions,
         "budget_note": st.get("_budget_exhausted"),
     }

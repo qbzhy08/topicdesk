@@ -104,6 +104,11 @@ ARXIV_ATOM = """<?xml version="1.0" encoding="UTF-8"?>
 <link title="pdf" href="http://arxiv.org/pdf/2410.01234v2" rel="related" type="application/pdf"/>
 <category term="cs.CL"/></entry></feed>"""
 
+YARN_ATOM = ARXIV_ATOM.replace("2410.01234", "2409.05555").replace(
+    "LongEval: Benchmarking Long Context in Open LLMs", "YaRN Revisited: RoPE Position Extrapolation for Long Context").replace(
+    "We present a long context benchmark for open LLMs and find accuracy drops beyond 64K tokens.",
+    "We study RoPE scaling and position interpolation to extend the context window of LLMs to 256K.")
+
 HN_JSON = json.dumps({"hits": [
     {"objectID": "1", "title": "Long context evals for open LLMs are misleading",
      "url": "https://blog.example.com/long-context", "author": "pg", "points": 320,
@@ -231,6 +236,8 @@ class FakeWeb:
             return 200, X, sspai_feed().encode(), url
         if url == "https://sspai.com/post/1001":
             return 200, H, SSPAI_SPA.encode(), url
+        if url.startswith("https://export.arxiv.org/api/query") and "extrapolation" in url:
+            return 200, X, YARN_ATOM.encode(), url
         if url.startswith("https://export.arxiv.org/api/query"):
             return 200, X, ARXIV_ATOM.encode(), url
         if url.startswith("https://hn.algolia.com/"):

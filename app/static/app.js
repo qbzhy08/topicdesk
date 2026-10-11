@@ -254,7 +254,11 @@ function renderReport(rep, state) {
       ${rep.domains ? `<p class="small">主题领域：${rep.domains.map((d) => DOMAIN_NAME[d] || d).join("、")}；选用来源 ${rep.source_ids?.length || 0} 个：${(rep.source_ids || []).map((id) => esc(sourcesCache.find((x) => x.id === id)?.name || id)).join("、")}</p>` : ""}
       <h4>覆盖矩阵</h4>${covTable(rep.coverage)}
       ${rep.covered_at ? `<p class="small">在第 ${rep.covered_at.docs} 篇资料时覆盖了全部子问题，之后只做收尾${rep.dropped_after_cover ? `，放弃了 ${rep.dropped_after_cover} 个低价值行动` : ""}。</p>` : ""}
-      <h4>检索计划</h4><p class="small">中文词：${esc((rep.plan?.terms_zh || []).join("、"))}；英文检索式：${esc((rep.plan?.queries_en || []).join("；") || "无")}；由 ${rep.plan?.by === "llm" ? "大模型" : "规则"} 生成；关键词调整 ${rep.refine_rounds} 次</p>
+      ${rep.gaps?.length ? `<h4>缺口补检</h4><table class="tbl"><tr><th>子问题</th><th>结果</th><th>用时</th><th>做了什么</th></tr>${rep.gaps.map((g) => `
+        <tr><td>${esc(g.name)}</td><td><span class="tag">${{closed: "已补上", insufficient: "暂无足够资料", open: "进行中"}[g.status] || esc(g.status)}</span></td>
+        <td>${g.seconds != null ? g.seconds + "s" : ""}</td>
+        <td class="small">${esc(g.how || "")}${g.added_keywords?.length ? `<br>补充同义词：${esc(g.added_keywords.slice(0, 10).join("、"))}` : ""}${g.queries?.length ? `<br>检索：${esc(g.queries.join("；"))}` : ""}</td></tr>`).join("")}</table>` : ""}
+      <h4>检索计划</h4><p class="small">中文词：${esc((rep.plan?.terms_zh || []).join("、"))}；英文检索式：${esc((rep.plan?.queries_en || []).join("；") || "无")}；由 ${rep.plan?.by === "llm" ? "大模型" : "规则"} 生成；定向补缺口 ${rep.refine_rounds} 轮</p>
       ${rep.failures?.length ? `<h4>失败与降级</h4><table class="tbl"><tr><th>对象</th><th>原因</th><th>处理</th></tr>${rep.failures.map((f) => `
         <tr><td>${esc(f.target || f.type)}${f.query ? `<br><small>${esc(f.query)}</small>` : ""}</td><td><span class="tag">${esc(f.kind)}</span> ${esc(f.reason)}</td><td>${esc(f.fallback || "")}</td></tr>`).join("")}</table>` : ""}
       <h4>可能遗漏</h4><ul class="small">${(rep.omissions || []).map((o) => `<li>${esc(o)}</li>`).join("") || "<li>无</li>"}</ul>
