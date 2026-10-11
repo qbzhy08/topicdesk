@@ -669,6 +669,71 @@ def suggest_keywords():
         return jsonify(error=str(e)[:200]), 500
 
 
+# ---------------------------------------------------------------- Lv3：Skill 与文章
+
+@app.get("/api/skills")
+def list_skills():
+    from . import skills
+    allsk = skills.load_all()
+    return jsonify(skills=[skills.public(s) for s in allsk.values()], errors=skills.load_all.errors,
+                   dir=str(skills.SKILL_DIR))
+
+
+@app.post("/api/tasks/<tid>/write")
+def start_write(tid):
+    from . import skills
+    t = _task_or_404(tid)
+    if t["graph"] != "research" or t["status"] != "done":
+        return jsonify(error="只有完成的检索任务可以写作"), 400
+    b = request.get_json(force=True) or {}
+    try:
+        skills.get(b.get("skill") or "")
+    except skills.SkillError as e:
+        return jsonify(error=str(e)), 400
+    wid = create_task("write", t["topic"], params={"research_task": tid, "skill": b["skill"]},
+                      user_id=t["user_id"], parent_task_id=tid)
+    runner.start(wid)
+    return jsonify(id=wid), 201
+
+
+def _article_row(a):
+    v = db.query_one("SELECT version, note, created_at, meta FROM article_versions WHERE article_id=? AND version=?",
+                     (a["id"], a["current_version"]))
+    meta = (v or {}).get("meta") or {}
+    s = ((meta.get("check") or {}).get("summary")) or {}
+    return {**a, "note": (v or {}).get("note"), "skill_name": (meta.get("skill") or {}).get("name"),
+            "support_rate": s.get("support_rate"), "problems": s.get("problems"),
+            "research_task": meta.get("research_task")}
+
+
+@app.get("/api/articles")
+def list_articles():
+    a = request.args
+    sql, args = "SELECT * FROM articles WHERE 1=1", []
+    if a.get("topic"):
+        sql += " AND topic=?"
+        args.append(a["topic"])
+    rows = db.query(sql + " ORDER BY updated_at DESC LIMIT 100", args)
+    out = [_article_row(r) for r in rows]
+    if a.get("research_task"):
+        out = [r for r in out if r["research_task"] == a["research_task"]]
+    return jsonify(out)
+
+
+@app.get("/api/articles/<aid>")
+def get_article(aid):
+    from . import mdrender
+    a = db.query_one("SELECT * FROM articles WHERE id=?", (aid,))
+    if not a:
+        abort(404)
+    ver = request.args.get("v", type=int) or a["current_version"]
+    v = db.query_one("SELECT * FROM article_versions WHERE article_id=? AND version=?", (aid, ver))
+    versions = db.query("SELECT version, note, created_at FROM article_versions WHERE article_id=? ORDER BY version", (aid,))
+    if v:
+        v["html"] = mdrender.render(v["markdown"])
+    return jsonify(article=_article_row(a), version=v, versions=versions)
+
+
 # ---------------------------------------------------------------- 记忆验证演示（回放模式）
 
 @app.get("/api/demo/memory")
