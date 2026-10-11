@@ -70,7 +70,8 @@ def create():
 @app.get("/api/tasks")
 def list_tasks():
     rows = db.query("SELECT id, graph, topic, status, current_node, usage, error, created_at, "
-                    "updated_at FROM tasks WHERE graph != 'revise' ORDER BY created_at DESC LIMIT 100")   # 审阅修改记在文章版本里
+                    "updated_at FROM tasks WHERE graph NOT IN ('revise') AND json_extract(params, '$.experiment') IS NULL "
+                    "ORDER BY created_at DESC LIMIT 100")   # 审阅修改记在文章版本里
     return jsonify(rows)
 
 
@@ -781,7 +782,8 @@ def _article_row(a):
     s = ((meta.get("check") or {}).get("summary")) or {}
     return {**a, "note": (v or {}).get("note"), "skill_name": (meta.get("skill") or {}).get("name"),
             "support_rate": s.get("support_rate"), "problems": s.get("problems"),
-            "research_task": meta.get("research_task")}
+            "research_task": meta.get("research_task"), "experiment": meta.get("experiment"),
+            "variant": meta.get("variant")}
 
 
 @app.get("/api/articles")
@@ -795,6 +797,8 @@ def list_articles():
     out = [_article_row(r) for r in rows]
     if a.get("research_task"):
         out = [r for r in out if r["research_task"] == a["research_task"]]
+    if not a.get("experiment"):                     # 评测实验写的变体不混进普通文章列表
+        out = [r for r in out if not r.get("experiment")]
     return jsonify(out)
 
 
@@ -853,6 +857,32 @@ def _mark_paras(md: str, meta: dict) -> str:
             pos = j + len(mark) + len(t)
         body = body[:start] + chunk + body[end:]
     return body + sep + refs
+
+
+@app.get("/api/articles/<aid>/export")
+def export_article(aid):
+    """导出交付：?format=md（zip：Markdown + 图片）或 html（单文件手机阅读版，图片内嵌）；?v= 指定版本。"""
+    from flask import Response
+    from urllib.parse import quote
+    from . import export
+    a = db.query_one("SELECT * FROM articles WHERE id=?", (aid,))
+    if not a:
+        abort(404)
+    ver = request.args.get("v", type=int) or a["current_version"]
+    v = db.query_one("SELECT * FROM article_versions WHERE article_id=? AND version=?", (aid, ver))
+    if not v:
+        abort(404)
+    meta = v["meta"] or {}
+    title = a["title"] or "article"
+    name = f"{export.safe_name(title)}_v{ver}"
+    sk = meta.get("skill") or {}
+    footer = (f"写法：{sk.get('name', '')} v{sk.get('version', '')}（Skill 指纹 {sk.get('fingerprint', '')}）· 第 {ver} 版 · "
+              "句末 [n] 为出处，对应文末参考资料；“分析”标记的段落是作者判断。")
+    if request.args.get("format") == "html":
+        data, mime, fname = export.mobile_html(v["markdown"], title, footer).encode("utf-8"), "text/html; charset=utf-8", f"{name}.html"
+    else:
+        data, mime, fname = export.markdown_zip(v["markdown"], title), "application/zip", f"{name}_markdown.zip"
+    return Response(data, mimetype=mime, headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(fname)}"})
 
 
 @app.post("/api/articles/<aid>/revise")
@@ -972,6 +1002,143 @@ def article_diff(aid):
     return jsonify(a=a, b=b, items=out, stats=stats)
 
 
+# ---------------------------------------------------------------- Lv3：评测实验
+
+@app.post("/api/experiments")
+def create_experiment():
+    b = request.get_json(force=True) or {}
+    kind = b.get("kind") or "ablation"
+    tids = [t for t in b.get("research_tasks") or [] if t]
+    if kind == "ablation" and len(tids) < 1:
+        return jsonify(error="至少选一组素材（检索任务）"), 400
+    params = {"kind": kind, "research_tasks": tids, "skill": b.get("skill") or "brief",
+              "variants": b.get("variants") or None, "skills": b.get("skills") or [],
+              "detector": b.get("detector") or "auto", "parallel": int(b.get("parallel") or 2),
+              "judge": b.get("judge", True)}
+    if kind == "skills" and len(params["skills"]) < 2:
+        return jsonify(error="Skill 对照至少选 2 种写法"), 400
+    title = "评测实验：" + ("多种 Skill 对照" if kind == "skills" else f"初稿 vs 优化稿（{len(tids)} 组素材）")
+    tid = create_task("experiment", title, params=params,
+                      budget={"max_steps": 400, "max_tool_calls": 600, "max_seconds": 6 * 3600, "max_cost": 50})
+    runner.start(tid)
+    return jsonify(id=tid), 201
+
+
+@app.get("/api/experiments")
+def list_experiments():
+    rows = db.query("SELECT id, topic, status, params, created_at, updated_at, error FROM tasks WHERE graph='experiment' "
+                    "ORDER BY created_at DESC LIMIT 50")
+    return jsonify(rows)
+
+
+def _exp_or_404(eid):
+    t = db.query_one("SELECT * FROM tasks WHERE id=? AND graph='experiment'", (eid,))
+    if not t:
+        abort(404)
+    return t
+
+
+@app.get("/api/experiments/<eid>")
+def get_experiment(eid):
+    from . import experiment_report
+    t = _exp_or_404(eid)
+    rep = experiment_report.build(t)
+    rep.update(topic=t["topic"], error=t["error"], current_node=t["current_node"], running=runner.is_running(eid),
+               created_at=t["created_at"])
+    return jsonify(rep)
+
+
+@app.get("/api/experiments/<eid>/text/<path:key>")
+def experiment_text(eid, key):
+    t = _exp_or_404(eid)
+    r = next((x for x in (t["state"] or {}).get("runs") or [] if x["key"] == key), None)
+    if not r or not r.get("text"):
+        abort(404)
+    return jsonify(key=key, text=r["text"], chars=len(r["text"]))
+
+
+@app.get("/api/experiments/<eid>/blind")
+def experiment_blind(eid):
+    """读者盲评：只给“甲/乙”两篇完整正文，不告诉哪篇是初稿/优化稿；出处编号去掉，避免以此判断。"""
+    t = _exp_or_404(eid)
+    st = t["state"] or {}
+    text = {r["key"]: r.get("text") or "" for r in st.get("runs") or []}
+    rater = request.args.get("rater") or ""
+    done = {r["pair_id"] for r in db.query("SELECT pair_id FROM eval_ratings WHERE experiment_id=? AND rater=?", (eid, rater))}
+    strip = lambda s: re.sub(r"\[\d+\]", "", s)  # noqa: E731
+    return jsonify(pairs=[{"pair_id": p["pair_id"], "topic": p["topic"], "甲": strip(text[p["甲"]]), "乙": strip(text[p["乙"]]),
+                           "rated": p["pair_id"] in done} for p in st.get("blind") or []])
+
+
+@app.post("/api/experiments/<eid>/blind")
+def experiment_rate(eid):
+    _exp_or_404(eid)
+    b = request.get_json(force=True) or {}
+    rater = (b.get("rater") or "").strip()[:30]
+    if not rater:
+        return jsonify(error="请填一个称呼（只用来区分不同读者，可以是化名）"), 400
+    ans = {k: v for k, v in (b.get("answers") or {}).items()
+           if k in ("accuracy", "information", "natural", "easy", "overall", "ai_guess") and v in ("甲", "乙", "相当", "说不准")}
+    ans["comment"] = str((b.get("answers") or {}).get("comment") or "")[:300]
+    if len(ans) < 6:
+        return jsonify(error="每一项都要选"), 400
+    db.execute("DELETE FROM eval_ratings WHERE experiment_id=? AND pair_id=? AND rater=?", (eid, b.get("pair_id"), rater))
+    db.insert("eval_ratings", dict(experiment_id=eid, pair_id=b.get("pair_id"), rater=rater, data=ans, created_at=db.now()))
+    return jsonify(ok=True)
+
+
+@app.post("/api/experiments/<eid>/scores")
+def experiment_score(eid):
+    """录入外部 AIGC 检测器的结果（同一个检测器测同一份完整正文）。分数填 0-100 或 0-1 都可以。"""
+    _exp_or_404(eid)
+    b = request.get_json(force=True) or {}
+    det = (b.get("detector") or "").strip()[:40]
+    try:
+        sc = float(b.get("score"))
+    except (TypeError, ValueError):
+        return jsonify(error="分数要是数字"), 400
+    sc = sc / 100 if sc > 1 else sc
+    if not det or not 0 <= sc <= 1:
+        return jsonify(error="请填检测器名称，分数在 0-100 之间"), 400
+    db.insert("eval_scores", dict(experiment_id=eid, run_key=b.get("run_key"), detector=det, score=sc,
+                                  note=str(b.get("note") or "")[:200], created_at=db.now()))
+    return jsonify(ok=True)
+
+
+@app.post("/api/experiments/<eid>/detect")
+def experiment_detect(eid):
+    """用本地检测器（重新）测这次实验的全部完整正文，结果写入分数表。"""
+    from . import aigc
+    t = _exp_or_404(eid)
+    if not aigc.status()["local_ready"]:
+        return jsonify(error="本地检测器没有安装：在终端运行 pip install torch transformers 后重启"), 400
+    n = 0
+    try:
+        for r in (t["state"] or {}).get("runs") or []:
+            if r.get("text"):
+                d = aigc.detect(r["text"])
+                db.insert("eval_scores", dict(experiment_id=eid, run_key=r["key"], detector=d["detector"], score=d["ai_prob"],
+                                              note="本地检测", created_at=db.now()))
+                n += 1
+    except Exception as e:  # noqa: BLE001
+        return jsonify(error=f"检测失败：{str(e)[:200]}"), 500
+    return jsonify(detected=n)
+
+
+@app.get("/api/aigc")
+def aigc_status():
+    from . import aigc
+    return jsonify(aigc.status())
+
+
+@app.post("/api/aigc")
+def aigc_settings():
+    from . import aigc
+    b = request.get_json(force=True) or {}
+    aigc.save_settings(b.get("model"), b.get("hf_endpoint"))
+    return jsonify(aigc.status())
+
+
 @app.get("/api/flow")
 def get_flow():
     """同一主题的流程链：整理资料（检索任务）→ 写作任务 → 文章。任务页、文章页顶部的流程条用它互相跳转。"""
@@ -1002,7 +1169,8 @@ def get_flow():
     writes = []
     if rid:
         rows = db.query("SELECT id, status, params, state, created_at FROM tasks WHERE graph='write' "
-                        "AND (parent_task_id=? OR json_extract(params, '$.research_task')=?) ORDER BY created_at",
+                        "AND (parent_task_id=? OR json_extract(params, '$.research_task')=?) "
+                        "AND json_extract(params, '$.experiment') IS NULL ORDER BY created_at",
                         (rid, rid))
         for w in rows:
             st = w.get("state") or {}

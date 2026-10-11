@@ -113,6 +113,8 @@ def load(ctx):
     st["research_task"] = rt["id"]
     st["write_task"] = ctx.task_id
     st["stages_used"] = _stages(ctx)
+    st["experiment"] = p.get("experiment")
+    st["variant"] = p.get("variant")
     rs = rt["state"] or {}
     st["terms"] = ((rs.get("plan") or {}).get("terms_zh") or [])[:6]
     st["source_ids"] = ((rs.get("report") or {}).get("source_ids") or [])
@@ -957,6 +959,7 @@ def build_and_save(st, note: str, task_id: str | None, extra_meta: dict | None =
             "chart_log": st.get("chart_log") or [], "outline_by": st["outline_by"], "draft_by": st["draft_by"],
             "ref_check": writing.reference_check(rep, docs, sk), "ref_notes": st.get("ref_notes") or [],
             "natural_log": st.get("natural_log") or [], "stages": st.get("stages_used"),
+            "experiment": st.get("experiment"), "variant": st.get("variant"),
             "write_task": st.get("write_task"), "revisions": st.get("revisions") or [], **(extra_meta or {})}
     v = save_version(st["article_id"], md, meta, note=note, title=st["title"], task_id=task_id)
     return v, md, rep

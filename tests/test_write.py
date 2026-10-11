@@ -640,3 +640,163 @@ class SkillWorkshopTest(WriteBase):
         # 删除：移到回收站，不再出现
         self.assertEqual(self.c.delete("/api/skills/weekly").status_code, 200)
         self.assertNotIn("weekly", skills.load_all())
+
+
+class JudgeWriter(NaturalWriter):
+    """实验用：在写作之外还要回答独立事实核验和盲评。"""
+
+    def __call__(self, messages, json_mode=False, max_tokens=1500, **kw):
+        p = messages[-1]["content"]
+        if "你是事实核查员" in p:
+            n = len(re.findall(r"^\d+\. 文章中的说法", p, re.M))
+            return {"content": "", "_cost": 0, "data": {"results": [
+                {"i": i + 1, "verdict": "supported" if i % 4 else "partial", "why": "测试"} for i in range(n)]}}
+        if "同一主题、同一批资料写成的两篇文章" in p:
+            a = p.split("【文章 A】", 1)[1].split("【文章 B】", 1)[0]
+            better = "A" if "对不上" in a else "B"          # 优化稿里有“对不上”（自然化改写的痕迹）
+            dim = {"winner": better, "A": 4 if better == "A" else 3, "B": 4 if better == "B" else 3}
+            return {"content": "", "_cost": 0, "data": {d: dict(dim) for d in ("accuracy", "information", "natural", "easy", "overall")}
+                    | {"reason": "测试"}}
+        return super().__call__(messages, json_mode, max_tokens, **kw)
+
+
+class ExperimentTest(WriteBase):
+    """评测实验：同素材初稿/优化稿/消融变体、确定性指标、独立核验、交换顺序的盲评、读者盲评、外部检测器分数、Skill 对照。"""
+
+    def setUp(self):
+        super().setUp()
+        from app.server import create_app
+        from app import server
+        self.c = create_app().test_client()
+        self._start = server.runner.start
+        server.runner.start = lambda tid: None
+        self.server = server
+        llm.available, llm.chat = (lambda: True), JudgeWriter()
+
+    def tearDown(self):
+        self.server.runner.start = self._start
+        super().tearDown()
+
+    def run_exp(self, **body):
+        r = self.c.post("/api/experiments", json=body)
+        self.assertEqual(r.status_code, 201, r.get_json())
+        eid = r.get_json()["id"]
+        self.assertEqual(run_task(eid), "done", db.query_one("SELECT error FROM tasks WHERE id=?", (eid,))["error"])
+        return eid, self.c.get(f"/api/experiments/{eid}").get_json()
+
+    def test_ablation_report(self):
+        eid, rep = self.run_exp(research_tasks=[self.t1], skill="brief", detector="manual")
+        rows = {r["variant"]: r for r in rep["rows"]}
+        self.assertEqual(set(rows), {"draft", "checked", "optimized", "natural_only"})
+        self.assertTrue(all(r["status"] == "done" for r in rows.values()))
+        # 初稿保留了问题；核对改写后问题减少
+        self.assertGreater(rows["draft"]["problems"], rows["checked"]["problems"])
+        self.assertIsNotNone(rows["optimized"]["judge_fidelity"])
+        self.assertIn("对不上", self.c.get(f"/api/experiments/{eid}/text/{rows['optimized']['key']}").get_json()["text"])
+        # 大模型盲评：交换顺序两次一致才算胜
+        lp = rep["llm_pairs"][self.t1]
+        self.assertEqual(lp["overall"]["winner"], "Y")
+        self.assertTrue(lp["overall"]["consistent"])
+        # 结论：每一步的作用 + 何时失效
+        steps = [e["step"] for e in rep["conclusions"]["effects"]]
+        self.assertIn("逐句核对 + 按核对结果改写", steps)
+        self.assertIn("自然化改写（降 AI 腔）+ 复核", steps)
+        self.assertTrue(any(f["where"] == "自然化改写" for f in rep["conclusions"]["failures"]))
+        # 外部检测器分数录入（同一检测器），进入报告
+        for v, sc in (("draft", 92), ("optimized", 61)):
+            self.assertEqual(self.c.post(f"/api/experiments/{eid}/scores",
+                                         json={"run_key": rows[v]["key"], "detector": "外部检测器X", "score": sc}).status_code, 200)
+        rep = self.c.get(f"/api/experiments/{eid}").get_json()
+        self.assertEqual(rep["detectors"], ["外部检测器X"])
+        self.assertEqual(rep["avg"]["optimized"]["aigc"]["外部检测器X"], 0.61)
+        # 读者盲评：看不到哪篇是哪篇；评分后按变体汇总
+        bl = self.c.get(f"/api/experiments/{eid}/blind?rater=小王").get_json()["pairs"]
+        self.assertEqual(len(bl), 1)
+        self.assertFalse(re.search(r"\[\d+\]", bl[0]["甲"]))
+        exp = db.query_one("SELECT state FROM tasks WHERE id=?", (eid,))["state"]
+        opt_side = "甲" if exp["blind"][0]["甲"].endswith(":optimized") else "乙"
+        ans = {d: opt_side for d in ("accuracy", "information", "natural", "easy", "overall")}
+        ans["ai_guess"] = "乙" if opt_side == "甲" else "甲"
+        r = self.c.post(f"/api/experiments/{eid}/blind", json={"pair_id": bl[0]["pair_id"], "rater": "小王", "answers": ans})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        h = self.c.get(f"/api/experiments/{eid}").get_json()["human"]
+        self.assertEqual(h["tally"]["overall"]["optimized"], 1)
+        self.assertEqual(h["ai_guess"]["right"], 1)
+        # 增益：省下的阅读时间、跨来源印证
+        g = rep["gain"]
+        self.assertGreater(g["minutes_sources"], g["minutes_article"])
+        # 实验写的变体不混进普通列表
+        names = [t["graph"] for t in self.c.get("/api/tasks").get_json()]
+        self.assertEqual(names.count("write"), 0)
+
+    def test_skills_compare(self):
+        eid, rep = self.run_exp(kind="skills", research_tasks=[self.t1], skills=["brief", "timeline", "faq"])
+        g = rep["skills"]["groups"][0]
+        self.assertEqual(g["skills"], ["brief", "timeline", "faq"])
+        self.assertEqual(len(g["jaccard_cited"]), 3)
+        self.assertEqual(g["jaccard_cited"][0][0], 1.0)
+        heads = {r["variant"]: r["structure"] for r in g["rows"]}
+        self.assertNotEqual(heads["brief"], heads["timeline"])
+        self.assertTrue(all(r["logs"]["cover"] for r in g["rows"]))           # Skill 对照是全流程（含配图）
+
+    def test_metrics_unit(self):
+        from app import evaluate as ev
+        t = "首先，模型很好。其次，值得注意的是它很快。综上所述，它很重要。"
+        n = ev.naturalness(t)
+        self.assertGreater(n["tropes_per_1k"], 50)
+        self.assertEqual(n["connective_start"], 1.0)                             # 三句都以连接词开头
+        md = "# 标题\n\n![a](/media/x.png)\n*图注*\n\n> 阅读说明：……\n\n## 一\n\n正文[1]。\n\n## 参考资料\n\n1. x"
+        self.assertEqual(ev.plain_text(md), "标题\n\n一\n\n正文[1]。")
+        m = ev.pair_judge_merge({"overall": {"winner": "A", "A": 4, "B": 2}}, {"overall": {"winner": "B", "A": 3, "B": 5}})
+        self.assertEqual(m["overall"]["winner"], "X")
+        self.assertEqual(m["overall"]["x"], 4.5)
+        m = ev.pair_judge_merge({"overall": {"winner": "A"}}, {"overall": {"winner": "A"}})
+        self.assertEqual(m["overall"]["winner"], "tie")                         # 两次不一致（位置偏差）算相当
+
+
+class AigcTest(WriteBase):
+    def test_detect_chunks_and_labels(self):
+        from app import aigc
+        calls = []
+
+        def fake_pipe(parts):
+            calls.append(parts)
+            return [[{"label": "ChatGPT", "score": 0.8}, {"label": "Human", "score": 0.2}] if "AI" in p else
+                    [{"label": "ChatGPT", "score": 0.1}, {"label": "Human", "score": 0.9}] for p in parts]
+        old = aigc._pipe
+        aigc._pipe = lambda: fake_pipe
+        try:
+            text = ("AI" + "字" * 498 + "\n") + ("人" * 500)
+            r = aigc.detect(text)
+        finally:
+            aigc._pipe = old
+        self.assertEqual(len(calls[0]), 2)                     # 按 ≤500 字切块
+        self.assertAlmostEqual(r["ai_prob"], 0.45, places=2)   # 按字数加权
+        self.assertTrue(r["detector"].startswith("hc3:"))
+        self.assertIn("local_ready", aigc.status())
+
+
+class ExportTest(WriteBase):
+    def test_export_md_zip_and_mobile_html(self):
+        import io
+        import zipfile
+        from app.server import create_app
+        task, v = self.write("brief", no_llm=True)
+        aid = task["state"]["result"]["article_id"]
+        c = create_app().test_client()
+        r = c.get(f"/api/articles/{aid}/export?format=md")
+        self.assertEqual(r.status_code, 200)
+        z = zipfile.ZipFile(io.BytesIO(r.data))
+        md = z.read("article.md").decode()
+        imgs = [n for n in z.namelist() if n.startswith("images/")]
+        self.assertTrue(imgs)
+        self.assertIn(f"]({imgs[0]})", md)                       # 图片改成包内相对路径
+        self.assertNotIn("/media/", md)
+        self.assertIn("## 参考资料", md)
+        r = c.get(f"/api/articles/{aid}/export?format=html")
+        h = r.data.decode()
+        self.assertIn('name="viewport"', h)
+        self.assertIn("data:image/", h)                          # 图片内嵌，单文件可转发
+        self.assertNotIn('src="/media/', h)
+        self.assertIn('class="cite"', h)
+        self.assertIn("attachment", r.headers["Content-Disposition"])

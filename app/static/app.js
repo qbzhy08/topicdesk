@@ -13,7 +13,7 @@ const STATUS = { pending: "排队中", running: "运行中", waiting_human: "等
   done: "已完成", failed: "失败", cancelled: "已取消", cancelling: "取消中" };
 const NOVELTY = { new: "新进展", update: "内容更新", background: "背景资料", duplicate: "重复报道" };
 const KIND = { full: "全文", excerpt: "节选", summary: "摘要" };
-const GRAPH_NAME = { write: "写作", revise: "审阅修改", research: "主题检索", import: "链接导入", recheck: "复查", reassess: "重新评估", demo: "演示" };
+const GRAPH_NAME = { write: "写作", revise: "审阅修改", experiment: "评测实验", research: "主题检索", import: "链接导入", recheck: "复查", reassess: "重新评估", demo: "演示" };
 const taskTitle = (t) => ({ recheck: "复查 · ", reassess: "重新评估 · " }[t.graph] || "") + (t.topic === "*" ? "全部主题" : t.topic);
 const ACTIVE = new Set(["pending", "running", "cancelling"]);
 const fmtTime = (t) => t ? new Date(typeof t === "number" ? t * 1000 : t).toLocaleString("zh-CN", { hour12: false }) : "—";
@@ -162,7 +162,7 @@ const store = {
 // 等同浏览器的后退、前进；返回时恢复之前看到的位置；旁边显示“上一页 › 当前页”，点上一页名称也能返回
 const PAGE_KIND = [[/^#\/task\//, "任务"], [/^#\/article\//, "文章"], [/^#\/doc\//, "资料"], [/^#\/library/, "资料库"],
   [/^#\/memory\/demo/, "记忆演示"], [/^#\/memory\//, "记忆"], [/^#\/memory/, "记忆"], [/^#\/sources/, "信息源"],
-  [/^#\/settings/, "设置"], [/^#\/skills\/new/, "新建 Skill"], [/^#\/skills\/edit/, "编辑 Skill"], [/^#\/skills/, "写法 Skill"]];
+  [/^#\/settings/, "设置"], [/^#\/skills\/new/, "新建 Skill"], [/^#\/skills\/edit/, "编辑 Skill"], [/^#\/skills/, "写法 Skill"], [/^#\/experiments\//, "实验报告"], [/^#\/experiments/, "评测"], [/^#\/blind/, "读者盲评"]];
 const hist = { labels: {}, scroll: {}, traverse: false, last: location.hash || "#/" };
 try { Object.assign(hist.labels, JSON.parse(sessionStorage.getItem("td:labels") || "{}")); } catch { /* */ }
 
@@ -266,7 +266,7 @@ function route() {
     return;
   }
   const view = h.startsWith("#/library") ? "library" : h.startsWith("#/doc/") ? "library"
-    : h.startsWith("#/skills") ? "skills"
+    : h.startsWith("#/skills") ? "skills" : h.startsWith("#/experiments") || h.startsWith("#/blind") ? "experiments"
     : h.startsWith("#/memory") ? "memory"
     : h.startsWith("#/sources") ? "sources" : h.startsWith("#/settings") ? "settings" : "tasks";
   $$("#nav a").forEach((a) => a.classList.toggle("on", a.dataset.nav === view));
@@ -286,6 +286,11 @@ function route() {
   const sk = h.match(/^#\/skills\/(new|edit)(?:\/([\w-]+))?(?:\?from=([\w-]+))?/);
   if (sk) return showSkillEditor(sk[1] === "edit" ? sk[2] : null, sk[3]);
   if (h.startsWith("#/skills")) return showSkills();
+  const ex = h.match(/^#\/experiments\/(t_\w+)/);
+  if (ex) return showExperiment(ex[1]);
+  const bl = h.match(/^#\/blind\/(t_\w+)/);
+  if (bl) return showBlind(bl[1]);
+  if (h.startsWith("#/experiments")) return showExperiments();
   if (h.startsWith("#/sources")) return showSources();
   if (h.startsWith("#/settings")) return showSettings();
   showComposer();
@@ -532,7 +537,7 @@ async function loadFlow(q, here) {
 const NODE_NAME = { plan: "理解主题、拆子问题", decide: "决定下一步", act: "检索与抓取", judge: "复核相关度", images: "挑选配图",
   remember: "核验事实、写入记忆", rank: "价值排序", verify: "补充核验", report: "生成报告",
   load: "读取 Skill 和记忆", select: "选材", outline: "列提纲", gap: "补充检索", draft: "逐节写作", check: "逐句核对",
-  fix: "按核对结果改写", naturalize: "自然化改写（降 AI 腔）", illustrate: "配图", save: "保存文章", recheck: "复查页面", reassess: "重新评估" };
+  fix: "按核对结果改写", naturalize: "自然化改写（降 AI 腔）", illustrate: "配图", measure: "计算指标", detect: "AIGC 检测", finish: "收尾", save: "保存文章", recheck: "复查页面", reassess: "重新评估" };
 const REWIND_EG = {
   write: ["改了 Skill 文件或写作偏好 → 从“读取 Skill 和记忆”重跑：按新的要求重新选材、列提纲、写作",
     "检索任务后来补充或重评了资料 → 从“选材”重跑，用新的素材重写",
@@ -1315,7 +1320,9 @@ async function showArticle(id, ver) {
       <a href="#/article/${id}">回到最新版</a></div>` : ""}
     <div class="rv-bar">
       <span><b>审阅修改</b> 鼠标移到正文任意一段，点 <i>✎ 改这段</i>；移到配图上可换图、改图注、删除。每次修改都会重新核对出处并存成新版本。</span>
-      <span class="rv-bar-act"><button type="button" class="ghost" id="rv-angle">换选题角度重写</button>
+      <span class="rv-bar-act"><a class="btn ghost" href="/api/articles/${id}/export?format=html&v=${v.version}">导出手机 HTML</a>
+        <a class="btn ghost" href="/api/articles/${id}/export?format=md&v=${v.version}">导出 Markdown</a>
+        <button type="button" class="ghost" id="rv-angle">换选题角度重写</button>
         ${d.versions.length > 1 ? `<button type="button" class="ghost" data-rv-diff="${Math.max(1, v.version - 1)}:${v.version}">和上一版对比</button>` : ""}</span>
     </div>
     <div class="rv-status" id="rv-status" hidden></div>
@@ -1574,6 +1581,207 @@ async function showSkillEditor(editId, fromId) {
       setTimeout(() => location.hash = "#/skills", 900);
     } catch (err) { msg.textContent = err.message; }
   };
+}
+
+// ---------------------------------------------------------------- Lv3：评测实验
+const VAR_OPTS = [["draft", "初稿", "列提纲后直接成稿"], ["checked", "核对改写", "+逐句核对、补检、按核对改写"],
+  ["optimized", "优化稿", "+自然化改写（降 AI 腔）+复核"], ["natural_only", "只自然化", "消融：不核对直接降 AI 腔"],
+  ["no_recheck", "自然化不复核", "消融：自然化后不复核"]];
+const num = (x) => x == null ? "—" : (Math.round(x * 100) / 100).toString();
+
+async function showExperiments() {
+  const el = $("#detail");
+  const me = current = {};
+  const [list, tasks, sk, ai] = await Promise.all([api("/api/experiments"), api("/api/tasks"), api("/api/skills"), api("/api/aigc")]);
+  if (current !== me) return;
+  const done = tasks.filter((t) => t.graph === "research" && t.status === "done");
+  el.innerHTML = `<div class="detail-head"><div><p class="kicker">评测</p><h1>评测实验</h1>
+      <p class="meta">用同一批素材写出不同版本，比较事实保真、信息密度、表达自然、理解成本和 AIGC 检测结果；也可以比较几种 Skill 的选材和表达。</p></div></div>
+    <form class="card ex-new" id="ex-new">
+      <h3>新建实验</h3>
+      <div class="ex-kind"><label><input type="radio" name="kind" value="ablation" checked> <b>初稿 vs 优化稿 + 消融</b>：同一 Skill，只改写作步骤</label>
+        <label><input type="radio" name="kind" value="skills"> <b>多种 Skill 对照</b>：同一批素材，用几种写法各写一篇图文文章</label></div>
+      <fieldset><legend>素材（已完成的检索任务；初稿 vs 优化稿建议选 3 组以上）</legend>
+        <div class="ex-tasks">${done.map((t) => `<label><input type="checkbox" name="rt" value="${t.id}"> ${esc(taskTitle(t))} <small class="muted">${fmtTime(t.created_at)}</small></label>`).join("") || `<p class="small muted">还没有完成的检索任务。</p>`}</div></fieldset>
+      <div data-k="ablation">
+        <label>写法 Skill<select name="skill">${sk.skills.map((x) => `<option value="${x.id}" ${x.id === "brief" ? "selected" : ""}>${esc(x.name)} v${esc(x.version)}</option>`).join("")}</select></label>
+        <fieldset><legend>变体（每组素材各写一篇）</legend><div class="ex-vars">${VAR_OPTS.map(([k, n, d]) =>
+          `<label><input type="checkbox" name="var" value="${k}" ${k !== "no_recheck" ? "checked" : ""}> <b>${n}</b> <small class="muted">${d}</small></label>`).join("")}</div></fieldset>
+      </div>
+      <div data-k="skills" hidden><fieldset><legend>写法（至少 2 种）</legend><div class="ex-vars">${sk.skills.map((x) =>
+        `<label><input type="checkbox" name="sk" value="${x.id}" ${["brief", "timeline", "compare", "explainer"].includes(x.id) ? "checked" : ""}> <b>${esc(x.name)}</b> <small class="muted">${esc(x.summary)}</small></label>`).join("")}</div></fieldset></div>
+      <div class="sk-grid2">
+        <label>AIGC 检测器<select name="detector"><option value="auto">本地检测器（${ai.local_ready ? "已安装" : "未安装，跑完后可手动录入外部检测器分数"}）</option><option value="manual">外部检测器（手动录入分数）</option></select></label>
+        <label>同时写几篇<input name="parallel" type="number" min="1" max="4" value="2"></label></div>
+      <p class="small muted">每篇都会调用大模型写作（初稿 vs 优化稿 4 个变体 × 3 组 ≈ 12 篇，约 15-30 分钟）。实验写的文章不会出现在普通文章列表里。</p>
+      <div class="row"><button>开始实验</button><small class="muted" id="ex-msg"></small></div>
+    </form>
+    <h2 class="section">实验记录</h2>
+    <div class="ex-list">${list.map((x) => `<a class="card ex-item" href="#/experiments/${x.id}"><b>${esc(x.topic)}</b>
+      <small class="muted">${STATUS[x.status] || x.status} · ${fmtTime(x.created_at)}${x.error ? ` · ${esc(x.error.slice(0, 60))}` : ""}</small></a>`).join("") || `<p class="small muted">还没有实验。</p>`}</div>`;
+  const f = $("#ex-new", el);
+  $$("[name=kind]", f).forEach((r) => r.onchange = () => $$("[data-k]", f).forEach((x) => x.hidden = x.dataset.k !== f.kind.value));
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    const body = { kind: f.kind.value, research_tasks: $$("[name=rt]:checked", f).map((x) => x.value), skill: f.skill.value,
+      variants: $$("[name=var]:checked", f).map((x) => x.value), skills: $$("[name=sk]:checked", f).map((x) => x.value),
+      detector: f.detector.value, parallel: +f.parallel.value || 2 };
+    try { const r = await api("/api/experiments", { method: "POST", body }); location.hash = `#/experiments/${r.id}`; }
+    catch (err) { $("#ex-msg").textContent = err.message; }
+  };
+}
+
+async function showExperiment(id) {
+  const el = $("#detail");
+  const me = current = { timer: null };
+  const r = await api(`/api/experiments/${id}`);
+  if (current !== me) return;
+  const busy = ["pending", "running"].includes(r.status) || r.running;
+  const rows = r.rows || [];
+  const vname = (v) => (r.variants.find((x) => x.id === v) || {}).name || v;
+  const topics = [...new Map(rows.map((x) => [x.research_task, x.topic])).entries()];
+  const better = (col, a, b) => a == null || b == null || col.better == null || a === b ? "" : ((col.better === "up") === (b > a) ? "up" : "down");
+  const base = r.kind === "skills" ? null : (r.variants[0] || {}).id;
+  const fmtCell = (k, x) => ["support_rate", "judge_fidelity", "redundancy", "filler_ratio", "connective_start", "long_sentence_ratio", "number_error_rate"].includes(k) ? pct(x) : num(x);
+  const avgTable = () => `<div class="table-wrap"><table class="tbl ex-tbl"><tr><th>指标</th>${r.variants.map((v) => `<th>${esc(v.name)}<br><small class="muted">${r.avg[v.id]?.n || 0} 篇</small></th>`).join("")}</tr>
+    ${r.metric_cols.map((c) => `<tr><td>${c.name}${c.better ? `<small class="muted">${c.better === "up" ? " ↑好" : " ↓好"}</small>` : ""}</td>${r.variants.map((v) => {
+      const x = r.avg[v.id]?.[c.key], b0 = base && r.avg[base]?.[c.key];
+      return `<td class="${v.id !== base ? better(c, b0, x) : ""}">${fmtCell(c.key, x)}</td>`; }).join("")}</tr>`).join("")}
+    ${r.detectors.map((d) => `<tr><td>AIGC：${esc(d)}<small class="muted"> ↓好</small></td>${r.variants.map((v) => {
+      const x = r.avg[v.id]?.aigc?.[d], b0 = base && r.avg[base]?.aigc?.[d];
+      return `<td class="${v.id !== base ? better({ better: "down" }, b0, x) : ""}">${pct(x)}</td>`; }).join("")}</tr>`).join("")}</table></div>`;
+  const runRows = (tid) => rows.filter((x) => x.research_task === tid);
+  const detail = () => topics.map(([tid, topic]) => `<details class="card ex-topic"><summary><b>${esc(topic)}</b> <small class="muted">${runRows(tid).length} 篇</small></summary>
+    <div class="table-wrap"><table class="tbl ex-tbl"><tr><th>变体</th><th>字数</th><th>支持率</th><th>数字错误</th><th>待确认</th><th>独立核验</th><th>事实/千字</th><th>套话/千字</th><th>句长变化</th><th>阅读分钟</th>
+      ${r.detectors.map((d) => `<th>${esc(d)}</th>`).join("")}<th>文章</th></tr>
+    ${runRows(tid).map((x) => `<tr><td>${esc(vname(x.variant))}${x.status !== "done" ? ` <span class="gap small">${esc(x.status)} ${esc(x.error || "")}</span>` : ""}</td>
+      <td>${num(x.chars)}</td><td>${pct(x.support_rate)}</td><td>${num(x.number_errors)}</td><td>${num(x.problems)}</td><td>${pct(x.judge_fidelity)}</td>
+      <td>${num(x.facts_per_1k)}</td><td>${num(x.tropes_per_1k)}</td><td>${num(x.sentence_len_cv)}</td><td>${num(x.read_minutes)}</td>
+      ${r.detectors.map((d) => `<td>${pct(x.aigc[d])}</td>`).join("")}
+      <td>${x.article_id ? `<a href="#/article/${x.article_id}">打开</a>` : ""}</td></tr>`).join("")}</table></div></details>`).join("");
+  const aigcBox = () => `<div class="card"><h3>AIGC 检测（同一检测器、同一份完整正文）</h3>
+    <p class="small">“完整正文”= 文章去掉配图、图注、阅读说明和参考资料列表后的全部文字（标题、小标题、出处编号保留），每篇用同样的处理。
+      检测器只给“像不像 AI 写的”的统计判断，所以下面总和事实保真、表达自然、理解成本放在一起看。</p>
+    ${r.aigc_error ? `<p class="gap small">${esc(r.aigc_error)}</p>` : r.aigc_note ? `<p class="small muted">${esc(r.aigc_note)}</p>` : ""}
+    <div class="row"><button type="button" class="ghost" id="ex-detect">用本地检测器检测全部</button><small class="muted" id="ex-det-msg"></small></div>
+    <details class="small"><summary>录入外部检测器的分数</summary>
+      <p>在同一个外部检测器里，逐篇粘贴“完整正文”（点“复制”），把它给出的 AI 生成概率（0-100）填进来。所有文章必须用同一个检测器、同一个检测模式。</p>
+      <label>检测器名称<input id="ex-det-name" placeholder="例如：某某 AIGC 检测（标准模式）"></label>
+      <table class="tbl"><tr><th>文章</th><th>完整正文</th><th>AI 概率（0-100）</th></tr>
+      ${rows.filter((x) => x.status === "done").map((x) => `<tr><td>${esc(x.topic.slice(0, 14))} · ${esc(vname(x.variant))}</td>
+        <td><button type="button" class="ghost sm" data-copy="${esc(x.key)}">复制</button></td>
+        <td><input class="ex-score" data-key="${esc(x.key)}" type="number" min="0" max="100" step="0.1"></td></tr>`).join("")}</table>
+      <div class="row"><button type="button" id="ex-save-scores">保存分数</button><small class="muted" id="ex-score-msg"></small></div></details></div>`;
+  const humanBox = () => {
+    const h = r.human || {};
+    const DN = { accuracy: "准确可信", information: "信息量", natural: "表达自然", easy: "好理解", overall: "整体更愿意读" };
+    const lp = r.llm_pairs || {};
+    return `<div class="card"><h3>读者盲评（初稿 vs 优化稿）</h3>
+      <p class="small">读者看到的是“甲/乙”两篇完整正文（去掉出处编号），不知道哪篇是初稿；每组的甲乙随机分配。把 <a href="#/blind/${id}">盲评页</a> 给读者，在这台电脑上打开即可（每人填一个化名）。</p>
+      <p class="small">已收到 <b>${h.ratings || 0}</b> 份评分，来自 <b>${h.raters || 0}</b> 位读者（共 ${r.blind_pairs} 组）。</p>
+      ${h.ratings ? `<table class="tbl"><tr><th>维度</th><th>选优化稿</th><th>选初稿</th><th>相当</th></tr>${Object.entries(DN).map(([k, n]) =>
+        `<tr><td>${n}</td><td>${h.tally[k].optimized}</td><td>${h.tally[k].draft}</td><td>${h.tally[k].tie}</td></tr>`).join("")}
+        <tr><td>“哪篇更像 AI 写的”</td><td colspan="3">认为是初稿 ${h.ai_guess.right} 次 · 认为是优化稿 ${h.ai_guess.wrong} 次 · 说不准 ${h.ai_guess.unsure} 次</td></tr></table>` : ""}
+      ${Object.keys(lp).length ? `<h4>大模型盲评（代理读者，交换前后顺序各评一次，两次一致才算胜）</h4>
+        <table class="tbl"><tr><th>素材</th>${Object.values(DN).map((n) => `<th>${n}</th>`).join("")}</tr>
+        ${Object.entries(lp).map(([tid, x]) => `<tr><td>${esc((topics.find((t) => t[0] === tid) || [, tid])[1].slice(0, 16))}</td>${Object.keys(DN).map((k) =>
+          `<td>${x[k].winner === "Y" ? "优化稿" : x[k].winner === "X" ? "初稿" : "相当"}<br><small class="muted">${num(x[k].x)} vs ${num(x[k].y)}</small></td>`).join("")}</tr>`).join("")}</table>
+        <p class="small muted">大模型评审只是代理指标，不能代替真人读者。</p>` : ""}</div>`;
+  };
+  const conclBox = () => {
+    const c = r.conclusions || { effects: [], failures: [] };
+    return `<div class="card"><h3>哪些步骤有效（消融 / 对照）</h3>
+      ${c.effects.map((e) => `<div class="ex-eff ${e.effective ? "ok" : "bad"}"><b>${esc(e.step)}</b> <small class="muted">${esc(e.compare)}</small>
+        <span class="tag ${e.effective ? "nv-new" : "rel-lo"}">${e.effective ? "有效" : "这次没看到效果"}</span><p class="small">${esc(e.text)}</p></div>`).join("") || `<p class="small muted">变体还没写完。</p>`}
+      <h3>什么时候失效（来自这次实验的具体案例）</h3>
+      ${c.failures.length ? `<ul class="small">${c.failures.map((f) => `<li><b>${esc(f.where)}</b> · ${esc(f.topic.slice(0, 14))} · ${esc(f.variant)}：${esc(f.what)}</li>`).join("")}</ul>` : `<p class="small muted">没有记录到失效案例。</p>`}</div>`;
+  };
+  const gainBox = () => {
+    const g = r.gain || {};
+    if (!g.source_chars) return "";
+    return `<div class="card"><h3>读优化稿比读原始资料多得到什么</h3>
+      <div class="stats"><div><b>${num(g.minutes_saved)}</b><small>分钟阅读时间省下（原始资料约 ${num(g.minutes_sources)} 分钟 → 文章 ${num(g.minutes_article)} 分钟）</small></div>
+        <div><b>${num(g.compression)}×</b><small>压缩比（${num(g.source_docs)} 篇资料 ${num(g.source_chars)} 字）</small></div>
+        <div><b>${num(g.cross_source_paras)}</b><small>段落把 ≥2 个来源放在一起交叉印证</small></div>
+        <div><b>${num(g.analysis_paras)}</b><small>段【分析】：资料里没有的判断，单独标出</small></div>
+        <div><b>${num(g.docs_dropped)}</b><small>篇素材被判断为不必读（重复或不相关）</small></div></div>
+      <p class="small">（${r.gain_rows.length} 组素材的平均值；阅读速度按 400 字/分钟估算。）</p></div>`;
+  };
+  const skillsBox = () => (r.skills?.groups || []).map((g) => `<div class="card"><h3>同一批素材 · ${esc(g.topic)}</h3>
+    <div class="table-wrap"><table class="tbl ex-tbl"><tr><th>写法</th><th>结构</th><th>字数</th><th>引用资料</th><th>来源数</th><th>事实/千字</th><th>支持率</th><th>平均句长</th><th>套话/千字</th><th>配图</th><th>文章</th></tr>
+    ${g.rows.map((x) => `<tr><td><b>${esc(x.skill_name)}</b><br><small class="muted">v${esc(x.logs.skill_version || "")}</small></td><td class="small">${(x.structure || []).map(esc).join(" / ")}</td>
+      <td>${num(x.chars)}</td><td>${x.cited_doc_ids.length}/${x.doc_ids.length}</td><td>${num(x.sources_cited)}</td><td>${num(x.facts_per_1k)}</td>
+      <td>${pct(x.support_rate)}</td><td>${num(x.avg_sentence_len)}</td><td>${num(x.tropes_per_1k)}</td><td>${x.logs.figures} 张${x.logs.cover ? "+封面" : ""}</td>
+      <td><a href="#/article/${x.article_id}">打开</a></td></tr>`).join("")}</table></div>
+    <h4>同一批资料，开头怎么写</h4>${g.rows.map((x) => `<p class="small ex-open"><b>${esc(x.skill_name)}</b>：${esc(x.excerpt)}…</p>`).join("")}
+    <h4>选材重合度（正文实际引用的资料，Jaccard；1 = 用的资料完全相同）</h4><div class="table-wrap"><table class="tbl"><tr><th></th>${g.rows.map((x) => `<th>${esc(x.skill_name)}</th>`).join("")}</tr>
+    ${g.jaccard_cited.map((line, i) => `<tr><th>${esc(g.rows[i].skill_name)}</th>${line.map((v) => `<td>${v == null ? "—" : v.toFixed(2)}</td>`).join("")}</tr>`).join("")}</table></div></div>`).join("");
+  el.innerHTML = `<div class="detail-head"><div><p class="kicker"><a href="#/experiments">评测</a> · ${r.kind === "skills" ? "多种 Skill 对照" : "初稿 vs 优化稿 + 消融"}</p><h1>${esc(r.topic)}</h1>
+      <p class="meta"><span class="badge ${r.status}">${STATUS[r.status] || r.status}</span> ${busy ? `正在：${esc(NODE_NAME[r.current_node] || r.current_node || "")}` : ""}
+        · ${fmtTime(r.created_at)} · <a href="#/task/${id}">实验过程</a></p>${r.error ? `<p class="error">${esc(r.error)}</p>` : ""}</div></div>
+    ${busy ? `<div class="live"><span class="orb"></span>实验进行中：已写完 ${rows.filter((x) => x.status !== "pending").length}/${rows.length} 篇，页面会自动刷新</div>` : ""}
+    ${r.kind === "skills" ? skillsBox() : `
+    <div class="card small"><b>实验设置</b>：Skill「${esc(r.params.skill)}」；变体：${r.variants.map((v) => `<b>${esc(v.name)}</b>（${esc(v.desc)}）`).join("；")}。
+      同一组素材的各变体用完全相同的素材和 Skill，只差写作步骤；为了只比较文字，变体都不配图。</div>
+    <h2 class="section">平均结果（${topics.length} 组素材）</h2>${avgTable()}
+    ${conclBox()}${humanBox()}${aigcBox()}${gainBox()}
+    <h2 class="section">每组明细</h2>${detail()}`}`;
+  if (busy) me.timer = setTimeout(() => current === me && showExperiment(id), 5000);
+  $$("[data-copy]", el).forEach((b) => b.onclick = async () => {
+    const t = await api(`/api/experiments/${id}/text/${encodeURIComponent(b.dataset.copy)}`);
+    try { await navigator.clipboard.writeText(t.text); b.textContent = `已复制 ${t.chars} 字`; } catch { b.textContent = "复制失败"; }
+  });
+  const sv = $("#ex-save-scores", el);
+  if (sv) sv.onclick = async () => {
+    const det = $("#ex-det-name", el).value.trim(), msg = $("#ex-score-msg", el);
+    if (!det) { msg.textContent = "先填检测器名称"; return; }
+    const ins = $$(".ex-score", el).filter((x) => x.value !== "");
+    for (const x of ins) await api(`/api/experiments/${id}/scores`, { method: "POST", body: { run_key: x.dataset.key, detector: det, score: +x.value } });
+    msg.textContent = `已保存 ${ins.length} 个分数`;
+    showExperiment(id);
+  };
+  const dt = $("#ex-detect", el);
+  if (dt) dt.onclick = async () => {
+    dt.disabled = true; $("#ex-det-msg").textContent = "检测中（首次要下载模型，可能需要几分钟）…";
+    try { const x = await api(`/api/experiments/${id}/detect`, { method: "POST", body: {} }); $("#ex-det-msg").textContent = `完成 ${x.detected} 篇`; showExperiment(id); }
+    catch (err) { $("#ex-det-msg").textContent = err.message; dt.disabled = false; }
+  };
+}
+
+async function showBlind(id) {
+  const el = $("#detail");
+  const me = current = {};
+  let rater = store.get("rater") || "";
+  const draw = async () => {
+    const d = await api(`/api/experiments/${id}/blind?rater=${encodeURIComponent(rater)}`);
+    if (current !== me) return;
+    const left = d.pairs.filter((p) => !p.rated);
+    const p = left[0];
+    const Q = [["accuracy", "哪篇读起来更准确可信？"], ["information", "哪篇让你得到的有用信息更多？"], ["natural", "哪篇读起来更自然、更像人写的？"],
+      ["easy", "哪篇更容易读懂？"], ["overall", "整体上你更愿意读哪篇？"], ["ai_guess", "你觉得哪篇更像 AI 写的？"]];
+    el.innerHTML = `<div class="detail-head"><div><p class="kicker">读者盲评</p><h1>两篇文章，选你觉得更好的</h1>
+        <p class="meta">每组两篇写的是同一件事，用的是同一批资料。请像平时读文章一样读完，再回答下面的问题。没有标准答案。</p></div></div>
+      <div class="card row"><label class="bl-name">你的称呼（可以是化名，只用来区分不同读者）<input id="bl-rater" value="${esc(rater)}"></label>
+        <small class="muted">已完成 ${d.pairs.length - left.length}/${d.pairs.length} 组</small></div>
+      ${!rater ? `<p class="small muted">先填称呼再开始。</p>` : !p ? `<div class="card"><h3>全部完成，谢谢！</h3><p class="small">可以把这个页面交给下一位读者（换一个称呼）。</p></div>` : `
+      <h2 class="section">第 ${d.pairs.indexOf(p) + 1} 组</h2>
+      <div class="bl-pair"><article class="card bl-text"><h3>甲</h3>${esc(p["甲"]).replace(/\n/g, "<br>")}</article>
+        <article class="card bl-text"><h3>乙</h3>${esc(p["乙"]).replace(/\n/g, "<br>")}</article></div>
+      <form class="card bl-q" id="bl-form">${Q.map(([k, q]) => `<div class="bl-row"><span>${q}</span>${(k === "ai_guess" ? ["甲", "乙", "说不准"] : ["甲", "乙", "相当"]).map((o) =>
+        `<label><input type="radio" name="${k}" value="${o}" required> ${o}</label>`).join("")}</div>`).join("")}
+        <label>想说的话（可空）<textarea name="comment" rows="2"></textarea></label>
+        <div class="row"><button>提交，下一组</button><small class="muted" id="bl-msg"></small></div></form>`}`;
+    $("#bl-rater", el).onchange = (e) => { rater = e.target.value.trim(); store.set("rater", rater); draw(); };
+    const f = $("#bl-form", el);
+    if (f) f.onsubmit = async (e) => {
+      e.preventDefault();
+      const answers = Object.fromEntries(Q.map(([k]) => [k, f[k].value]));
+      answers.comment = f.comment.value;
+      try { await api(`/api/experiments/${id}/blind`, { method: "POST", body: { pair_id: p.pair_id, rater, answers } }); window.scrollTo(0, 0); draw(); }
+      catch (err) { $("#bl-msg").textContent = err.message; }
+    };
+  };
+  draw();
 }
 
 // ---------------------------------------------------------------- Lv3：人工审阅

@@ -748,3 +748,33 @@ button.linkish { background: none; color: var(--info); padding: 0; font-size: 12
 .sk-warn { color: var(--warn); padding-left: 18px; }
 @media (max-width: 900px) { .sk-edit { grid-template-columns: 1fr; } .sk-preview { position: static; } }
 .ref-chk { display: flex; flex-direction: column; gap: 2px; margin: 8px 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; }
+
+/* ---- 评测实验 */
+.ex-kind label, .ex-tasks label, .ex-vars label { display: flex !important; gap: 8px; align-items: baseline; font-size: 13px; color: var(--ink); margin: 4px 0; }
+.ex-kind input, .ex-tasks input, .ex-vars input { display: inline-block; width: auto; margin: 0; }
+.ex-tasks { max-height: 240px; overflow: auto; }
+.ex-new fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin: 8px 0 12px; }
+.ex-new legend { font: 600 12px var(--sans); color: var(--muted); padding: 0 4px; }
+.ex-list { display: grid; gap: 8px; }
+.ex-item { display: flex; justify-content: space-between; gap: 12px; text-decoration: none; color: var(--ink); margin: 0; }
+.ex-tbl td, .ex-tbl th { white-space: nowrap; text-align: right; }
+.ex-tbl td:first-child, .ex-tbl th:first-child { text-align: left; }
+.ex-tbl td.up { color: var(--ok); font-weight: 600; }
+.ex-tbl td.down { color: var(--accent); font-weight: 600; }
+.ex-eff { border-left: 3px solid var(--line); padding: 4px 10px; margin: 8px 0; }
+.ex-eff.ok { border-color: var(--ok); }
+.ex-eff.bad { border-color: var(--warn); }
+.ex-eff p { margin: 4px 0 0; }
+.ex-topic summary { cursor: pointer; }
+.bl-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+.bl-text { margin: 0; font: 15px/1.8 var(--serif); max-height: 75vh; overflow: auto; }
+.bl-text h3 { font-family: var(--sans); position: sticky; top: -16px; background: var(--card); padding: 4px 0; margin-top: 0; }
+.bl-q { margin-top: 14px; }
+.bl-row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; padding: 8px 0; border-bottom: 1px dashed var(--line); font: 14px var(--sans); }
+.bl-row > span { flex: 1 1 260px; }
+.bl-row label { display: flex !important; gap: 4px; align-items: center; margin: 0; font-size: 14px; color: var(--ink); }
+.bl-row input { display: inline-block; width: auto; margin: 0; }
+.bl-name { flex: 1; }
+@media (max-width: 900px) { .bl-pair { grid-template-columns: 1fr; } }
+.ex-open { border-left: 3px solid var(--line); padding-left: 10px; margin: 6px 0; }
+.ex-tbl td.small { white-space: normal; text-align: left; min-width: 220px; }

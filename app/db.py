@@ -283,6 +283,26 @@ CREATE TABLE IF NOT EXISTS rankings (
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_rankings_task ON rankings(task_id, version);
+-- Lv3 评测：读者盲评（看不到哪篇是初稿/优化稿）和外部 AIGC 检测器分数（手动录入）
+CREATE TABLE IF NOT EXISTS eval_ratings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id TEXT NOT NULL,
+    pair_id TEXT NOT NULL,
+    rater TEXT NOT NULL,
+    data TEXT NOT NULL,          -- {维度: "甲"/"乙"/"相当", ai_guess, comment}；甲乙对应哪篇只记在实验里
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_evr ON eval_ratings(experiment_id, pair_id);
+CREATE TABLE IF NOT EXISTS eval_scores (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id TEXT NOT NULL,
+    run_key TEXT NOT NULL,
+    detector TEXT NOT NULL,
+    score REAL NOT NULL,         -- AI 生成概率 0-1
+    note TEXT,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_evs ON eval_scores(experiment_id, run_key);
 -- 人工相关性标注（按主题），用于计算 P@K；没有人工标注时用自动标注（银标）并注明
 CREATE TABLE IF NOT EXISTS labels (
     topic TEXT NOT NULL,
