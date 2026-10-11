@@ -22,6 +22,7 @@ import time
 from urllib.parse import urlsplit
 from datetime import datetime, timedelta, timezone
 
+from .. import aspects as aspects_mod
 from .. import db, llm, ranking, websearch
 from .. import memory as mem
 from .. import memory_facts as mf
@@ -180,7 +181,9 @@ def _coverage(ctx) -> dict:
     cov = {}
     for a in ctx.state["aspects"]:
         hits = [d["id"] for d in docs if _doc_hits(d, a)]
-        cov[a["id"]] = {"name": a["name"], "need": a["need"], "have": len(hits), "docs": hits[:20]}
+        cov[a["id"]] = {"name": a["name"], "need": a["need"], "have": len(hits), "docs": hits[:20],
+                        "origin": a.get("origin", "default"), "optional": bool(a.get("optional")),
+                        "why": a.get("why"), "priority": a.get("priority")}
     return cov
 
 
@@ -219,18 +222,18 @@ PLAN_PROMPT = """你是信息检索规划助手。用户想了解的主题：「
 先判断主题属于哪些领域（可多选）：tech=科技/AI/软件，finance=金融/经济/公司，science=学术/医学/科研，
 general=综合新闻/政策/社会，community=社区/小众话题/亚文化/个人经验/具体博主或团队（资料主要在 B站、公众号、
 知乎、贴吧、小红书、抖音）。系统会按领域选择信息源。
-再把主题拆成 3-5 个需要覆盖的子问题，并给出检索关键词。
+再把主题拆成需要覆盖的子问题，并给出检索关键词。
+{aspect_rules}
 中文来源是各领域媒体 RSS（按关键词过滤最新文章）和站内搜索（掘金、华尔街见闻等）。中文核心词要用中文媒体
 实际常用的说法，短（2-5 字）、常见，不要自造少见词组。
 英文来源是 arXiv、OpenAlex、PubMed、Hacker News、GitHub 等（检索式要短，2-4 个英文词）。
-子问题的 keywords 用来判断一篇资料是否覆盖了该子问题，要给 8-12 个：中文常用说法 + 英文术语
-+ 常见缩写/代表性方法名（例如“位置外推”还要给 RoPE、ALiBi、YaRN、extrapolation、position interpolation）。
-每个子问题再给一条英文检索式 search_en（2-4 词，含主题词）和一个中文检索词 search_zh（2-6 字）。
+关键词要包含常见缩写和代表性名称（例如“位置外推”还要给 RoPE、ALiBi、YaRN、extrapolation、position interpolation）。
 只输出 JSON：
 {{"domains": ["finance"],
+  "question_type": "tech_eval",
   "core_terms_zh": ["主题核心词，2-4个，越短越好"],
-  "aspects": [{{"name": "子问题", "keywords": ["中英文关键词、术语、缩写"],
-               "search_en": "英文检索式", "search_zh": "中文检索词"}}],
+  "aspects": [{{"name": "具体问题", "why": "一句话", "priority": "high", "need": 1,
+               "keywords": ["中英文关键词、术语、缩写"], "search_en": "英文检索式", "search_zh": "中文检索词"}}],
   "queries_en": ["英文检索式，2-4 条"],
   "notes": "一句话说明检索策略"}}"""
 
@@ -315,21 +318,22 @@ def plan(ctx):
         xs = [str(x).strip() for x in (re.split(r"[,，、;；]", v) if isinstance(v, str) else v or [])]
         return [x for x in xs if len(x) >= 2 and not x.isdigit()]     # 过滤“5”“q”这类无意义输入
     plan_src = "rules"
+    llm_aspects, qtype = [], None
+    prev_aspects = [a for a in ((prev or {}).get("state") or {}).get("aspects") or []
+                    if a.get("origin") in ("llm", "data", "user") and not a.get("optional")] if prev else []
     if llm.available() and not p.get("no_llm"):
         try:
             res = ctx.tool("llm", messages=[
                 {"role": "system", "content": "你只输出 JSON。"},
-                {"role": "user", "content": PLAN_PROMPT.format(topic=ctx.topic, memory=memory_note)}])
+                {"role": "user", "content": PLAN_PROMPT.format(
+                    topic=ctx.topic, memory=memory_note,
+                    aspect_rules=aspects_mod.plan_rules(prev_aspects, "community" in (p.get("domains") or [])))}])
             d = res["data"]
             llm_domains = [x for x in (d.get("domains") or []) if x in DOMAINS] or llm_domains
             terms_zh = list(dict.fromkeys((d.get("core_terms_zh") or []) + list(p.get("keywords") or []))) or terms_zh
             queries_en = list(dict.fromkeys(queries_en + (d.get("queries_en") or [])))[:4]
-            for i, a in enumerate(d.get("aspects") or []):
-                if a.get("name") and a.get("keywords"):
-                    aspects.append({"id": f"llm{i}", "name": a["name"], "kind": "keywords",
-                                    "need": 1, "keywords": [str(k) for k in a["keywords"]][:16],
-                                    "search_en": str(a.get("search_en") or "")[:60],
-                                    "search_zh": str(a.get("search_zh") or "")[:12]})
+            llm_aspects = aspects_mod.parse_llm(d.get("aspects"))
+            qtype = d.get("question_type") if d.get("question_type") in aspects_mod.QUESTION_TYPES else None
             plan_src = "llm"
             ctx.think(f"LLM 规划：{d.get('notes', '')}")
         except Exception as e:  # LLM 失败不影响流程
@@ -366,9 +370,22 @@ def plan(ctx):
     if "community" in domains and not set(domains) & {"tech", "science"}:
         drop = {"primary", "eval"}
         base = [a for a in st["aspects"] if a["id"] not in drop]
-        st["aspects"] = base[:1] + [dict(a) for a in COMMUNITY_ASPECTS] + base[1:]
+        st["aspects"] = base[:1] + [dict(a, origin="community") for a in COMMUNITY_ASPECTS] + base[1:]
         ctx.think("社区 / 小众话题：子问题改为“当事人/官方说法”“社区与粉丝讨论”“相关作品与内容”，"
                   "不再要求论文/仓库类一手来源和评测数据")
+    # ---- 子问题拆分：按问题类型的框架拆出的子问题，与通用子问题去重合并
+    st["aspects"], changes = aspects_mod.build(st["aspects"], llm_aspects, qtype)
+    st["aspect_plan"] = {"type": qtype, "type_name": aspects_mod.QUESTION_TYPES[qtype][0] if qtype else None,
+                         "changes": [dict(c, phase="plan") for c in changes], "refined": not llm_aspects,
+                         "reused": [a["name"] for a in st["aspects"] if prev_aspects and
+                                    any(a["name"] == b["name"] for b in prev_aspects)]}
+    if qtype or changes:
+        ctx.think(f"子问题拆分：问题类型“{st['aspect_plan']['type_name'] or '未判断'}”，按该类型的框架拆出 "
+                  f"{len(llm_aspects)} 个具体问题" +
+                  (f"；沿用上次的 {len(st['aspect_plan']['reused'])} 个" if st["aspect_plan"]["reused"] else "") +
+                  "".join(f"；{c['name']}：{c['why']}" for c in changes))
+    if p.get("confirm_aspects"):
+        _confirm_aspects(ctx)
     enabled = [s for s in list_sources() if s["id"] != "web"]
     if p.get("sources"):
         srcs = [s for s in enabled if s["id"] in set(p["sources"])]
@@ -512,6 +529,71 @@ def _gap_actions(st: dict, a: dict) -> list[dict]:
     return acts
 
 
+def _refine_aspects(ctx, cov: dict):
+    """初步检索完成后，对照已找到资料的标题修订子问题（一次）。"""
+    st = ctx.state
+    st["aspect_plan"]["refined"] = True
+    docs = [d for d in _task_docs(ctx.task_id) if not d["duplicate_of"]]
+    docs.sort(key=lambda d: -((d["meta"] or {}).get("relevance") or 0))
+    docs = docs[:30]
+    heads = [re.sub(r"\s+", " ", d["text"] or "")[:60] for d in docs]
+    lines = "\n".join(f"{i}. {d['source_id']} | {(d['title'] or '')[:60]} | {heads[i]}" for i, d in enumerate(docs))
+    asp = "\n".join(f"- id={a['id']}：{a['name']}（{cov[a['id']]['have']}/{a['need']}"
+                    f"{'，必需' if a.get('priority') == 'high' else ''}）" for a in st["aspects"] if a["id"] in cov)
+    try:
+        res = ctx.tool("llm", messages=[{"role": "user", "content": aspects_mod.REFINE_PROMPT.format(
+            topic=ctx.topic, qtype=st["aspect_plan"].get("type_name") or "未判断", aspects=asp, docs=lines)}])["data"]
+    except Exception as e:
+        ctx.think(f"按资料修订子问题失败（{str(e)[:60]}），沿用原拆分")
+        return
+    changes = aspects_mod.apply_refine(st["aspects"], cov, res, len(docs))
+    for c in changes:
+        if c.get("evidence"):
+            c["evidence_titles"] = [(docs[i]["title"] or "")[:40] for i in c["evidence"][:3]]
+    st["aspect_plan"]["changes"] += [dict(c, phase="refine") for c in changes]
+    st["aspect_plan"]["refine_notes"] = res.get("notes", "")
+    ctx.think("按初步检索到的资料修订子问题：" + ("；".join(
+        f"{ {'optional': '降为可选', 'add': '新增', 'keep_high': '保留'}[c['op']] }「{c['name']}」——{c['why']}"
+        for c in changes) or "拆分与资料吻合，不需要调整"))
+
+
+def _confirm_aspects(ctx):
+    """人工介入：检索前让用户确认、改写、删减、增加子问题。"""
+    st = ctx.state
+    ans = ctx.human("confirm_aspects", "aspects",
+                    "检索前请确认子问题：取消勾选的不再检索，可以改写名称，也可以每行新增一个。",
+                    {"aspects": [{"id": a["id"], "name": a["name"], "why": a.get("why"),
+                                  "origin": a.get("origin")} for a in st["aspects"]]})
+    if not isinstance(ans, dict):
+        return
+    keep = set(ans.get("keep") or [a["id"] for a in st["aspects"]])
+    removed = [a["name"] for a in st["aspects"] if a["id"] not in keep and a["id"] != "overview"]
+    st["aspects"] = [a for a in st["aspects"] if a["id"] in keep or a["id"] == "overview"]
+    for a in st["aspects"]:
+        new = (ans.get("rename") or {}).get(a["id"])
+        if new and new.strip() and new.strip() != a["name"]:
+            a["name"] = new.strip()[:40]
+            a["origin"] = "user"
+    added = aspects_mod.from_user(ans.get("add") or [])
+    if added and llm.available() and not ctx.params.get("no_llm"):
+        try:       # 让大模型给用户新增的子问题补充判断关键词和检索式
+            desc = "\n".join(f"- id={a['id']}：{a['name']}" for a in added)
+            d = ctx.tool("llm", messages=[{"role": "user", "content": GAP_PROMPT.format(
+                topic=ctx.topic, gaps=desc, zero=[])}])["data"]
+            by = {a["id"]: a for a in added}
+            for x in d.get("gaps") or []:
+                a = by.get(x.get("id"))
+                if a:
+                    a["keywords"] = list(dict.fromkeys(a["keywords"] + [str(k) for k in x.get("keywords") or []]))[:16]
+                    a["search_zh"], a["search_en"] = x.get("search_zh") or "", x.get("search_en") or ""
+        except Exception:
+            pass
+    st["aspects"] += added
+    st["aspect_plan"]["changes"] += [{"op": "user_remove", "name": n, "why": "用户确认时取消", "phase": "confirm"}
+                                     for n in removed] + \
+        [{"op": "user_add", "name": a["name"], "why": "用户新增", "phase": "confirm"} for a in added]
+
+
 def decide(ctx):
     st, p = ctx.state, ctx.params
     max_docs = p.get("max_docs", 40)
@@ -525,6 +607,13 @@ def decide(ctx):
             log.update(status="closed", seconds=round(time.time() - log["t0"], 1))
             ctx.think(f"缺口「{log['name']}」已补上（{log['how']}，用时 {log['seconds']}s）")
 
+    if not (st.get("aspect_plan") or {}).get("refined", True) and \
+            not any(a.get("initial") and a["type"] == "search" for a in st["queue"]) and n_docs >= 5:
+        _refine_aspects(ctx, cov)
+        cov = _coverage(ctx)
+        st["coverage"] = cov
+        gaps = _gaps(cov)
+        cov_txt = "；".join(f"{v['name']} {v['have']}/{v['need']}" for v in cov.values())
     queue = [a for a in st["queue"] if not (a["type"] == "search" and a["source"] in st["disabled"])]
     pending_fetch = any(a["type"] == "fetch" for a in queue) and st["fetches"] < p.get("max_fetch", 15)
     pending_initial = any(a.get("initial") and a["type"] == "search" for a in queue)

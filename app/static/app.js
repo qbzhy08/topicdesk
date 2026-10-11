@@ -93,7 +93,7 @@ async function submitTask(e) {
     domains: f.getAll("domain").length ? f.getAll("domain") : undefined,
     keywords: split(f.get("keywords")), en_keywords: split(f.get("en_keywords")),
     auto_translate: !!f.get("auto_translate"),
-    sources: allChecked() ? undefined : f.getAll("src"), max_docs: Number(f.get("max_docs")), max_fetch: Number(f.get("max_fetch")),
+    sources: allChecked() ? undefined : f.getAll("src"), max_docs: Number(f.get("max_docs")), max_fetch: Number(f.get("max_fetch")), confirm_aspects: !!f.get("confirm_aspects"),
     days: Number(f.get("days")), min_relevance: Number(f.get("min_relevance")),
     hitl_on_block: !!f.get("hitl_on_block"), ...extra } : extra;
   try {
@@ -304,6 +304,7 @@ function renderReport(rep, state) {
       ${rep.memory ? memoryReport(rep.memory) : ""}
       ${rep.domains ? `<p class="small">主题领域：${rep.domains.map((d) => DOMAIN_NAME[d] || d).join("、")}；选用来源 ${rep.source_ids?.length || 0} 个：${(rep.source_ids || []).map((id) => esc(sourcesCache.find((x) => x.id === id)?.name || id)).join("、")}</p>` : ""}
       ${rep.quality ? qualityReport(rep.quality) : ""}
+      ${aspectPlanReport(state?.aspect_plan)}
       <h4>覆盖矩阵</h4>${covTable(rep.coverage)}
       ${rep.covered_at ? `<p class="small">在第 ${rep.covered_at.docs} 篇资料时覆盖了全部子问题，之后只做收尾${rep.dropped_after_cover ? `，放弃了 ${rep.dropped_after_cover} 个低价值行动` : ""}。</p>` : ""}
       ${rep.gaps?.length ? `<h4>缺口补检</h4><table class="tbl"><tr><th>子问题</th><th>结果</th><th>用时</th><th>做了什么</th></tr>${rep.gaps.map((g) => `
@@ -335,9 +336,24 @@ function memoryReport(m) {
       `<li><a href="#/memory/${f.id}">${esc(f.content)}</a> <span class="tag v-${f.verify}">${VERIFY[f.verify] || f.verify}</span> 独立来源 ${f.independent ?? 0}</li>`).join("")}</ul></details>` : ""}`;
 }
 
+const ORIGIN = { default: "通用", llm: "按类型拆分", data: "按资料新增", user: "你添加", community: "社区话题", memory: "沿用上次" };
 function covTable(cov) {
-  return `<table class="tbl cov"><tr><th>子问题</th><th>已有 / 需要</th><th></th></tr>${Object.values(cov).map((c) => `
-    <tr><td>${esc(c.name)}</td><td>${c.have} / ${c.need}</td><td>${c.have >= c.need ? '<span class="ok">✓ 已覆盖</span>' : '<span class="gap">缺口</span>'}</td></tr>`).join("")}</table>`;
+  return `<table class="tbl cov"><tr><th>子问题</th><th>来源</th><th>已有 / 需要</th><th></th></tr>${Object.values(cov).map((c) => `
+    <tr class="${c.optional ? "opt-row" : ""}"><td>${esc(c.name)}${c.priority === "high" ? ` <span class="tag">必需</span>` : ""}${c.why ? `<br><small>${esc(c.why)}</small>` : ""}</td>
+    <td><span class="tag">${ORIGIN[c.origin] || esc(c.origin || "通用")}</span></td>
+    <td>${c.have} / ${c.optional ? "可选" : c.need}</td>
+    <td>${c.optional ? '<span class="small">可选</span>' : c.have >= c.need ? '<span class="ok">✓ 已覆盖</span>' : '<span class="gap">缺口</span>'}</td></tr>`).join("")}</table>`;
+}
+
+function aspectPlanReport(ap) {
+  if (!ap) return "";
+  const OP = { drop_default: "去掉通用子问题", merge: "合并重复", optional: "降为可选", add: "按资料新增", keep_high: "保留必需项",
+    user_remove: "你删除", user_add: "你新增" };
+  const ch = ap.changes || [];
+  return `<h4>子问题拆分</h4><p class="small">问题类型：${esc(ap.type_name || "未判断（未配置大模型时只用通用子问题）")}
+    ${ap.reused?.length ? `；沿用上次的子问题：${ap.reused.map(esc).join("、")}` : ""}${ap.refine_notes ? `；修订说明：${esc(ap.refine_notes)}` : ""}</p>
+    ${ch.length ? `<ul class="small">${ch.map((c) => `<li><b>${OP[c.op] || c.op}</b>「${esc(c.name)}」${c.into ? ` → 并入「${esc(c.into)}」` : ""}：${esc(c.why || "")}
+      ${c.evidence_titles?.length ? `（依据：${c.evidence_titles.map(esc).join("；")}）` : ""}</li>`).join("")}</ul>` : ""}`;
 }
 
 function renderHitl(open) {
@@ -347,6 +363,13 @@ function renderHitl(open) {
   box.dataset.key = key;
   box.innerHTML = open.map((h) => {
     const opts = h.payload.options;
+    if (h.kind === "aspects") {
+      return `<div class="card hitl" data-id="${h.id}"><h3>需要你的判断 · 确认子问题</h3><p>${esc(h.prompt)}</p>
+        ${h.payload.aspects.map((a) => `<div class="asp-row"><input type="checkbox" data-asp="${esc(a.id)}" ${a.id === "overview" ? "disabled" : ""} checked>
+          <input class="asp-name" data-name="${esc(a.id)}" value="${esc(a.name)}"><span class="tag">${ORIGIN[a.origin] || esc(a.origin || "通用")}</span>
+          ${a.why ? `<small>${esc(a.why)}</small>` : ""}</div>`).join("")}
+        <label>新增子问题（每行一个）<textarea rows="3" data-add></textarea></label><button>确认并开始检索</button></div>`;
+    }
     const body = h.kind === "choose" && Array.isArray(opts)
       ? opts.map((o, i) => `<label class="opt"><input type="checkbox" checked value="${i}"> ${esc(typeof o === "string" ? o : o.label || JSON.stringify(o))}</label>`).join("")
       : `<label>答复 (JSON)<textarea rows="5">${esc(JSON.stringify(h.payload.default ?? {}, null, 2))}</textarea></label>
@@ -358,7 +381,12 @@ function renderHitl(open) {
     const h = open.find((x) => x.id === card.dataset.id);
     card.querySelector("button").onclick = async () => {
       let response;
-      if (h.kind === "choose" && Array.isArray(h.payload.options)) {
+      if (h.kind === "aspects") {
+        const keep = [...card.querySelectorAll("[data-asp]")].filter((i) => i.checked).map((i) => i.dataset.asp);
+        const rename = Object.fromEntries([...card.querySelectorAll("[data-name]")].map((i) => [i.dataset.name, i.value]));
+        const add = card.querySelector("[data-add]").value.split("\n").map((x) => x.trim()).filter(Boolean);
+        response = { keep, rename, add };
+      } else if (h.kind === "choose" && Array.isArray(h.payload.options)) {
         const idx = [...card.querySelectorAll("input:checked")].map((i) => +i.value);
         response = { keep: idx.map((i) => h.payload.options[i]), keep_index: idx };
       } else {

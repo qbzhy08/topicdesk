@@ -368,6 +368,7 @@ def evaluate(task_id: str, topic: str, *, aspects: list[dict], min_rel: float = 
     if pm and pm not in (5, 30):
         lists[str(pm)] = build_list(items, pm, "skim" if pm <= 10 else "deep")
     orders = {"ours": ours_order(items), **baseline_orders(items)}
+    aspects = [a for a in aspects if not a.get("optional")]      # 降为可选的子问题不计入覆盖率
     hits = {d["id"]: {a["id"] for a in aspects if a.get("kind") not in ("any",) and _doc_hits(d, a)} for d in pool}
     data = {"trigger": trigger, "weights": {**WEIGHTS, **(weights or {})}, "min_rel": min_rel,
             "pref_minutes": pm, "items": items, "lists": lists, "orders": orders,

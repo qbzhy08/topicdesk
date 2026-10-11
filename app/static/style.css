@@ -251,3 +251,8 @@ button.mini.on { color: var(--card); background: var(--ink); border-color: var(-
   .rk-side { grid-column: 2; align-items: flex-start; min-width: 0; }
   .rk-cols { grid-template-columns: 1fr; }
 }
+
+.cov .opt-row td { color: var(--muted); }
+.asp-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; flex-wrap: wrap; }
+.asp-row .asp-name { flex: 1 1 240px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--card); }
+.asp-row small { flex-basis: 100%; color: var(--muted); padding-left: 26px; }
