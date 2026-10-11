@@ -597,3 +597,26 @@ class TitleTest(CollectBase):
         self.assertLessEqual(len(t), 161)
         self.assertTrue(t.endswith("…"))
         self.assertFalse(t.startswith("GitHub - "))
+
+
+class RobustnessTest(CollectBase):
+    def test_bad_gzip_and_unexpected_errors_do_not_fail_task(self):
+        """服务器声明 gzip 但内容损坏、或处理某个页面时出现意外异常：只记一条失败，任务继续完成。"""
+        from app.collect import tools as _tools  # noqa: F401
+        from app.harness.core import TOOLS
+        orig = TOOLS["page_fetch"].fn
+
+        def flaky(url, mode="auto", fresh=False):
+            if "blog.example.com" in url:
+                raise ValueError("Received response with content-encoding: gzip, but failed to decode it.")
+            return orig(url, mode=mode, fresh=fresh)
+        TOOLS["page_fetch"].fn = flaky
+        try:
+            tid = create_task("research", "开源大模型 长上下文 评测",
+                              params={"no_llm": True, "max_docs": 30, "en_keywords": ["long context LLM"],
+                                      "sources": ["hn", "github", "arxiv"], "verify_top": False})
+            self.assertEqual(run_task(tid), "done")
+        finally:
+            TOOLS["page_fetch"].fn = orig
+        st = db.query_one("SELECT state FROM tasks WHERE id=?", (tid,))["state"]
+        self.assertTrue(any("gzip" in (f.get("reason") or "") for f in st["failures"]))

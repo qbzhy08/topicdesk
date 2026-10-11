@@ -786,6 +786,11 @@ def _handle_failure(ctx, a: dict, e: FetchError):
     ctx.observe(f"失败：{e.kind} {e.reason} → {rec['fallback']}")
 
 
+def _as_fetch_error(e: Exception, a: dict) -> FetchError:
+    """意外异常（解析库报错、编码问题等）：只影响这一个页面/检索，记为失败并继续，不让整个步骤失败。"""
+    return FetchError("bad_content", f"处理出错：{type(e).__name__}：{str(e)[:120]}", a.get("url") or a.get("source", ""))
+
+
 def _fetchable(st: dict, source_id: str) -> bool:
     """来源配置 fetch=False（需要登录的平台、B站视频）时不抓详情页，只用搜索结果里的摘要。"""
     cache = st.setdefault("_fetchable", {})
@@ -798,10 +803,8 @@ def _fetchable(st: dict, source_id: str) -> bool:
 def _after_search(ctx, a, status, res):
     st, p = ctx.state, ctx.params
     if status == "error":
-        if isinstance(res, FetchError):
-            _handle_failure(ctx, a, res)
-            return
-        raise res
+        _handle_failure(ctx, a, res if isinstance(res, FetchError) else _as_fetch_error(res, a))
+        return
     items = res["items"]
     if res.get("dropped_old"):
         st["stats"]["dropped_old"] = st["stats"].get("dropped_old", 0) + res["dropped_old"]
@@ -848,7 +851,8 @@ def _after_search(ctx, a, status, res):
         elif it["content_kind"] != "full" and a["source"] not in ("arxiv", "github", "openalex", "pubmed") \
                 and _fetchable(st, a["source"]):
             mode = "browser" if meta.get("detail") == "browser" else "auto"
-            _push(st, _fetch_action(it["url"], "RSS 只有摘要，抓取全文" +
+            _push(st, _fetch_action(it["url"], ("RSS" if a["source"] not in API_SOURCES and a["source"] not in
+                                                ("web_search", "wechat", "sogou_wechat") else "搜索结果") + "只有摘要，抓取全文" +
                                     ("（前端渲染页面，用浏览器）" if mode == "browser" else ""),
                                     prio=30 + int((it.get("relevance") or 0) * 10), mode=mode,
                                     base=it, doc_id=r["doc_id"]))
@@ -861,10 +865,8 @@ def _after_search(ctx, a, status, res):
 def _after_fetch(ctx, a, status, art):
     st = ctx.state
     if status == "error":
-        if isinstance(art, FetchError):
-            _handle_failure(ctx, a, art)
-            return
-        raise art
+        _handle_failure(ctx, a, art if isinstance(art, FetchError) else _as_fetch_error(art, a))
+        return
     item = article_to_item(art, a["url"], base=a.get("base"))
     rel = _rel(st, item.get("title") or "", item.get("text") or "")
     item["relevance"] = max(rel, (a.get("base") or {}).get("relevance") or 0)   # 全文到手后重新判断相关度
@@ -916,7 +918,10 @@ def act(ctx):
     t0 = time.time()
     results = ctx.tool_parallel(calls, max_workers=p.get("parallel", 6))
     for a, (status, out) in zip(batch, results):
-        (_after_search if a["type"] == "search" else _after_fetch)(ctx, a, status, out)
+        try:
+            (_after_search if a["type"] == "search" else _after_fetch)(ctx, a, status, out)
+        except Exception as e:      # 单个结果处理出错只影响它自己
+            _handle_failure(ctx, a, _as_fetch_error(e, a))
     if len(batch) > 1:
         ctx.observe(f"并行 {len(batch)} 个请求，共耗时 {time.time() - t0:.1f}s")
     return "decide"

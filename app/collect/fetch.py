@@ -85,8 +85,17 @@ def _requests_transport(url: str, headers: dict, timeout: float, method: str = "
         raise FetchError("timeout", f"请求超时 {timeout}s", url) from e
     except requests.exceptions.SSLError as e:
         raise FetchError("network", f"TLS 错误：{e}", url) from e
+    except requests.exceptions.ContentDecodingError:
+        # 服务器声明 gzip 但内容并非 gzip（部分站点的 CDN 会这样）：要求不压缩再取一次
+        try:
+            r = requests.request(method, url, headers={**headers, "Accept-Encoding": "identity"}, timeout=timeout,
+                                 allow_redirects=True, json=json_body)
+        except requests.exceptions.RequestException as e2:
+            raise FetchError("bad_content", f"内容解压失败：{str(e2)[:120]}", url) from e2
     except requests.exceptions.ConnectionError as e:
         raise FetchError("network", f"连接失败：{str(e)[:160]}", url) from e
+    except requests.exceptions.RequestException as e:      # 其他请求层错误（分块传输中断、非法跳转等）
+        raise FetchError("bad_content", f"请求异常：{type(e).__name__}：{str(e)[:120]}", url) from e
     return r.status_code, {k.lower(): v for k, v in r.headers.items()}, r.content, r.url
 
 
