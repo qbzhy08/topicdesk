@@ -13,7 +13,7 @@ const STATUS = { pending: "排队中", running: "运行中", waiting_human: "等
   done: "已完成", failed: "失败", cancelled: "已取消", cancelling: "取消中" };
 const NOVELTY = { new: "新进展", update: "内容更新", background: "背景资料", duplicate: "重复报道" };
 const KIND = { full: "全文", excerpt: "节选", summary: "摘要" };
-const GRAPH_NAME = { write: "写作", research: "主题检索", import: "链接导入", recheck: "复查", reassess: "重新评估", demo: "演示" };
+const GRAPH_NAME = { write: "写作", revise: "审阅修改", research: "主题检索", import: "链接导入", recheck: "复查", reassess: "重新评估", demo: "演示" };
 const taskTitle = (t) => ({ recheck: "复查 · ", reassess: "重新评估 · " }[t.graph] || "") + (t.topic === "*" ? "全部主题" : t.topic);
 const ACTIVE = new Set(["pending", "running", "cancelling"]);
 const fmtTime = (t) => t ? new Date(typeof t === "number" ? t * 1000 : t).toLocaleString("zh-CN", { hour12: false }) : "—";
@@ -216,7 +216,8 @@ function setupHistNav() {
     clearTimeout(t);
     t = setTimeout(() => {
       const h = location.hash || "#/";
-      const title = ($("#detail h1")?.textContent || "").trim();
+      const h1 = $("#detail h1");
+      const title = (h1 ? [...h1.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join("") || h1.textContent : "").trim();
       let kind = pageKind(h);
       if (kind === "任务") kind = ($("#detail [data-f=graph]")?.textContent || "").split(" · ")[0].trim() || kind;   // 主题检索 / 写作
       const label = title && kind !== "新主题" ? `${kind}：${title.length > 28 ? title.slice(0, 28) + "…" : title}` : kind;
@@ -1292,16 +1293,27 @@ async function showArticle(id, ver) {
     ${figs.map((f) => figRow(f, `「${esc(secName(f.section))}」第 ${f.para + 1} 段后`)).join("") || '<p class="small muted">这篇文章写于配图功能上线之前，重新写一次即可配图。</p>'}
     ${irej.length ? `<details class="small"><summary>没用上的图（${irej.length}）</summary>${irej.map((r) => `<div class="chk">${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc((r.doc || "").slice(0, 30))}</a>` : esc(r.doc || "")}：${esc(r.why)}</div>`).join("")}</details>` : ""}
     <p class="small muted">质检：清晰度（边缘锐度）、尺寸、压缩、是否缩略图/裁切、与已选图是否重复；位置按图注和图片前后的正文与段落的相似度决定。示意图只用文中已核对过的数据。</p>`;
-  const TABS = [["check", "核对", bad.length], ["imgs", "配图", figs.length + (cover ? 1 : 0)], ["fixes", "改动", fixes.length], ["gaps", "补检", gaps.length], ["docs", "素材", docs.length]];
+  panes.vers = versionsPane(d, v);
+  const TABS = [["check", "核对", bad.length], ["imgs", "配图", figs.length + (cover ? 1 : 0)], ["vers", "版本", d.versions.length], ["fixes", "改动", fixes.length], ["gaps", "补检", gaps.length], ["docs", "素材", docs.length]];
   el.innerHTML = `
     <div data-f="flow"></div>
-    <div class="detail-head art-head"><div><p class="kicker">文章 · ${esc(m.skill?.name || a.skill)} v${esc(m.skill?.version || "")}</p><h1>${esc(a.title || "")}</h1>
+    <div class="detail-head art-head"><div><p class="kicker">文章 · ${esc(m.skill?.name || a.skill)} v${esc(m.skill?.version || "")}</p><h1 class="art-title">${esc(a.title || "")}<button class="rv-btn rv-title" type="button" title="改标题">✎ 改标题</button></h1>
       <p class="meta">第 ${v.version} 版（${esc(v.note || "")}，${fmtTime(v.created_at)}）
         ${d.versions.length > 1 ? `<select id="art-ver">${d.versions.map((x) => `<option value="${x.version}" ${x.version === v.version ? "selected" : ""}>第 ${x.version} 版 · ${esc(x.note || "")}</option>`).join("")}</select>` : ""}
         · <a href="#/task/${esc(m.research_task || "")}">检索任务</a> · <a href="#/task/${esc(a.task_id || "")}">写作过程</a>
         · <span title="Skill 文件内容指纹：同一版本号下内容改过也能看出来">Skill 指纹 <code>${esc(m.skill?.fingerprint || "")}</code></span>
         · 提纲${m.outline_by === "llm" ? "大模型" : "规则"}，正文${m.draft_by === "llm" ? "大模型写作" : "规则摘编"}</p>
       ${(m.prefs || []).length ? `<p class="meta">用到的写作偏好/反馈：${m.prefs.map(esc).join("；")}</p>` : ""}</div></div>
+    ${v.version !== a.current_version ? `<div class="rv-old">你在看第 ${v.version} 版（最新是第 ${a.current_version} 版）。
+      <button type="button" class="ghost" data-rv-restore="${v.version}">恢复为这一版</button>
+      <button type="button" class="ghost" data-rv-diff="${v.version}:${a.current_version}">和最新版对比</button>
+      <a href="#/article/${id}">回到最新版</a></div>` : ""}
+    <div class="rv-bar">
+      <span><b>审阅修改</b> 鼠标移到正文任意一段，点 <i>✎ 改这段</i>；移到配图上可换图、改图注、删除。每次修改都会重新核对出处并存成新版本。</span>
+      <span class="rv-bar-act"><button type="button" class="ghost" id="rv-angle">换选题角度重写</button>
+        ${d.versions.length > 1 ? `<button type="button" class="ghost" data-rv-diff="${Math.max(1, v.version - 1)}:${v.version}">和上一版对比</button>` : ""}</span>
+    </div>
+    <div class="rv-status" id="rv-status" hidden></div>
     <div class="art-layout">
       <article class="art-body">${v.html || ""}</article>
       <aside class="art-side card">
@@ -1310,6 +1322,7 @@ async function showArticle(id, ver) {
       </aside>
     </div>`;
   loadFlow({ article: id }, 3);
+  setupReview(el, d, id, me);
   $("#art-ver") && ($("#art-ver").onchange = (e) => location.hash = `#/article/${id}?v=${e.target.value}`);
   $$(".side-tabs button", el).forEach((b) => b.onclick = () => {
     store.set("artTab", b.dataset.tab);
@@ -1345,6 +1358,293 @@ async function showArticle(id, ver) {
     document.addEventListener("keydown", onKey);
     document.body.append(box);
   });
+}
+
+// ---------------------------------------------------------------- Lv3：人工审阅
+const QUICK_ASKS = ["更口语一点", "更简短，只留要点", "补上具体数字和对比", "去掉空泛的形容词", "开头先说结论"];
+
+function versionsPane(d, v) {
+  const OPN = { title: "改标题", rewrite: "按要求改写", text: "直接改文字", delete_para: "删段", figure_remove: "删图",
+    figure_caption: "改图注", figure_swap: "换图", cover_swap: "换封面", restore: "恢复旧版" };
+  const revs = v.review?.revisions || [];
+  const pct = (x) => x == null ? "—" : Math.round(x * 100) + "%";
+  return `<p class="small muted">每次修改（包括换角度重写、恢复旧版）都存成新版本，旧版本不会丢。勾两个版本可以对比。</p>
+    <div class="vers">${d.versions.slice().reverse().map((x) => `<label class="ver ${x.version === v.version ? "on" : ""}">
+      <input type="checkbox" value="${x.version}" ${x.version === v.version || x.version === v.version - 1 ? "checked" : ""}>
+      <span><b>第 ${x.version} 版</b> ${x.op ? `<i class="tag">${OPN[x.op] || esc(x.op)}</i>` : ""}<br><small>${esc(x.note || "")} · ${fmtTime(x.created_at)}</small></span>
+      <a href="#/article/${d.article.id}?v=${x.version}" class="small">查看</a></label>`).join("")}</div>
+    <div class="row"><button type="button" class="ghost" id="rv-cmp">对比勾选的两版</button></div>
+    ${revs.length ? `<h4>修改记录</h4>${revs.slice().reverse().map((r) => `<div class="chk small"><b>${esc(r.summary)}</b>
+      <br><small class="muted">基于第 ${r.base_version} 版 · ${fmtTime(r.at)}${r.check_delta ? ` · 待确认 ${r.check_delta.problems[0] ?? "—"} → ${r.check_delta.problems[1]}，支持率 ${pct(r.check_delta.support_rate[0])} → ${pct(r.check_delta.support_rate[1])}` : ""}
+      ${r.feedback_memory ? ` · <a href="#/memory/${r.feedback_memory}">已记住这条意见</a>` : ""}</small></div>`).join("")}` : ""}`;
+}
+
+function setupReview(el, d, id, me) {
+  const v = d.version || {}, rv = v.review || { sections: [], figures: [] };
+  const base = v.version;
+  const status = $("#rv-status", el);
+  const secOf = (sid) => rv.sections.find((x) => x.id === sid);
+
+  async function run(body, label) {
+    status.hidden = false;
+    status.className = "rv-status busy";
+    status.innerHTML = `<span class="orb"></span> ${esc(label)}：修改 → 重新核对出处 → 存成新版本…`;
+    $$(".rv-editor button, .rv-btn, .fig-tools button", el).forEach((b) => b.disabled = true);
+    try {
+      const r = await api(`/api/articles/${id}/revise`, { method: "POST", body: { base_version: base, ...body } });
+      for (;;) {
+        await new Promise((ok) => setTimeout(ok, 900));
+        if (current !== me) return;
+        const t = await api(`/api/tasks/${r.id}`);
+        if (t.status === "done") {
+          const res = t.state?.result || {}, e = t.state?.edit || {}, cd = e.check_delta;
+          sessionStorage.setItem("td:rvDone", JSON.stringify({ summary: e.summary, version: res.version, cd,
+            fb: res.feedback_memory, para: body.section ? [body.section, body.para] : null }));
+          return showArticle(id);
+        }
+        if (["failed", "cancelled", "interrupted"].includes(t.status)) throw new Error(t.error || STATUS[t.status]);
+      }
+    } catch (err) {
+      status.className = "rv-status err";
+      status.innerHTML = `修改没有完成：${esc(err.message)}`;
+      $$(".rv-editor button, .rv-btn, .fig-tools button", el).forEach((b) => b.disabled = false);
+    }
+  }
+
+  // 上一次修改的结果
+  try {
+    const done = JSON.parse(sessionStorage.getItem("td:rvDone") || "null");
+    sessionStorage.removeItem("td:rvDone");
+    if (done && done.version === v.version) {
+      const pct = (x) => x == null ? "—" : Math.round(x * 100) + "%";
+      status.hidden = false;
+      status.className = "rv-status ok";
+      status.innerHTML = `✓ 已存为第 ${done.version} 版：${esc(done.summary || "")}${done.cd ? `。重新核对：待你确认 ${done.cd.problems[0] ?? "—"} → <b>${done.cd.problems[1]}</b>，出处支持率 ${pct(done.cd.support_rate[0])} → <b>${pct(done.cd.support_rate[1])}</b>` : ""}
+        ${done.fb ? ` · <a href="#/memory/${done.fb}">这条意见已记住，以后写作会用上</a>` : ""}
+        · <button type="button" class="linkish" data-rv-diff="${done.version - 1}:${done.version}">看改了什么</button>`;
+      if (done.para) {
+        const p = $(`.art-body [data-sec="${done.para[0]}"][data-para="${done.para[1] ?? 0}"]`, el);
+        if (p) { p.scrollIntoView({ block: "center" }); flash(p); }
+      }
+    }
+  } catch { /* */ }
+  if (d.pending) {
+    status.hidden = false;
+    status.className = "rv-status busy";
+    status.innerHTML = `<span class="orb"></span> 这篇文章有一处修改正在进行，完成后会出现新版本。 <a href="#/task/${d.pending.id}">查看进度</a>`;
+  }
+
+  // 改标题
+  $(".rv-title", el).onclick = () => {
+    const h1 = $(".art-title", el);
+    const old = d.article.title || "";
+    h1.innerHTML = `<form class="rv-title-form"><input value="${esc(old)}" maxlength="60"><button>保存</button>
+      <button type="button" class="ghost">取消</button></form>`;
+    const f = $("form", h1), inp = $("input", f);
+    inp.focus(); inp.select();
+    $("button.ghost", f).onclick = () => showArticle(id, v.version !== d.article.current_version ? v.version : undefined);
+    f.onsubmit = (e) => { e.preventDefault(); if (inp.value.trim() && inp.value.trim() !== old) run({ op: "title", title: inp.value.trim() }, "改标题"); };
+  };
+
+  // 段落：悬停出现“改这段”
+  $$(".art-body [data-para]", el).forEach((p) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "rv-btn rv-para";
+    b.textContent = "✎ 改这段";
+    b.onclick = (e) => { e.stopPropagation(); openEditor(p, p.dataset.sec, +p.dataset.para); };
+    p.classList.add("rv-p");
+    p.append(b);
+  });
+  // 小标题：改整节
+  $$(".art-body h2", el).forEach((h) => {
+    const sec = rv.sections.find((x) => x.heading === h.textContent.trim());
+    if (!sec) return;
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "rv-btn rv-sec";
+    b.textContent = "✎ 改整节";
+    b.onclick = () => openEditor(h, sec.id, null);
+    h.classList.add("rv-h");
+    h.append(b);
+  });
+
+  function openEditor(anchor, sid, idx) {
+    $$(".rv-editor", el).forEach((x) => x.remove());
+    const sec = secOf(sid);
+    const cur = idx == null ? sec.paras.join("\n\n") : sec.paras[idx] || "";
+    const box = document.createElement("div");
+    box.className = "rv-editor card";
+    box.innerHTML = `<div class="rv-ed-head"><b>${idx == null ? `改整节「${esc(sec.heading)}」` : `改「${esc(sec.heading)}」第 ${idx + 1} 段`}</b>
+        <span class="rv-tabs"><button type="button" class="on" data-m="ai">让 AI 按要求改</button>${idx == null ? "" : `<button type="button" data-m="me">自己改</button>`}</span>
+        <button type="button" class="ghost rv-x" title="关闭">×</button></div>
+      <div data-pane="ai">
+        <textarea rows="2" placeholder="想怎么改？例如：更口语一点；补上和去年的对比；第二句太绝对了"></textarea>
+        <div class="chips">${QUICK_ASKS.map((q) => `<button type="button" class="chip" data-q="${esc(q)}">${esc(q)}</button>`).join("")}</div>
+        <label class="small rv-rem"><input type="checkbox"> 以后写作也这样（记住这条修改意见）
+          <select><option value="skill">只用于「${esc(v.meta?.skill?.name || "这种写法")}」</option><option value="all">所有写作</option></select></label>
+        <p class="small muted">只用这篇文章的素材改写；改完会重新核对，如果改出了素材里没有的数字，会自动再改一轮。</p>
+      </div>
+      ${idx == null ? "" : `<div data-pane="me" hidden><textarea rows="5">${esc(cur)}</textarea>
+        <p class="small muted">句末的 [n] 是出处编号（对应文末参考资料），改完会重新核对。</p></div>`}
+      <div class="row rv-ed-act"><button type="button" class="rv-go">提交修改</button>
+        ${idx == null ? "" : `<button type="button" class="ghost danger rv-del">删除这段</button>`}</div>`;
+    anchor.after(box);
+    let mode = "ai";
+    $$(".rv-tabs button", box).forEach((t) => t.onclick = () => {
+      mode = t.dataset.m;
+      $$(".rv-tabs button", box).forEach((x) => x.classList.toggle("on", x === t));
+      $$("[data-pane]", box).forEach((x) => x.hidden = x.dataset.pane !== mode);
+    });
+    const ask = $('[data-pane="ai"] textarea', box);
+    ask.focus();
+    $$("[data-q]", box).forEach((c) => c.onclick = () => { ask.value = ask.value ? `${ask.value}；${c.dataset.q}` : c.dataset.q; ask.focus(); });
+    $(".rv-x", box).onclick = () => box.remove();
+    $(".rv-go", box).onclick = () => {
+      if (mode === "ai") {
+        if (ask.value.trim().length < 2) { ask.focus(); return; }
+        run({ op: "rewrite", section: sid, para: idx ?? "all", instruction: ask.value.trim(),
+          remember: $(".rv-rem input", box).checked, remember_scope: $(".rv-rem select", box).value }, "按要求改写");
+      } else {
+        const t = $('[data-pane="me"] textarea', box).value.trim();
+        if (!t || t === cur) return;
+        run({ op: "text", section: sid, para: idx, text: t }, "保存修改");
+      }
+    };
+    const del = $(".rv-del", box);
+    if (del) del.onclick = () => {
+      if (del.dataset.sure) return run({ op: "delete_para", section: sid, para: idx }, "删除段落");
+      del.dataset.sure = "1";
+      del.textContent = "确定删除？再点一次";
+    };
+  }
+
+  // 配图：换图 / 改图注 / 删除；封面：换封面
+  const coverSrc = v.meta?.cover?.src;
+  $$(".art-body figure", el).forEach((fg) => {
+    const src = $("img", fg)?.getAttribute("src");
+    const isCover = src && src === coverSrc && !rv.figures.some((f) => f.src === src);
+    const f = rv.figures.find((x) => x.src === src);
+    if (!isCover && !f) return;
+    const bar = document.createElement("div");
+    bar.className = "fig-tools";
+    bar.innerHTML = isCover ? `<button type="button" data-a="cover">换封面</button>`
+      : `<button type="button" data-a="swap">换图</button><button type="button" data-a="cap">改图注</button><button type="button" data-a="rm">删除</button>`;
+    fg.classList.add("rv-fig");
+    fg.append(bar);
+    bar.onclick = (e) => {
+      e.stopPropagation();
+      const a = e.target.dataset.a;
+      if (a === "rm") {
+        if (e.target.dataset.sure) return run({ op: "figure_remove", figure: f.k }, "删除配图");
+        e.target.dataset.sure = "1";
+        e.target.textContent = "确定删除？";
+      } else if (a === "cap") {
+        const fc = $("figcaption", fg);
+        fc.innerHTML = `<form class="rv-cap"><input value="${esc(f.caption)}"><button>保存</button></form>`;
+        const fm = $("form", fc);
+        $("input", fm).focus();
+        fm.onclick = (ev) => ev.stopPropagation();
+        fm.onsubmit = (ev) => { ev.preventDefault(); run({ op: "figure_caption", figure: f.k, caption: $("input", fm).value.trim() }, "改图注"); };
+      } else if (a === "swap" || a === "cover") {
+        pickImage(a === "cover" ? "换封面" : "换一张图", (imgId) => run(a === "cover"
+          ? { op: "cover_swap", image_id: imgId } : { op: "figure_swap", figure: f.k, image_id: imgId }, a === "cover" ? "换封面" : "换图"));
+      }
+    };
+  });
+
+  async function pickImage(title, done) {
+    const box = document.createElement("div");
+    box.className = "rv-modal";
+    box.innerHTML = `<div class="card rv-modal-in"><div class="rv-ed-head"><b>${title}</b><button type="button" class="ghost rv-x">×</button></div>
+      <p class="small muted">候选：这篇文章素材里质检合格、还没用上的原图（信息图排前面）。</p><div class="rv-grid"><p class="small">加载中…</p></div></div>`;
+    document.body.append(box);
+    const close = () => box.remove();
+    box.onclick = (e) => { if (e.target === box) close(); };
+    $(".rv-x", box).onclick = close;
+    const list = await api(`/api/articles/${id}/images?v=${v.version}`).catch(() => []);
+    $(".rv-grid", box).innerHTML = list.length ? list.map((c) => `<button type="button" class="rv-cand" data-id="${c.image_id}">
+        <img src="${esc(c.src)}" alt="" loading="lazy"><span class="tag ${c.info ? "nv-new" : "rel-lo"}">${c.info ? "信息图" : "照片"}</span>
+        <small>${esc(c.caption || "（无图注）")}<br><span class="muted">${c.w}×${c.h} · ${esc(c.doc_title.slice(0, 30))}</span></small></button>`).join("")
+      : `<p class="small muted">素材里没有其他合格的图片可换。可以删除这张，或在检索任务里补充资料后重写。</p>`;
+    $$(".rv-cand", box).forEach((b) => b.onclick = () => { close(); done(+b.dataset.id); });
+  }
+
+  // 换选题角度：重列提纲、重写全文（写作任务），存为同一篇文章的新版本
+  $("#rv-angle", el).onclick = () => {
+    const box = document.createElement("div");
+    box.className = "rv-modal";
+    box.innerHTML = `<form class="card rv-modal-in"><div class="rv-ed-head"><b>换选题角度重写</b><button type="button" class="ghost rv-x">×</button></div>
+      <p class="small">用同一批资料，按新的角度重新列提纲、重写全文，存为这篇文章的新版本（旧版本保留，可以对比）。</p>
+      <label>新的选题角度<textarea name="angle" rows="2" required placeholder="例如：从中小团队选型的角度写，重点讲成本和部署难度"></textarea></label>
+      <label>标题（可空，空着由 AI 按新角度拟）<input name="title" maxlength="40"></label>
+      <label class="small"><input type="checkbox" name="remember"> 以后写这个主题也用这个角度</label>
+      <div class="row"><button>开始重写</button><small class="muted" data-msg></small></div></form>`;
+    document.body.append(box);
+    const f = $("form", box);
+    const close = () => box.remove();
+    box.onclick = (e) => { if (e.target === box) close(); };
+    $(".rv-x", box).onclick = close;
+    f.angle.focus();
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        const r = await api(`/api/articles/${id}/rewrite`, { method: "POST",
+          body: { angle: f.angle.value.trim(), title: f.title.value.trim(), remember: f.remember.checked } });
+        close();
+        location.hash = `#/task/${r.id}`;
+      } catch (err) { $("[data-msg]", f).textContent = err.message; }
+    };
+  };
+
+  // 版本：恢复 / 对比
+  if (el._rvClick) el.removeEventListener("click", el._rvClick);   // #detail 会复用：只保留一个监听
+  el._rvClick = async (e) => {
+    if (current !== me) return;
+    const r = e.target.closest("[data-rv-restore]");
+    if (r) {
+      const res = await api(`/api/articles/${id}/restore`, { method: "POST", body: { version: +r.dataset.rvRestore } });
+      sessionStorage.setItem("td:rvDone", JSON.stringify({ summary: `恢复到第 ${r.dataset.rvRestore} 版`, version: res.version }));
+      return location.hash === `#/article/${id}` ? showArticle(id) : (location.hash = `#/article/${id}`);
+    }
+    const df = e.target.closest("[data-rv-diff]");
+    if (df) { const [x, y] = df.dataset.rvDiff.split(":").map(Number); return showDiff(id, x, y); }
+    if (e.target.id === "rv-cmp") {
+      const vs = $$(".vers input:checked", el).map((x) => +x.value).sort((p, q) => p - q);
+      if (vs.length !== 2) { e.target.textContent = "请勾选两个版本"; return; }
+      showDiff(id, vs[0], vs[1]);
+    }
+  };
+  el.addEventListener("click", el._rvClick);
+}
+
+async function showDiff(id, a, b) {
+  const d = await api(`/api/articles/${id}/diff?a=${a}&b=${b}`);
+  const box = document.createElement("div");
+  box.className = "rv-modal";
+  const md = (t) => esc(t).replace(/\[(\d+)\]/g, "<sup>$1</sup>");
+  let same = 0;
+  const rows = [];
+  const flush = () => { if (same) rows.push(`<p class="df-same">… ${same} 段没有改动 …</p>`); same = 0; };
+  for (const x of d.items) {
+    if (x.t === "same") { same++; continue; }
+    flush();
+    if (x.t === "add") rows.push(`<div class="df add"><i>新增</i>${md(x.text)}</div>`);
+    else if (x.t === "del") rows.push(`<div class="df del"><i>删除</i>${md(x.text)}</div>`);
+    else if (x.t === "rewrite") rows.push(`<div class="df mod"><i>改写</i><del>${md(x.old)}</del><br><ins>${md(x.new)}</ins></div>`);
+    else rows.push(`<div class="df mod"><i>修改</i>${x.parts.map(([t, o, n]) => t === "equal" ? md(o)
+      : `${o ? `<del>${md(o)}</del>` : ""}${n ? `<ins>${md(n)}</ins>` : ""}`).join("")}</div>`);
+  }
+  flush();
+  box.innerHTML = `<div class="card rv-modal-in wide"><div class="rv-ed-head"><b>第 ${a} 版 → 第 ${b} 版</b>
+      <span class="small muted">修改 ${d.stats.mod + d.stats.rewrite} 段 · 新增 ${d.stats.add} 段 · 删除 ${d.stats.del} 段</span><button type="button" class="ghost rv-x">×</button></div>
+    <div class="df-list">${rows.join("") || `<p class="small muted">两个版本正文相同。</p>`}</div></div>`;
+  document.body.append(box);
+  const close = () => { box.remove(); document.removeEventListener("keydown", onKey); };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  document.addEventListener("keydown", onKey);
+  box.onclick = (e) => { if (e.target === box) close(); };
+  $(".rv-x", box).onclick = close;
 }
 
 function flash(node) {

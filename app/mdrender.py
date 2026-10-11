@@ -9,6 +9,7 @@ import html
 import re
 
 CITE = re.compile(r"\[(\d{1,2})\](?!\()")
+PARA_MARK = re.compile(r"^⟦p:([\w-]+):(\d+)⟧")
 
 
 def _inline(s: str, cite_href: str = "#ref-") -> str:
@@ -32,8 +33,21 @@ def _para(text: str, cite_href: str) -> str:
 def render(md: str, cite_href: str = "#ref-") -> str:
     lines = (md or "").replace("\r\n", "\n").split("\n")
     out, i, in_refs = [], 0, False
+    pend = None              # 段落标记 ⟦p:节:段⟧（审阅用）：加到这一段渲染出的第一个标签上
+
+    def tag_pending():
+        nonlocal pend
+        if pend and len(out) > pend[2]:
+            out[pend[2]] = re.sub(r"^<(\w+)", lambda m: f'<{m.group(1)} data-sec="{pend[0]}" data-para="{pend[1]}"',
+                                  out[pend[2]], count=1)
+            pend = None
     while i < len(lines):
+        tag_pending()
         ln = lines[i]
+        pm = PARA_MARK.match(ln)
+        if pm:
+            pend = (html.escape(pm.group(1)), pm.group(2), len(out))
+            ln = lines[i] = ln[pm.end():]
         if not ln.strip():
             i += 1
             continue
@@ -96,4 +110,5 @@ def render(md: str, cite_href: str = "#ref-") -> str:
             out.append(_para(" ".join(buf) if all(b.isascii() for b in buf) else "".join(buf), cite_href))
         else:
             i += 1
+    tag_pending()
     return "\n".join(out)

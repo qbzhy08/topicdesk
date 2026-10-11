@@ -35,7 +35,7 @@ OUTLINE_PROMPT = """你是一位编辑。用下面的素材，按 Skill「{name}
 {{"title": "文章标题（具体、不夸张，不超过 28 字）",
   "sections": [{{"id": "节的 id", "heading": "小标题", "points": ["这一节要讲的要点，一句话"], "sources": [1, 3]}}],
   "gaps": [{{"section": "节的 id", "question": "缺什么资料", "query": "检索词（2-6 个中文字或 2-4 个英文词）"}}]}}
-检索阶段已经覆盖的子问题：{covered}
+{angle}检索阶段已经覆盖的子问题：{covered}
 检索阶段已经专门补检过、仍然缺资料的方向（不要再列为缺口，写作时如实说明资料不足）：{tried}
 gaps：只有某一节的目标在素材里完全找不到依据、而且不属于上面两类时才列（最多 2 个），否则给空数组。
 多数情况下素材已经够用，应给空数组。"""
@@ -94,6 +94,7 @@ def load(ctx):
     if not rt or rt["status"] != "done":
         raise ValueError("研究任务不存在或还没有完成")
     st["research_task"] = rt["id"]
+    st["write_task"] = ctx.task_id
     rs = rt["state"] or {}
     st["terms"] = ((rs.get("plan") or {}).get("terms_zh") or [])[:6]
     st["source_ids"] = ((rs.get("report") or {}).get("source_ids") or [])
@@ -108,6 +109,8 @@ def load(ctx):
     prefs = [x for x in rec["preferences"] if (x["meta"] or {}).get("type") in ("style", "background", "focus", "exclude")
              or x["kind"] == "feedback"]
     st["prefs"] = [x["line"] for x in prefs]
+    if p.get("angle"):
+        st["prefs"].append(f"本次选题角度（用户指定）：{p['angle']}")
     st["gap_round"] = 0
     st["fix_round"] = 0
     st["extra_docs"] = []
@@ -185,7 +188,9 @@ def outline(ctx):
                     structure="\n".join(f"- id={s['id']}｜{s['heading']}：{s['goal']}" for s in sk["structure"]),
                     materials=_materials_brief(docs), facts=_facts_text(st["facts"]),
                     covered="、".join(st.get("covered") or []) or "（无记录）",
-                    tried="、".join(g["name"] for g in st.get("research_gaps") or []) or "（无）")}],
+                    tried="、".join(g["name"] for g in st.get("research_gaps") or []) or "（无）",
+                    angle=(f"用户指定的选题角度（标题和各节要点都要围绕它组织）：{ctx.params['angle']}\n"
+                           if ctx.params.get("angle") else ""))}],
                 max_tokens=1800)["data"]
             title = str(d.get("title") or "")[:40] or None
             by = {x.get("id"): x for x in d.get("sections") or [] if isinstance(x, dict)}
@@ -198,7 +203,7 @@ def outline(ctx):
             gaps = [g for g in d.get("gaps") or [] if isinstance(g, dict) and g.get("query")][:2]
         except Exception as e:  # noqa: BLE001
             ctx.think(f"大模型列提纲失败（{str(e)[:60]}），按 Skill 结构直接写")
-    st["title"] = title or f"{ctx.topic}：{sk['name']}"
+    st["title"] = (ctx.params.get("title") or "").strip()[:40] or title or f"{ctx.topic}：{sk['name']}"
     st["sections"] = base
     st["outline_by"] = "llm" if title else "rule"
     ctx.think(f"提纲《{st['title']}》：" + "；".join(f"{s['heading']}（素材 {s['sources'] or '全部'}）" for s in base))
@@ -819,9 +824,19 @@ def illustrate(ctx):
 
 def save(ctx):
     st = ctx.state
-    docs = _docs(st)
     if not st.get("sections") or not all("md" in x for x in st["sections"]):
         raise ValueError("预算耗尽，文章还没写完，无法保存")
+    v, md, rep = build_and_save(st, note=ctx.params.get("note") or "初稿", task_id=ctx.task_id)
+    st["result"] = {"article_id": st["article_id"], "version": v}
+    s = rep["summary"]
+    ctx.observe(f"保存文章第 {v} 版：{len(md)} 字，引用 {len(rep['used'])} 篇资料，出处支持率 "
+                f"{(s['support_rate'] or 0) * 100:.0f}%，遗留问题 {s['problems']} 处")
+    return END
+
+
+def build_and_save(st, note: str, task_id: str | None, extra_meta: dict | None = None) -> tuple[int, str, dict]:
+    """由写作状态（节、配图、封面、素材）拼成文章、做成稿检查并存为新版本。写作和人工审阅修改共用。"""
+    docs = _docs(st)
     rep = st.get("check") or writing.check(st["sections"], docs)
     figs, cover = st.get("figures") or [], st.get("cover")
     secs, refmap = writing.renumber(ill.insert_figures(st["sections"], figs))
@@ -833,20 +848,16 @@ def save(ctx):
     sk = st["skill"]
     meta = {"skill": {"id": sk["id"], "name": sk["name"], "version": sk["version"], "fingerprint": sk["fingerprint"]},
             "research_task": st["research_task"], "ranking_version": st.get("ranking_version"),
-            "docs": [{**{k: d[k] for k in ("n", "id", "title", "url", "source_id", "label", "why", "kind")},
+            "docs": [{**{k: d.get(k) for k in ("n", "id", "title", "url", "source_id", "label", "why", "kind")},
                       "ref": refmap.get(d["n"])} for d in st["docs"]],
             "refmap": {str(k): v for k, v in refmap.items()},
             "facts": st["facts"], "sections": st["sections"], "check": rep, "fixes": st["fixes"],
             "gap_log": st["gap_log"], "prefs": st["prefs"],
             "figures": figs, "cover": cover, "image_rejected": st.get("image_rejected") or [], "image_checks": image_checks,
-            "chart_log": st.get("chart_log") or [], "outline_by": st["outline_by"], "draft_by": st["draft_by"]}
-    v = save_version(st["article_id"], md, meta, note=ctx.params.get("note") or "初稿", title=st["title"],
-                     task_id=ctx.task_id)
-    st["result"] = {"article_id": st["article_id"], "version": v}
-    s = rep["summary"]
-    ctx.observe(f"保存文章第 {v} 版：{len(md)} 字，引用 {len(rep['used'])} 篇资料，出处支持率 "
-                f"{(s['support_rate'] or 0) * 100:.0f}%，遗留问题 {s['problems']} 处")
-    return END
+            "chart_log": st.get("chart_log") or [], "outline_by": st["outline_by"], "draft_by": st["draft_by"],
+            "write_task": st.get("write_task"), "revisions": st.get("revisions") or [], **(extra_meta or {})}
+    v = save_version(st["article_id"], md, meta, note=note, title=st["title"], task_id=task_id)
+    return v, md, rep
 
 
 def save_version(aid: str, md: str, meta: dict, note: str, title: str | None = None, task_id: str | None = None,

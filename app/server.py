@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import re
 import threading
 import time
 
@@ -69,7 +70,7 @@ def create():
 @app.get("/api/tasks")
 def list_tasks():
     rows = db.query("SELECT id, graph, topic, status, current_node, usage, error, created_at, "
-                    "updated_at FROM tasks ORDER BY created_at DESC LIMIT 100")
+                    "updated_at FROM tasks WHERE graph != 'revise' ORDER BY created_at DESC LIMIT 100")   # 审阅修改记在文章版本里
     return jsonify(rows)
 
 
@@ -733,8 +734,168 @@ def get_article(aid):
     v = db.query_one("SELECT * FROM article_versions WHERE article_id=? AND version=?", (aid, ver))
     versions = db.query("SELECT version, note, created_at FROM article_versions WHERE article_id=? ORDER BY version", (aid,))
     if v:
-        v["html"] = mdrender.render(_mark_problems(v["markdown"], v.get("meta") or {}))
-    return jsonify(article=_article_row(a), version=v, versions=versions)
+        meta = v.get("meta") or {}
+        v["html"] = mdrender.render(_mark_problems(_mark_paras(v["markdown"], meta), meta))
+        v["review"] = _review_view(meta)
+    versions = db.query("SELECT version, note, created_at, json_extract(meta, '$.edit.op') AS op FROM article_versions "
+                        "WHERE article_id=? ORDER BY version", (aid,))
+    running = db.query_one("SELECT id, status, params FROM tasks WHERE graph IN ('revise','write') AND status IN "
+                           "('pending','running') AND json_extract(params, '$.article_id')=? ORDER BY created_at DESC",
+                           (aid,))
+    return jsonify(article=_article_row(a), version=v, versions=versions, pending=running)
+
+
+def _review_view(meta: dict) -> dict:
+    """审阅用：每节每段（用户看到的出处编号）和配图列表。"""
+    from .graphs.revise import to_display_numbers
+    from . import illustrate as ill
+    secs = [{"id": s["id"], "heading": s.get("heading"),
+             "paras": [to_display_numbers(x, meta) for x in ill.paragraphs(s.get("md"))]} for s in meta.get("sections") or []]
+    figs = [{"k": k, "src": f.get("src"), "caption": to_display_numbers(f.get("caption") or "", meta),
+             "section": f.get("section"), "para": f.get("para"), "kind": f.get("kind"), "diagram": f.get("diagram")}
+            for k, f in enumerate(meta.get("figures") or [])]
+    return {"sections": secs, "figures": figs, "revisions": meta.get("revisions") or [], "edit": meta.get("edit")}
+
+
+def _mark_paras(md: str, meta: dict) -> str:
+    """在每节每段开头加 ⟦p:节:段⟧，渲染成 data-sec / data-para，文章页上悬停某段就能改这一段。"""
+    from .graphs.revise import to_display_numbers
+    from . import illustrate as ill
+    body, sep, refs = md.partition("\n## 参考资料")
+    for s in meta.get("sections") or []:
+        start = body.find(f"\n## {s.get('heading')}\n")
+        if start < 0:
+            continue
+        end = body.find("\n## ", start + 4)
+        end = len(body) if end < 0 else end
+        chunk, pos = body[start:end], 0
+        for k, para in enumerate(ill.paragraphs(s.get("md"))):
+            t = to_display_numbers(para, meta).strip()
+            j = chunk.find(t, pos)
+            if j < 0 or not t:
+                continue
+            mark = f"⟦p:{s['id']}:{k}⟧"
+            chunk = chunk[:j] + mark + chunk[j:]
+            pos = j + len(mark) + len(t)
+        body = body[:start] + chunk + body[end:]
+    return body + sep + refs
+
+
+@app.post("/api/articles/<aid>/revise")
+def revise_article(aid):
+    """审阅修改：改标题 / 改写或直接改某段 / 删段 / 配图删除、替换、改图注 / 换封面。异步执行，返回任务 id。"""
+    from .graphs.revise import OPS
+    a = db.query_one("SELECT * FROM articles WHERE id=?", (aid,))
+    if not a:
+        abort(404)
+    b = request.get_json(force=True) or {}
+    if b.get("op") not in OPS:
+        return jsonify(error="不支持的修改"), 400
+    keep = ("op", "base_version", "title", "section", "para", "instruction", "text", "figure", "caption", "image_id",
+            "remember", "remember_scope", "feedback")
+    params = {k: b[k] for k in keep if k in b}
+    params["article_id"] = aid
+    tid = create_task("revise", a["topic"], params=params, parent_task_id=a["task_id"],
+                      budget={"max_tool_calls": 40, "max_steps": 20})
+    runner.start(tid)
+    return jsonify(id=tid), 201
+
+
+@app.post("/api/articles/<aid>/rewrite")
+def rewrite_article(aid):
+    """换选题角度：重列提纲、重写全文（写作任务），结果存为同一篇文章的新版本。"""
+    from . import skills
+    a = db.query_one("SELECT * FROM articles WHERE id=?", (aid,))
+    if not a:
+        abort(404)
+    v = db.query_one("SELECT meta FROM article_versions WHERE article_id=? AND version=?", (aid, a["current_version"]))
+    meta = (v or {}).get("meta") or {}
+    b = request.get_json(force=True) or {}
+    angle, title = (b.get("angle") or "").strip(), (b.get("title") or "").strip()
+    if len(angle) < 4:
+        return jsonify(error="请写清楚新的选题角度，例如：从中小企业落地成本的角度写"), 400
+    skill = b.get("skill") or (meta.get("skill") or {}).get("id") or a["skill"]
+    try:
+        skills.get(skill)
+    except skills.SkillError as e:
+        return jsonify(error=str(e)), 400
+    rt = meta.get("research_task")
+    if not rt:
+        return jsonify(error="找不到这篇文章的检索任务"), 400
+    params = {"research_task": rt, "skill": skill, "article_id": aid, "angle": angle,
+              "note": f"换角度重写：{angle[:40]}"}
+    if title:
+        params["title"] = title
+    wid = create_task("write", a["topic"], params=params, parent_task_id=rt)
+    if b.get("remember"):
+        from . import memory as mem
+        mem.add("user", "feedback", f"选题角度偏好：{angle}", applies_to=f"topic:{a['topic']}",
+                source={"by": "user", "confirmed": True, "article": aid}, meta={"type": "feedback", "from": "换角度重写"},
+                actor="user", task_id=wid)
+    runner.start(wid)
+    return jsonify(id=wid), 201
+
+
+@app.get("/api/articles/<aid>/images")
+def article_image_candidates(aid):
+    from .graphs.revise import image_candidates
+    a = db.query_one("SELECT current_version FROM articles WHERE id=?", (aid,))
+    if not a:
+        abort(404)
+    ver = request.args.get("v", type=int) or a["current_version"]
+    v = db.query_one("SELECT meta FROM article_versions WHERE article_id=? AND version=?", (aid, ver))
+    return jsonify(image_candidates((v or {}).get("meta") or {}))
+
+
+@app.post("/api/articles/<aid>/restore")
+def restore_article(aid):
+    """回到旧版本：把旧版本复制为新的最新版本（历史不丢）。"""
+    from .graphs.write import save_version
+    b = request.get_json(force=True) or {}
+    v = db.query_one("SELECT * FROM article_versions WHERE article_id=? AND version=?", (aid, b.get("version")))
+    if not v:
+        abort(404)
+    meta = {**(v["meta"] or {}), "edit": {"op": "restore", "summary": f"恢复到第 {v['version']} 版"}}
+    m = re.match(r"#\s+(.+)", v["markdown"])
+    nv = save_version(aid, v["markdown"], meta, note=f"恢复到第 {v['version']} 版", title=m.group(1).strip() if m else None)
+    return jsonify(version=nv)
+
+
+@app.get("/api/articles/<aid>/diff")
+def article_diff(aid):
+    """两个版本按段落对比：相同、删除、新增、修改（修改的段落再标出句内差异）。"""
+    import difflib
+    a, b = request.args.get("a", type=int), request.args.get("b", type=int)
+    va = db.query_one("SELECT markdown FROM article_versions WHERE article_id=? AND version=?", (aid, a))
+    vb = db.query_one("SELECT markdown FROM article_versions WHERE article_id=? AND version=?", (aid, b))
+    if not va or not vb:
+        abort(404)
+
+    def paras(md):
+        return [p.strip() for p in re.split(r"\n\s*\n", md.split("\n## 参考资料")[0]) if p.strip()]
+    pa, pb = paras(va["markdown"]), paras(vb["markdown"])
+    out = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, pa, pb, autojunk=False).get_opcodes():
+        if op == "equal":
+            out += [{"t": "same", "text": x} for x in pa[i1:i2]]
+            continue
+        olds, news = pa[i1:i2], pb[j1:j2]
+        for k in range(max(len(olds), len(news))):
+            o = olds[k] if k < len(olds) else None
+            n = news[k] if k < len(news) else None
+            if o is not None and n is not None:
+                sm = difflib.SequenceMatcher(None, o, n, autojunk=False)
+                if sm.ratio() >= 0.35:
+                    out.append({"t": "mod", "parts": [[tag, o[x1:x2], n[y1:y2]] for tag, x1, x2, y1, y2 in sm.get_opcodes()]})
+                else:                     # 同一位置整段重写：新旧放在一起看
+                    out.append({"t": "rewrite", "old": o, "new": n})
+                continue
+            if o is not None:
+                out.append({"t": "del", "text": o})
+            if n is not None:
+                out.append({"t": "add", "text": n})
+    stats = {k: sum(1 for x in out if x["t"] == k) for k in ("same", "mod", "rewrite", "add", "del")}
+    return jsonify(a=a, b=b, items=out, stats=stats)
 
 
 @app.get("/api/flow")

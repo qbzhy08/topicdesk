@@ -358,3 +358,158 @@ class FlowTest(WriteBase):
         h = c.get(f"/api/flow?article={aid}").get_json()
         self.assertEqual((h["research"]["id"], h["here_write"], h["here_article"]), (self.t1, t1["id"], aid))
         self.assertEqual(c.get("/api/flow?task=nope").status_code, 404)
+
+
+class ReviewWriter(FakeWriter):
+    """审阅改写：第一次故意写一个出处里没有的数字，核对不过后第二次改对。"""
+
+    def __call__(self, messages, json_mode=False, max_tokens=1500, **kw):
+        p = messages[-1]["content"]
+        if "用户的修改要求（必须做到）" in p:
+            self.calls.append(p)
+            a = _num_of(p, "成绩公布")
+            if "上一稿核对发现这些问题" in p:
+                return {"content": f"官方宣称该模型支持 128K 上下文[{a}]，这一点在发布时就已说明。", "_cost": 0}
+            return {"content": f"简单说：官方宣称它能处理 999K 上下文[{a}]。", "_cost": 0}
+        return super().__call__(messages, json_mode, max_tokens, **kw)
+
+
+class ReviewTest(WriteBase):
+    """Lv3 人工审阅：每次修改存新版本、重新核对；修改意见可写入长期记忆，下次写作用上。"""
+
+    def setUp(self):
+        super().setUp()
+        from app.server import create_app
+        from app import server
+        self.c = create_app().test_client()
+        self._start = server.runner.start
+        server.runner.start = lambda tid: None          # 测试里同步执行
+        self.server = server
+
+    def tearDown(self):
+        self.server.runner.start = self._start
+        super().tearDown()
+
+    def revise(self, aid, **body):
+        r = self.c.post(f"/api/articles/{aid}/revise", json=body)
+        self.assertEqual(r.status_code, 201, r.get_json())
+        tid = r.get_json()["id"]
+        status = run_task(tid)
+        t = db.query_one("SELECT * FROM tasks WHERE id=?", (tid,))
+        return status, t
+
+    def art(self, aid):
+        return self.c.get(f"/api/articles/{aid}").get_json()
+
+    def test_title_text_delete_and_versions(self):
+        task, v1 = self.write("brief", no_llm=True)
+        aid = task["state"]["result"]["article_id"]
+        d = self.art(aid)
+        self.assertIn('data-para="0"', d["version"]["html"])               # 正文段落带定位标记
+        secs = d["version"]["review"]["sections"]
+        sec = next(s for s in secs if s["paras"])
+        # 改标题
+        st, t = self.revise(aid, op="title", title="长上下文评测：宣称与复现")
+        self.assertEqual(st, "done", t["error"])
+        d = self.art(aid)
+        self.assertEqual(d["article"]["title"], "长上下文评测：宣称与复现")
+        self.assertEqual(d["article"]["current_version"], 2)
+        self.assertIn("# 长上下文评测：宣称与复现", d["version"]["markdown"])
+        self.assertEqual(d["article"]["task_id"], task["id"])            # 文章仍指向写作任务（流程条不变）
+        # 直接改文字：用户看到的是重排后的编号，内部换回素材编号再核对
+        old = sec["paras"][0]
+        n = re.findall(r"\[(\d+)\]", old)[0]
+        new_text = f"这是用户自己改写的一句话，保留出处[{n}]。"
+        st, t = self.revise(aid, op="text", section=sec["id"], para=0, text=new_text)
+        self.assertEqual(st, "done", t["error"])
+        d = self.art(aid)
+        self.assertIn(new_text.replace(f"[{n}]", "["), d["version"]["markdown"].replace(f"[{n}]", "["))
+        self.assertEqual(d["version"]["meta"]["edit"]["op"], "text")
+        self.assertEqual(len(d["version"]["meta"]["revisions"]), 2)
+        # 版本对比
+        df = self.c.get(f"/api/articles/{aid}/diff?a=2&b=3").get_json()
+        self.assertGreaterEqual(df["stats"]["mod"] + df["stats"]["rewrite"] + df["stats"]["add"], 1)
+        self.assertGreater(df["stats"]["same"], 0)
+        self.assertTrue(any(x["t"] in ("mod", "rewrite", "add") and "用户自己改写" in json.dumps(x, ensure_ascii=False)
+                            for x in df["items"]))
+        # 删段
+        n_before = len(self.art(aid)["version"]["review"]["sections"][secs.index(sec)]["paras"])
+        st, t = self.revise(aid, op="delete_para", section=sec["id"], para=0)
+        self.assertEqual(st, "done", t["error"])
+        self.assertEqual(len(self.art(aid)["version"]["review"]["sections"][secs.index(sec)]["paras"]), n_before - 1)
+        # 回到第 1 版（复制成新版本，历史不丢）
+        r = self.c.post(f"/api/articles/{aid}/restore", json={"version": 1}).get_json()
+        self.assertEqual(r["version"], 5)
+        d = self.art(aid)
+        self.assertEqual(d["version"]["markdown"], v1["markdown"])
+        self.assertEqual(d["article"]["title"], v1["markdown"].split("\n")[0][2:])
+        self.assertEqual(len(d["versions"]), 5)
+
+    def test_rewrite_rechecks_and_remembers_feedback(self):
+        fake = ReviewWriter()
+        llm.available, llm.chat = (lambda: True), fake
+        task, v1 = self.write("brief")
+        aid = task["state"]["result"]["article_id"]
+        sec = next(s for s in self.art(aid)["version"]["review"]["sections"] if s["paras"])
+        st, t = self.revise(aid, op="rewrite", section=sec["id"], para=0, instruction="更口语一点，开头用“简单说”",
+                            remember=True, remember_scope="skill")
+        self.assertEqual(st, "done", t["error"])
+        rs = t["state"]
+        self.assertEqual(sum("用户的修改要求" in c for c in fake.calls), 2)        # 第一次编了 999K，核对不过再改
+        self.assertTrue(any(f.get("why") == "审阅改写后按核对结果再改" for f in rs["fixes"]))
+        md = self.art(aid)["version"]["markdown"]
+        self.assertNotIn("999K", md)
+        self.assertIn("128K", md)
+        # 修改意见进入长期记忆，下次用同一 Skill 写作时召回
+        fb = db.query_one("SELECT * FROM memories WHERE kind='feedback' AND content LIKE '%简单说%'")
+        self.assertIsNotNone(fb)
+        self.assertEqual(fb["applies_to"], "skill:brief")
+        t2, _ = self.write("brief")
+        self.assertTrue(any("简单说" in x for x in t2["state"]["prefs"]))
+        t3, _ = self.write("explainer")
+        self.assertFalse(any("简单说" in x for x in t3["state"]["prefs"]))   # 只对这个 Skill 生效
+
+    def test_rewrite_needs_llm(self):
+        task, _ = self.write("brief", no_llm=True)
+        aid = task["state"]["result"]["article_id"]
+        llm.available = lambda: False
+        sec = next(s for s in self.art(aid)["version"]["review"]["sections"] if s["paras"])
+        st, t = self.revise(aid, op="rewrite", section=sec["id"], para=0, instruction="更短")
+        self.assertEqual(st, "failed")
+        self.assertIn("需要大模型", t["error"])
+        self.assertEqual(self.art(aid)["article"]["current_version"], 1)      # 失败不产生新版本
+
+    def test_figures_edit(self):
+        task, v1 = self.write("brief", no_llm=True)
+        aid = task["state"]["result"]["article_id"]
+        figs = self.art(aid)["version"]["review"]["figures"]
+        if not figs:
+            self.skipTest("测试素材没有配图")
+        st, t = self.revise(aid, op="figure_caption", figure=0, caption="新的图注（测试）")
+        self.assertEqual(st, "done", t["error"])
+        self.assertIn("*新的图注（测试）*", self.art(aid)["version"]["markdown"])
+        cands = self.c.get(f"/api/articles/{aid}/images").get_json()
+        if cands:
+            st, t = self.revise(aid, op="figure_swap", figure=0, image_id=cands[0]["image_id"])
+            self.assertEqual(st, "done", t["error"])
+            self.assertIn(cands[0]["src"], self.art(aid)["version"]["markdown"])
+        n = len(self.art(aid)["version"]["review"]["figures"])
+        st, t = self.revise(aid, op="figure_remove", figure=0)
+        self.assertEqual(st, "done", t["error"])
+        self.assertEqual(len(self.art(aid)["version"]["review"]["figures"]), n - 1)
+
+    def test_change_angle_rewrites_same_article(self):
+        task, v1 = self.write("brief", no_llm=True)
+        aid = task["state"]["result"]["article_id"]
+        r = self.c.post(f"/api/articles/{aid}/rewrite", json={"angle": "从开发者选型的角度写", "title": "选长上下文模型前要看什么"})
+        self.assertEqual(r.status_code, 201, r.get_json())
+        wid = r.get_json()["id"]
+        w = db.query_one("SELECT params FROM tasks WHERE id=?", (wid,))
+        w["params"]["no_llm"] = True
+        db.update("tasks", "id", wid, {"params": w["params"]})
+        self.assertEqual(run_task(wid), "done")
+        d = self.art(aid)
+        self.assertEqual(d["article"]["current_version"], 2)
+        self.assertEqual(d["article"]["title"], "选长上下文模型前要看什么")
+        self.assertIn("本次选题角度（用户指定）：从开发者选型的角度写", d["version"]["meta"]["prefs"])
+        self.assertEqual(self.c.post(f"/api/articles/{aid}/rewrite", json={"angle": "短"}).status_code, 400)
