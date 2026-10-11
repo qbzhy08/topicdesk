@@ -517,3 +517,44 @@ class QualityTest(CollectBase):
         self.assertNotIn(pw["id"], rep["delivered_docs"])
         blog = db.query_one("SELECT meta FROM documents WHERE url='https://blog.example.com/long-context'")
         self.assertGreaterEqual(blog["meta"]["relevance"], 0.7)
+
+
+class RecheckScopeTest(CollectBase):
+    """手动复查：只查当前任务的资料，标题显示主题，结果写入报告；没有待复查页面时说明原因。"""
+
+    def test_scoped_manual_recheck(self):
+        params = {"no_llm": True, "max_docs": 30, "en_keywords": ["long context LLM"],
+                  "sources": ["hn", "github", "arxiv"]}
+        t1 = create_task("research", "开源大模型 长上下文 评测", params=params)
+        self.assertEqual(run_task(t1), "done")
+        other = store.upsert_document({"url": "https://github.com/other/repo", "title": "other",
+                                       "text": "x" * 50, "content_kind": "full", "source_id": "web"}, "别的主题")
+        from app import server
+        c = server.app.test_client()
+        from app.harness import runner
+        started = []
+        old = runner.start
+        runner.start = started.append
+        try:
+            r = c.post("/api/recheck", json={"task": t1})
+            r2 = c.post("/api/recheck", json={"task": t1})          # 重复点击：复用同一个任务
+        finally:
+            runner.start = old
+        rid = r.json["id"]
+        self.assertEqual(r2.json["id"], rid)
+        task = db.query_one("SELECT * FROM tasks WHERE id=?", (rid,))
+        self.assertEqual(task["topic"], "开源大模型 长上下文 评测")
+        self.assertEqual(run_task(rid), "done")
+        rep = db.query_one("SELECT state FROM tasks WHERE id=?", (rid,))["state"]["report"]
+        self.assertEqual(rep["kind"], "recheck")
+        self.assertTrue(rep["force"])
+        urls = {i["url"] for i in rep["items"]}
+        self.assertIn("https://github.com/example/longeval", urls)      # 仓库属于可能变化的页面
+        self.assertNotIn("https://github.com/other/repo", urls)         # 其他主题的资料不在范围内
+        self.assertTrue(all(i["outcome"] in ("unchanged", "updated", "enriched", "failed") for i in rep["items"]))
+
+    def test_nothing_to_recheck(self):
+        tid = create_task("recheck", "空主题", params={"force": True})
+        self.assertEqual(run_task(tid), "done")
+        rep = db.query_one("SELECT state FROM tasks WHERE id=?", (tid,))["state"]["report"]
+        self.assertEqual(rep["checked"], 0)

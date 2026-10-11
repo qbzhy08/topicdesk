@@ -303,8 +303,19 @@ def import_link():
 
 @app.post("/api/recheck")
 def start_recheck():
+    """手动复查：范围优先级 本次任务的资料 > 主题 > 全部。同一范围正在复查时不重复创建。"""
     b = request.get_json(silent=True) or {}
-    tid = create_task("recheck", b.get("topic") or "*", params={"limit": b.get("limit", 20)})
+    topic, params = b.get("topic") or "*", {"limit": b.get("limit", 20), "force": True}
+    if b.get("task"):
+        t = db.query_one("SELECT topic FROM tasks WHERE id=?", (b["task"],))
+        if not t:
+            return jsonify(error="任务不存在"), 404
+        topic, params["scope_task"] = t["topic"], b["task"]
+    for r in db.query("SELECT id, params FROM tasks WHERE graph='recheck' AND topic=? AND "
+                      "status IN ('pending','running')", (topic,)):
+        if (r["params"] or {}).get("scope_task") == params.get("scope_task"):
+            return jsonify(id=r["id"], existing=True), 200
+    tid = create_task("recheck", topic, params=params)
     runner.start(tid)
     return jsonify(id=tid), 201
 

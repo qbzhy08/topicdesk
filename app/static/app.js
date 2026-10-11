@@ -13,7 +13,8 @@ const STATUS = { pending: "排队中", running: "运行中", waiting_human: "等
   done: "已完成", failed: "失败", cancelled: "已取消", cancelling: "取消中" };
 const NOVELTY = { new: "新进展", update: "内容更新", background: "背景资料", duplicate: "重复报道" };
 const KIND = { full: "全文", excerpt: "节选", summary: "摘要" };
-const GRAPH_NAME = { research: "主题检索", import: "链接导入", recheck: "定期复查", demo: "演示" };
+const GRAPH_NAME = { research: "主题检索", import: "链接导入", recheck: "复查", demo: "演示" };
+const taskTitle = (t) => (t.graph === "recheck" ? "复查 · " : "") + (t.topic === "*" ? "全部主题" : t.topic);
 const ACTIVE = new Set(["pending", "running", "cancelling"]);
 const fmtTime = (t) => t ? new Date(typeof t === "number" ? t * 1000 : t).toLocaleString("zh-CN", { hour12: false }) : "—";
 const split = (s) => (s || "").split(/[,，;；\n]/).map((x) => x.trim()).filter(Boolean);
@@ -122,7 +123,7 @@ async function refreshList() {
   const rows = await api("/api/tasks");
   $("#task-list").innerHTML = rows.map((t) => `
     <li><a href="#/task/${t.id}" class="${current?.id === t.id ? "active" : ""}">
-      <span class="t">${esc(t.topic === "*" ? "全部主题" : t.topic)}</span>
+      <span class="t">${esc(taskTitle(t))}</span>
       <span class="s">${esc(STATUS[t.status] || t.status)} · ${esc(GRAPH_NAME[t.graph] || t.graph)} · ${fmtTime(t.created_at)}</span>
     </a></li>`).join("") || `<li class="s">暂无任务</li>`;
 }
@@ -202,7 +203,7 @@ async function poll() {
 function renderTask(t) {
   const d = $("#detail");
   $("[data-f=graph]", d).textContent = `${GRAPH_NAME[t.graph] || t.graph} · ${t.id}`;
-  $("[data-f=topic]", d).textContent = t.topic === "*" ? "全部主题" : t.topic;
+  $("[data-f=topic]", d).textContent = taskTitle(t);
   const b = $("[data-f=status]", d);
   b.textContent = STATUS[t.status] || t.status;
   b.className = `badge ${t.status}`;
@@ -230,8 +231,33 @@ function renderTask(t) {
   renderReport(t.state.report, t.state);
 }
 
+function recheckReport(rep) {
+  const OUT = { updated: "有更新（已存为新版本）", unchanged: "无变化", enriched: "补全了正文", failed: "抓取失败" };
+  const items = rep.items || [];
+  const changeTxt = (c) => !c ? "" : [
+    c.numbers_removed?.length || c.numbers_added?.length ? `数字 ${esc((c.numbers_removed || []).join("、") || "—")} → ${esc((c.numbers_added || []).join("、") || "—")}` : "",
+    c.sentences_added?.length ? `新增：${esc(c.sentences_added[0].slice(0, 60))}…` : "",
+    c.sentences_removed?.length ? `删除：${esc(c.sentences_removed[0].slice(0, 60))}…` : ""].filter(Boolean).join("<br>");
+  return `<div class="card report"><h3>复查结果</h3>
+    <p class="small">范围：${esc(rep.scope)} · ${rep.force ? "手动复查（范围内所有可能变化的页面）" : "定时复查（只查已到期的页面）"}</p>
+    <div class="stats">
+      <div><b>${rep.checked}</b><small>已复查</small></div>
+      <div><b>${rep.summary?.updated || 0}</b><small>有更新</small></div>
+      <div><b>${rep.summary?.unchanged || 0}</b><small>无变化</small></div>
+      <div><b>${rep.summary?.failed || 0}</b><small>失败</small></div>
+    </div>
+    ${items.length ? `<table class="tbl"><tr><th>页面</th><th>为什么复查</th><th>结果</th></tr>${items.map((r) => `
+      <tr><td><a href="#/doc/${r.new_doc_id || r.doc_id}">${esc(r.title || r.url)}</a></td><td class="small">${esc(r.why || "")}</td>
+      <td><span class="tag ${r.outcome === "updated" ? "nv-update" : ""}">${OUT[r.outcome] || esc(r.outcome)}</span>
+      ${r.version ? ` v${r.version}` : ""}${r.error ? `<br><small>${esc(r.error)}</small>` : ""}
+      ${r.change ? `<br><small>${changeTxt(r.change)}</small>` : ""}</td></tr>`).join("")}</table>`
+    : `<p class="empty">这个范围内没有需要复查的页面。只有代码仓库、arXiv 论文和 3 天内发布的新闻会被安排复查。</p>`}
+    <p class="small">范围内仍在复查计划中的页面 ${rep.pending} 篇${rep.next_due ? `，下次到期 ${fmtTime(rep.next_due)}` : ""}。</p></div>`;
+}
+
 function renderReport(rep, state) {
   const box = $("[data-f=report]");
+  if (rep?.kind === "recheck") { box.innerHTML = recheckReport(rep); return; }
   if (!rep) {
     const cov = state?.coverage;
     box.innerHTML = cov ? `<div class="card"><h3>覆盖矩阵（进行中）</h3>${covTable(cov)}</div>` : "";
@@ -358,7 +384,7 @@ async function showLibrary(qs) {
   const p = Object.fromEntries(qs.entries());
   el.innerHTML = `
     <div class="detail-head"><div><p class="kicker">资料库</p><h1>${esc(p.topic || (p.task ? "本次任务的资料" : "全部资料"))}</h1></div>
-      <div class="actions"><button class="ghost" id="btn-recheck">复查可能变化的页面</button></div></div>
+      <div class="actions"><button class="ghost" id="btn-recheck" title="代码仓库、arXiv 论文、3 天内的新闻可能有更新或更正">${p.task ? "复查本次资料中可能变化的页面" : p.topic ? "复查该主题可能变化的页面" : "复查全部主题可能变化的页面"}</button></div></div>
     <form class="filters" id="lib-filter">
       <select name="topic"><option value="">全部主题</option>${topics.map((t) => `<option ${t.topic === p.topic ? "selected" : ""}>${esc(t.topic)}</option>`).join("")}</select>
       <select name="novelty"><option value="">全部类型</option>${Object.entries(NOVELTY).map(([k, v]) => `<option value="${k}" ${p.novelty === k ? "selected" : ""}>${v}</option>`).join("")}</select>
@@ -377,8 +403,11 @@ async function showLibrary(qs) {
     const f = new URLSearchParams([...new FormData(e.target).entries()].filter(([, v]) => v));
     location.hash = "#/library?" + f.toString();
   };
-  $("#btn-recheck").onclick = async () => {
-    const { id } = await api("/api/recheck", { method: "POST", body: { topic: p.topic } });
+  $("#btn-recheck").onclick = async (e) => {
+    e.target.disabled = true;
+    e.target.textContent = "正在创建复查任务…";
+    const { id } = await api("/api/recheck", { method: "POST", body: { task: p.task, topic: p.topic } });
+    refreshList();
     location.hash = `#/task/${id}`;
   };
   const rows = await api("/api/docs?" + qs.toString());

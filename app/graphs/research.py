@@ -1175,21 +1175,46 @@ register_graph(Graph(name="import", start="import_fetch",
 
 # ---------------------------------------------------------------- 定期复查
 
+RECHECK_WHY = {"github.com": "代码仓库（可能有新提交、新版本）", "arxiv.org": "论文（可能发布新版本）"}
+
+
+def _recheck_why(d: dict) -> str:
+    for host, why in RECHECK_WHY.items():
+        if host in (d["url"] or ""):
+            return why
+    return "近期新闻（可能有更正或补充）"
+
+
 def recheck(ctx):
-    limit = ctx.params.get("limit", 20)
-    sql = "SELECT * FROM documents WHERE status='active' AND recheck_at IS NOT NULL AND recheck_at<=?"
-    args = [db.now()]
-    if ctx.topic and ctx.topic != "*":
+    """复查可能变化的页面（代码仓库、论文、刚发布的新闻）。
+    范围：scope_task（某次任务的资料）> 主题 > 全部。定时复查只查到期的；手动复查（force）查范围内所有待复查页面。"""
+    p = ctx.params
+    limit = p.get("limit", 20)
+    sql = "SELECT * FROM documents WHERE status='active' AND recheck_at IS NOT NULL"
+    args = []
+    if not p.get("force"):
+        sql += " AND recheck_at<=?"
+        args.append(db.now())
+    if p.get("scope_task"):
+        sql += " AND meta LIKE ?"
+        args.append(f"%{p['scope_task']}%")
+    elif ctx.topic and ctx.topic != "*":
         sql += " AND topic=?"
         args.append(ctx.topic)
     due = db.query(sql + " ORDER BY recheck_at LIMIT ?", (*args, limit))
-    ctx.state.setdefault("results", [])
-    ctx.state.setdefault("last_run_at", None)
-    ctx.state.setdefault("stats", {})
-    done_ids = {r["doc_id"] for r in ctx.state["results"]}
+    st = ctx.state
+    st.setdefault("results", [])
+    st.setdefault("last_run_at", None)
+    st.setdefault("stats", {})
+    scope = (f"任务 {p['scope_task']} 的资料" if p.get("scope_task") else
+             f"主题「{ctx.topic}」" if ctx.topic and ctx.topic != "*" else "全部主题")
+    ctx.think(f"复查范围：{scope}；{'手动复查：范围内所有可能变化的页面' if p.get('force') else '定时复查：只查已到复查时间的页面'}，"
+              f"共 {len(due)} 篇" + ("" if due else "。没有需要复查的页面"))
+    done_ids = {r["doc_id"] for r in st["results"]}
     for d in due:
         if d["id"] in done_ids:
             continue
+        res = {"doc_id": d["id"], "title": d["title"], "url": d["url"], "why": _recheck_why(d)}
         try:
             art = ctx.tool("page_fetch", url=d["url"], mode="auto")
             item = article_to_item(art, d["url"], base={"source_id": d["source_id"], "url": d["url"],
@@ -1198,15 +1223,31 @@ def recheck(ctx):
             item["meta"]["extract_method"] = "browser" if art.get("via_browser") else "html"
             r = upsert_document(item, d["topic"], task_id=ctx.task_id)
             outcome = r["action"]
+            if outcome == "updated":
+                new = db.query_one("SELECT meta, version FROM documents WHERE id=?", (r["doc_id"],))
+                ch = (new["meta"] or {}).get("change") or {}
+                res.update(new_doc_id=r["doc_id"], version=new["version"],
+                           change={k: ch.get(k) for k in ("similarity", "numbers_added", "numbers_removed",
+                                                         "sentences_added", "sentences_removed")})
         except FetchError as e:
-            outcome = f"failed:{e.kind}"
+            outcome = "failed"
+            res["error"] = f"{e.kind}：{e.reason}"
         nxt = None if outcome == "updated" else db.now() + 3 * 86400
         db.update("documents", "id", d["id"], {"recheck_at": nxt})
-        ctx.state["results"].append({"doc_id": d["id"], "title": d["title"], "outcome": outcome})
+        res["outcome"] = outcome
+        st["results"].append(res)
     summary = {}
-    for r in ctx.state["results"]:
+    for r in st["results"]:
         summary[r["outcome"]] = summary.get(r["outcome"], 0) + 1
-    ctx.observe(f"复查 {len(ctx.state['results'])} 篇：{json.dumps(summary, ensure_ascii=False)}")
+    upcoming = db.query_one("SELECT COUNT(*) n, MIN(recheck_at) t FROM documents WHERE status='active' AND "
+                            "recheck_at IS NOT NULL" + (" AND meta LIKE ?" if p.get("scope_task") else
+                                                        " AND topic=?" if ctx.topic and ctx.topic != "*" else ""),
+                            ([f"%{p['scope_task']}%"] if p.get("scope_task") else
+                             [ctx.topic] if ctx.topic and ctx.topic != "*" else []))
+    st["report"] = {"kind": "recheck", "scope": scope, "force": bool(p.get("force")),
+                    "checked": len(st["results"]), "summary": summary, "items": st["results"],
+                    "next_due": upcoming["t"], "pending": upcoming["n"]}
+    ctx.observe(f"复查 {len(st['results'])} 篇：{json.dumps(summary, ensure_ascii=False)}")
     return END
 
 
