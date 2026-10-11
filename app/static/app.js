@@ -162,7 +162,7 @@ const store = {
 // 等同浏览器的后退、前进；返回时恢复之前看到的位置；旁边显示“上一页 › 当前页”，点上一页名称也能返回
 const PAGE_KIND = [[/^#\/task\//, "任务"], [/^#\/article\//, "文章"], [/^#\/doc\//, "资料"], [/^#\/library/, "资料库"],
   [/^#\/memory\/demo/, "记忆演示"], [/^#\/memory\//, "记忆"], [/^#\/memory/, "记忆"], [/^#\/sources/, "信息源"],
-  [/^#\/settings/, "设置"]];
+  [/^#\/settings/, "设置"], [/^#\/skills\/new/, "新建 Skill"], [/^#\/skills\/edit/, "编辑 Skill"], [/^#\/skills/, "写法 Skill"]];
 const hist = { labels: {}, scroll: {}, traverse: false, last: location.hash || "#/" };
 try { Object.assign(hist.labels, JSON.parse(sessionStorage.getItem("td:labels") || "{}")); } catch { /* */ }
 
@@ -266,6 +266,7 @@ function route() {
     return;
   }
   const view = h.startsWith("#/library") ? "library" : h.startsWith("#/doc/") ? "library"
+    : h.startsWith("#/skills") ? "skills"
     : h.startsWith("#/memory") ? "memory"
     : h.startsWith("#/sources") ? "sources" : h.startsWith("#/settings") ? "settings" : "tasks";
   $$("#nav a").forEach((a) => a.classList.toggle("on", a.dataset.nav === view));
@@ -282,6 +283,9 @@ function route() {
   if (ar) return showArticle(ar[1], ar[2]);
   if (h.startsWith("#/memory/demo")) return showMemoryDemo();
   if (h.startsWith("#/memory")) return showMemoryHome(new URLSearchParams(h.split("?")[1] || ""));
+  const sk = h.match(/^#\/skills\/(new|edit)(?:\/([\w-]+))?(?:\?from=([\w-]+))?/);
+  if (sk) return showSkillEditor(sk[1] === "edit" ? sk[2] : null, sk[3]);
+  if (h.startsWith("#/skills")) return showSkills();
   if (h.startsWith("#/sources")) return showSources();
   if (h.startsWith("#/settings")) return showSettings();
   showComposer();
@@ -528,7 +532,7 @@ async function loadFlow(q, here) {
 const NODE_NAME = { plan: "理解主题、拆子问题", decide: "决定下一步", act: "检索与抓取", judge: "复核相关度", images: "挑选配图",
   remember: "核验事实、写入记忆", rank: "价值排序", verify: "补充核验", report: "生成报告",
   load: "读取 Skill 和记忆", select: "选材", outline: "列提纲", gap: "补充检索", draft: "逐节写作", check: "逐句核对",
-  fix: "按核对结果改写", illustrate: "配图", save: "保存文章", recheck: "复查页面", reassess: "重新评估" };
+  fix: "按核对结果改写", naturalize: "自然化改写（降 AI 腔）", illustrate: "配图", save: "保存文章", recheck: "复查页面", reassess: "重新评估" };
 const REWIND_EG = {
   write: ["改了 Skill 文件或写作偏好 → 从“读取 Skill 和记忆”重跑：按新的要求重新选材、列提纲、写作",
     "检索任务后来补充或重评了资料 → 从“选材”重跑，用新的素材重写",
@@ -549,7 +553,7 @@ async function loadWritePanel(t) {
   if (current?.id !== t.id) return;
   const pick = store.get("skill") || sk.skills[0]?.id;
   box.innerHTML = `<div class="card write-panel"><h3>写成文章</h3>
-    <p class="small">选一种写法（Skill）。同一组资料，不同 Skill 的选材、结构和表达都不一样。Skill 是 <code>skills/</code> 文件夹里的文件，新增一个文件就多一种写法。</p>
+    <p class="small">选一种写法（Skill）。同一组资料，不同 Skill 的选材、结构和表达都不一样。想要自己的写法？到 <a href="#/skills">写法 Skill 工坊</a> 新建或复制一个改。</p>
     <div class="skill-grid">${sk.skills.map((x) => `<label class="skill-card ${x.id === pick ? "on" : ""}">
       <input type="radio" name="skill" value="${esc(x.id)}" ${x.id === pick ? "checked" : ""}>
       <b>${esc(x.name)}</b> <small class="muted">v${esc(x.version)}</small>
@@ -1261,6 +1265,7 @@ async function showArticle(id, ver) {
     check: `<div class="stats sm"><div><b>${s.support_rate != null ? Math.round(s.support_rate * 100) + "%" : "—"}</b><small>出处支持率</small></div>
         <div><b>${s.cited ?? 0}</b><small>带出处</small></div><div><b>${s.semantic ?? 0}</b><small>改写一致</small></div>
         <div><b class="${s.problems ? "gap" : "ok"}">${s.problems ?? 0}</b><small>待你确认</small></div></div>
+      ${m.ref_check ? `<div class="ref-chk small">${m.ref_check.items.map((i) => `<span class="${i.ok ? "ok" : "gap"}">${i.ok ? "✓" : "✗"} ${esc(i.name)}：${esc(i.detail)}</span>`).join("")}</div>` : ""}
       <p class="small muted">先按字面核对出处和每个数字；字面不像的句子再让大模型对照原文判断意思是否一致。下面列出的句子在正文里有下划线，点一下跳过去。</p>
       ${bad.length ? bad.map((i) => `<div class="chk bad" data-goto="${i.k}"><span class="tag rel-lo">${CHECK_NAME[i.status]}</span>
           <span class="chk-s">${esc(renum(i.sentence))}</span>
@@ -1358,6 +1363,217 @@ async function showArticle(id, ver) {
     document.addEventListener("keydown", onKey);
     document.body.append(box);
   });
+}
+
+// ---------------------------------------------------------------- Skill 工坊：页面里 DIY 写法
+const MAT_PREFER = { new: "新进展", update: "内容更新", primary: "一手资料", disputed: "有争议的" };
+
+async function showSkills() {
+  const el = $("#detail");
+  const me = current = {};
+  const d = await api("/api/skills");
+  if (current !== me) return;
+  skillsCache = null;
+  const card = (x) => `<div class="card sk-card">
+      <div class="sk-top"><b>${esc(x.name)}</b> <small class="muted">v${esc(x.version)} · <code>${esc(x.fingerprint)}</code></small>
+        <span class="tag ${x.custom ? "nv-new" : ""}">${x.custom ? "自定义" : "内置"}</span></div>
+      <p class="small">${esc(x.summary)}</p>
+      <p class="small muted">读者：${esc(x.reader)}<br>篇幅：${esc(x.length)} · 选材最多 ${x.material.max_docs} 篇 · 至少 ${x.references.min_sources} 个来源、${x.references.min_primary} 篇一手资料 · 正文图 ≥${x.images.body_min}</p>
+      <div class="sk-struct">${x.structure.map((s) => `<i>${esc(s.heading)}</i>`).join("")}</div>
+      <div class="row"><a class="btn ghost sm" href="#/skills/edit/${x.id}">编辑</a><a class="btn ghost sm" href="#/skills/new?from=${x.id}">复制为新 Skill</a>
+        ${x.custom ? `<button type="button" class="ghost sm danger" data-del="${x.id}">删除</button>` : ""}</div></div>`;
+  el.innerHTML = `<div class="detail-head"><div><p class="kicker">写法 Skill</p><h1>写法 Skill 工坊</h1>
+      <p class="meta">每个 Skill 规定读者、结构、风格、选材、参考资料和配图要求。写作时选一个，同一批资料就能写出不同的文章。</p></div>
+      <div class="actions"><a class="btn primary" href="#/skills/new">＋ 新建 Skill</a></div></div>
+    <div class="card small sk-how"><b>新增 Skill 的两种方法</b>（都不用改程序代码）：
+      <ol><li><b>在这个页面 DIY</b>：点“新建 Skill”从空白开始，或在已有 Skill 上点“复制为新 Skill”再改。保存后马上出现在写作入口里。</li>
+      <li><b>放一个文件</b>：在 <code>${esc(d.dir)}</code> 下新建文件夹（名字就是 id），里面放 <code>SKILL.md</code>（格式和这里“源码”一栏一样），刷新页面即可。</li></ol>
+      每次保存都会记录版本号和内容指纹；内容改了但没改版本号，会自动升一个小版本，旧版本存在 <code>history/</code> 里。文章会记下用的是哪个版本，随时能找回当时的写法。</div>
+    ${d.errors?.length ? `<p class="gap small">有 Skill 文件格式不对，没有加载：${d.errors.map(esc).join("；")}</p>` : ""}
+    <div class="sk-list">${d.skills.map(card).join("")}</div>`;
+  $$("[data-del]", el).forEach((b) => b.onclick = async () => {
+    if (!b.dataset.sure) { b.dataset.sure = "1"; b.textContent = "确定删除？"; return; }
+    await api(`/api/skills/${b.dataset.del}`, { method: "DELETE" });
+    showSkills();
+  });
+}
+
+const SKILL_BLANK = { id: "", name: "", version: "1.0.0", summary: "", reader: "", length: "800-1200 字",
+  material: { list: "30", max_docs: 8, prefer: ["primary"], facts: "all" },
+  references: { min_sources: 3, min_primary: 1, max_per_source: 2, dated: true },
+  structure: [{ id: "lead", heading: "核心结论", goal: "两三句话说清最重要的进展，带出处", words: 150 },
+    { id: "body", heading: "具体情况", goal: "按重要性讲清关键事实，每个事实带出处", words: 500 },
+    { id: "take", heading: "我们的判断", goal: "以【分析】开头，给出判断和依据", words: 200 }],
+  style: ["先结论后细节", "短句为主，不用套话"], images: { cover: 1, body_min: 1, prefer: ["chart"], placement: "" },
+  body: "写作要求：\n\n- ", author: "我" };
+
+async function showSkillEditor(editId, fromId) {
+  const el = $("#detail");
+  const me = current = {};
+  let form = JSON.parse(JSON.stringify(SKILL_BLANK)), base = "", info = null;
+  const src = editId || fromId;
+  if (src) {
+    info = await api(`/api/skills/${src}`);
+    if (current !== me) return;
+    const k = info.skill;
+    form = { id: k.id, name: k.name, version: k.version, summary: k.summary, reader: k.reader, length: k.length,
+      material: { ...k.material }, references: { ...k.references }, structure: k.structure.map((x) => ({ ...x })),
+      style: [...(k.style || [])], images: { ...k.images }, body: k.body, author: k.author || "" };
+    base = info.text;
+    if (fromId) { form.id = `${k.id}-my`; form.name = `${k.name}（我的版本）`; form.version = "1.0.0"; form.author = "我"; }
+  }
+  const editing = !!editId;
+  el.innerHTML = `<div class="detail-head"><div><p class="kicker"><a href="#/skills">写法 Skill</a> · ${editing ? "编辑" : fromId ? "复制为新 Skill" : "新建"}</p>
+      <h1>${editing ? esc(form.name) : fromId ? `基于「${esc(info.skill.name)}」新建` : "新建 Skill"}</h1>
+      ${editing ? `<p class="meta">当前 v${esc(form.version)} · 已用它写过 ${info.articles} 篇文章 · 改了内容但没改版本号时，保存会自动升一个小版本，旧版本留在历史里</p>` : ""}</div>
+      <div class="actions"><span class="rv-tabs sk-mode"><button type="button" class="on" data-m="form">表单</button><button type="button" data-m="src">源码</button></span></div></div>
+    <div class="sk-edit">
+      <form class="sk-form card" data-pane="form" autocomplete="off">
+        <div class="sk-grid2">
+          <label>名称<input name="name" required placeholder="例如：周报"></label>
+          <label>id（英文，保存后不能改）<input name="id" required pattern="[a-z][a-z0-9_-]{1,29}" placeholder="例如：weekly" ${editing ? "readonly" : ""}></label>
+          <label>版本<input name="version" placeholder="1.0.0"></label>
+          <label>作者<input name="author" placeholder="我"></label>
+        </div>
+        <label>一句话简介<input name="summary" placeholder="这种写法适合什么"></label>
+        <label>读者（写给谁、他们知道什么、想要什么）<textarea name="reader" rows="2"></textarea></label>
+        <label>篇幅<input name="length" placeholder="例如：800-1200 字"></label>
+        <fieldset><legend>结构（按顺序；目标里写“以【分析】开头”的节会写判断）</legend>
+          <div class="sk-rows"></div><button type="button" class="ghost sm" data-add-sec>＋ 加一节</button></fieldset>
+        <label>风格（每行一条）<textarea name="style" rows="3"></textarea></label>
+        <fieldset><legend>选材</legend><div class="sk-grid2">
+          <label>主要用哪份清单<select name="m_list"><option value="5">五分钟速览</option><option value="30">三十分钟深读</option></select></label>
+          <label>最多用几篇资料<input name="m_max" type="number" min="2" max="20"></label></div>
+          <div class="sk-checks">偏好：${Object.entries(MAT_PREFER).map(([k, n]) => `<label><input type="checkbox" name="m_prefer" value="${k}"> ${n}</label>`).join("")}</div>
+        </fieldset>
+        <fieldset><legend>参考资料要求</legend><div class="sk-grid2">
+          <label>至少引用几个不同来源<input name="r_src" type="number" min="1" max="12"></label>
+          <label>至少几篇一手资料<input name="r_pri" type="number" min="0" max="10"></label>
+          <label>同一来源最多选几篇<input name="r_cap" type="number" min="1" max="10"></label>
+          <label class="sk-inline"><input type="checkbox" name="r_dated"> 参考资料要有发布日期</label></div></fieldset>
+        <fieldset><legend>配图要求</legend><div class="sk-grid2">
+          <label>封面（0 或 1）<input name="i_cover" type="number" min="0" max="1"></label>
+          <label>正文至少几张图<input name="i_min" type="number" min="0" max="8"></label>
+          <label>偏好的图（逗号分隔：chart 数据图、timeline 时间线、diagram 示意图、product 产品图、scene 现场图、table 表格）<input name="i_prefer"></label>
+          <label>放在哪里<input name="i_place" placeholder="例如：数据图放在第一次提到数据的段落后"></label></div></fieldset>
+        <label>写作要求（给大模型的详细说明，Markdown）<textarea name="body" rows="6"></textarea></label>
+      </form>
+      <div class="card" data-pane="src" hidden><textarea class="sk-src" rows="32" spellcheck="false"></textarea>
+        <p class="small muted">SKILL.md 原文：--- 之间是 YAML 设置，后面是写作要求。和放在 skills 文件夹里的文件完全一样。</p></div>
+      <aside class="sk-preview card"><h3>预览与检查</h3><div class="sk-pv">…</div>
+        <div class="row"><button type="button" id="sk-save">${editing ? "保存修改" : "保存并启用"}</button><small class="muted" id="sk-msg"></small></div>
+        ${editing && info.history.length ? `<details class="small"><summary>历史版本（${info.history.length}）</summary>${info.history.map((h) =>
+          `<div>v${esc(h.version)} <code>${esc(h.fingerprint)}</code> · ${fmtTime(h.saved_at)} <button type="button" class="linkish" data-hist="${esc(h.file)}">载入到源码</button></div>`).join("")}</details>` : ""}
+      </aside></div>`;
+  const f = $(".sk-form", el), srcTa = $(".sk-src", el);
+  let mode = "form";
+  const fill = () => {
+    f.name.value = form.name; f.id.value = form.id; f.version.value = form.version; f.author.value = form.author || "";
+    f.summary.value = form.summary || ""; f.reader.value = form.reader || ""; f.length.value = form.length || "";
+    f.style.value = (form.style || []).join("\n"); f.body.value = form.body || "";
+    f.m_list.value = String(form.material.list); f.m_max.value = form.material.max_docs;
+    $$("[name=m_prefer]", f).forEach((c) => c.checked = (form.material.prefer || []).includes(c.value));
+    f.r_src.value = form.references.min_sources; f.r_pri.value = form.references.min_primary;
+    f.r_cap.value = form.references.max_per_source; f.r_dated.checked = form.references.dated !== false;
+    f.i_cover.value = form.images.cover; f.i_min.value = form.images.body_min;
+    f.i_prefer.value = (form.images.prefer || []).join(", "); f.i_place.value = form.images.placement || "";
+    drawRows();
+  };
+  const drawRows = () => {
+    $(".sk-rows", f).innerHTML = form.structure.map((x, i) => `<div class="sk-row" data-i="${i}">
+      <span class="sk-n">${i + 1}</span>
+      <input data-k="heading" value="${esc(x.heading)}" placeholder="小标题">
+      <input data-k="words" type="number" min="50" max="1500" value="${x.words}" title="字数">
+      <input data-k="id" value="${esc(x.id)}" placeholder="id" title="节的 id（英文）">
+      <textarea data-k="goal" rows="2" placeholder="这一节要写什么">${esc(x.goal)}</textarea>
+      <span class="sk-row-act"><button type="button" class="mini" data-mv="-1" title="上移">↑</button><button type="button" class="mini" data-mv="1" title="下移">↓</button><button type="button" class="mini" data-rm title="删除">×</button></span></div>`).join("");
+  };
+  const collect = () => {
+    form.name = f.name.value.trim(); form.id = f.id.value.trim(); form.version = f.version.value.trim() || "1.0.0";
+    form.author = f.author.value.trim(); form.summary = f.summary.value.trim(); form.reader = f.reader.value.trim();
+    form.length = f.length.value.trim(); form.style = f.style.value.split("\n").map((x) => x.trim()).filter(Boolean);
+    form.body = f.body.value;
+    form.material = { ...form.material, list: f.m_list.value, max_docs: +f.m_max.value || 8,
+      prefer: $$("[name=m_prefer]:checked", f).map((c) => c.value) };
+    form.references = { ...form.references, min_sources: +f.r_src.value || 1, min_primary: +f.r_pri.value || 0,
+      max_per_source: +f.r_cap.value || 3, dated: f.r_dated.checked };
+    form.images = { ...form.images, cover: +f.i_cover.value || 0, body_min: +f.i_min.value || 0,
+      prefer: f.i_prefer.value.split(/[,，\s]+/).filter(Boolean), placement: f.i_place.value.trim() };
+    form.structure = $$(".sk-row", f).map((r) => ({ id: $("[data-k=id]", r).value.trim(), heading: $("[data-k=heading]", r).value.trim(),
+      goal: $("[data-k=goal]", r).value.trim(), words: +$("[data-k=words]", r).value || 250 }));
+  };
+  const body = () => mode === "src" ? { text: srcTa.value } : (collect(), { form: { ...form, base } });
+  let timer = null, last = null;
+  const preview = () => {
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      const r = await api("/api/skills/validate", { method: "POST", body: body() });
+      if (current !== me) return;
+      last = r;
+      const pv = $(".sk-pv", el);
+      if (!r.ok) { pv.innerHTML = `<p class="gap">还不能保存：${esc(r.error)}</p>`; return; }
+      const k = r.skill, total = k.structure.reduce((a, x) => a + x.words, 0);
+      pv.innerHTML = `<p><b>${esc(k.name)}</b> <small class="muted">v${esc(k.version)} · 指纹 <code>${esc(k.fingerprint)}</code></small></p>
+        <p class="small">${esc(k.summary)}</p><p class="small muted">读者：${esc(k.reader)}</p>
+        <ol class="sk-outline">${k.structure.map((x) => `<li><b>${esc(x.heading)}</b> <small class="muted">${x.words} 字${x.goal.includes("【分析】") ? " · 判断" : ""}</small>
+          <i style="width:${Math.min(100, x.words / Math.max(1, total) * 100 * 2)}%"></i><br><small>${esc(x.goal)}</small></li>`).join("")}</ol>
+        <p class="small">合计约 ${total} 字（篇幅 ${esc(k.length)}）· 选材 ${k.material.max_docs} 篇 · 至少 ${k.references.min_sources} 个来源、${k.references.min_primary} 篇一手 · 正文图 ≥${k.images.body_min}</p>
+        ${r.warnings.length ? `<ul class="small sk-warn">${r.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>` : `<p class="small ok">✓ 检查通过</p>`}`;
+    }, 300);
+  };
+  fill();
+  preview();
+  f.addEventListener("input", preview);
+  srcTa.addEventListener("input", preview);
+  f.addEventListener("click", (e) => {
+    const row = e.target.closest(".sk-row");
+    if (e.target.dataset.addSec != null) { collect(); form.structure.push({ id: `s${form.structure.length + 1}`, heading: "", goal: "", words: 250 }); drawRows(); preview(); return; }
+    if (!row) return;
+    const i = +row.dataset.i;
+    if (e.target.dataset.rm != null) { collect(); form.structure.splice(i, 1); drawRows(); preview(); }
+    if (e.target.dataset.mv) {
+      collect();
+      const j = i + +e.target.dataset.mv;
+      if (j < 0 || j >= form.structure.length) return;
+      [form.structure[i], form.structure[j]] = [form.structure[j], form.structure[i]];
+      drawRows(); preview();
+    }
+  });
+  $$(".sk-mode button", el).forEach((b) => b.onclick = async () => {
+    if (b.dataset.m === mode) return;
+    if (b.dataset.m === "src") {
+      const r = await api("/api/skills/validate", { method: "POST", body: body() });
+      srcTa.value = r.text || base || "";
+    } else {
+      const r = await api("/api/skills/validate", { method: "POST", body: { text: srcTa.value } });
+      if (!r.ok) { $("#sk-msg").textContent = `源码有错误，先改好再切回表单：${r.error}`; return; }
+      const k = r.skill;
+      base = srcTa.value;
+      form = { ...form, ...k, material: { ...k.material }, references: { ...k.references }, images: { ...k.images },
+        structure: k.structure.map((x) => ({ ...x })), style: [...(k.style || [])], body: k.body, author: k.author || "" };
+      fill();
+    }
+    mode = b.dataset.m;
+    $$(".sk-mode button", el).forEach((x) => x.classList.toggle("on", x === b));
+    $$("[data-pane]", el).forEach((x) => x.hidden = x.dataset.pane !== mode);
+    preview();
+  });
+  $$("[data-hist]", el).forEach((b) => b.onclick = async () => {
+    const r = await api(`/api/skills/${editId}/history/${b.dataset.hist}`);
+    srcTa.value = r.text;
+    if (mode !== "src") $('.sk-mode [data-m="src"]', el).click();
+    else preview();
+  });
+  $("#sk-save", el).onclick = async () => {
+    const msg = $("#sk-msg");
+    try {
+      const r = await api(editing ? `/api/skills/${editId}` : "/api/skills", { method: editing ? "PUT" : "POST", body: body() });
+      skillsCache = null;
+      if (r.unchanged) { msg.textContent = "没有改动"; return; }
+      msg.textContent = `已保存：v${r.skill.version}${r.bumped ? "（内容有改动，自动升了版本号）" : ""}`;
+      setTimeout(() => location.hash = "#/skills", 900);
+    } catch (err) { msg.textContent = err.message; }
+  };
 }
 
 // ---------------------------------------------------------------- Lv3：人工审阅

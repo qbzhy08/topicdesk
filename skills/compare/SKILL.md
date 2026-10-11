@@ -1,7 +1,7 @@
 ---
 id: compare
 name: 观点交锋
-version: 1.0.0
+version: 1.1.0
 summary: 围绕争议，把正反双方的说法、证据和分歧点摆在一起
 reader: 看到不同说法、想知道该信谁的读者
 length: 1000-1500 字
@@ -35,6 +35,13 @@ style:
   - 对双方用同样的标准，不替任何一方辩护
   - 每个主张都写明出自谁
   - 没有反方资料时，如实说明“目前没有找到公开的反驳”，不要虚构对立观点
+references:
+  min_sources: 4
+  min_primary: 1
+  max_per_source: 2
+  prefer: [primary, academic, community]
+  dated: true
+  both_sides: true        # 正反两方各至少一个独立来源；没有就如实说明
 images:
   cover: 1
   body_min: 2

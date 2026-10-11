@@ -86,7 +86,11 @@ class WriteBase(CollectBase):
 class WriteTest(WriteBase):
     def test_skills_load_and_validate(self):
         all_ = skills.load_all()
-        self.assertEqual(sorted(all_), ["brief", "compare", "explainer"])
+        self.assertEqual(sorted(all_), ["background", "brief", "compare", "data", "exec", "explainer", "faq", "social", "timeline"])
+        for sk in all_.values():          # 每个 Skill 都声明了读者、结构、风格、参考资料和配图要求
+            self.assertTrue(sk["reader"] and sk["structure"] and sk["style"])
+            self.assertGreaterEqual(sk["references"]["min_sources"], 2)
+            self.assertGreaterEqual(sk["images"]["body_min"], 1)
         self.assertEqual(skills.load_all.errors, [])
         with self.assertRaises(skills.SkillError):
             skills.parse("---\nid: x\nname: y\n---\n", "bad")
@@ -117,6 +121,19 @@ class WriteTest(WriteBase):
         self.assertEqual(meta["skill"]["id"], "brief")
         self.assertTrue(meta["skill"]["fingerprint"])
         self.assertEqual(meta["check"]["summary"]["support_rate"], 1.0)
+
+    def test_reference_rules(self):
+        """参考资料要求在选材和成稿检查里生效：同一来源最多几篇、一手资料要求、成稿引用了几个来源。"""
+        sk = dict(skills.get("brief"))
+        sk["references"] = {**sk["references"], "max_per_source": 1, "min_primary": 1}
+        mat = writing.select_material(self.t1, sk)
+        srcs = [d["source_id"] for d in mat["docs"]]
+        self.assertEqual(len(srcs), len(set(srcs)))                      # 每个来源最多 1 篇
+        task, v = self.write("brief", no_llm=True)
+        rc = v["meta"]["ref_check"]
+        self.assertEqual([i["name"] for i in rc["items"]], ["不同来源", "一手资料", "参考资料日期"])
+        self.assertTrue(rc["sources"])
+        self.assertEqual(v["meta"]["skill"]["version"], "1.1.0")
 
     def test_skills_change_material(self):
         t_brief, _ = self.write("brief", no_llm=True)
@@ -513,3 +530,113 @@ class ReviewTest(WriteBase):
         self.assertEqual(d["article"]["title"], "选长上下文模型前要看什么")
         self.assertIn("本次选题角度（用户指定）：从开发者选型的角度写", d["version"]["meta"]["prefs"])
         self.assertEqual(self.c.post(f"/api/articles/{aid}/rewrite", json={"angle": "短"}).status_code, 400)
+
+
+class NaturalWriter(FakeWriter):
+    """自然化改写：一节正常改写；一节把数字改错（应退回原稿）；其余丢了出处（应保留原稿）。"""
+
+    def __call__(self, messages, json_mode=False, max_tokens=1500, **kw):
+        p = messages[-1]["content"]
+        if "改得更像一位懂行的编辑写的" in p:
+            self.calls.append(p)
+            text = p.split("原文：\n", 1)[1]
+            if "128K" in text and "64K" not in text:
+                return {"content": text.replace("128K", "256K"), "_cost": 0}          # 把数字改错
+            if "差距" in text:
+                return {"content": text.replace("存在差距", "对不上"), "_cost": 0}      # 正常改写，保留出处
+            return {"content": "这一节说的是长上下文。", "_cost": 0}                    # 丢了出处
+        return super().__call__(messages, json_mode, max_tokens, **kw)
+
+
+class StagesTest(WriteBase):
+    """消融开关与自然化改写：改坏的节退回，丢出处的节不采用；关掉步骤时对应节点不执行。"""
+
+    def test_naturalize_reverts_bad_sections(self):
+        llm.available, llm.chat = (lambda: True), NaturalWriter()
+        task, v = self.write("brief")
+        log = task["state"]["natural_log"]
+        res = " ".join(x["result"] for x in log)
+        self.assertIn("已改写", res)
+        self.assertTrue("退回原稿" in res or "保留原稿" in res)
+        self.assertNotIn("256K", v["markdown"])
+        self.assertIn("对不上", v["markdown"])
+        self.assertEqual(v["meta"]["check"]["summary"]["number"], 0)
+
+    def test_stages_off_gives_raw_draft(self):
+        fake = NaturalWriter()
+        llm.available, llm.chat = (lambda: True), fake
+        task, v = self.write("brief", stages={"gap": False, "fix": False, "naturalize": False, "illustrate": False})
+        st = task["state"]
+        self.assertEqual(st["gap_round"], 0)
+        self.assertEqual(st["fix_round"], 0)
+        self.assertFalse(st.get("natural_log"))
+        self.assertFalse(any("改得更像" in c for c in fake.calls))
+        self.assertGreater(v["meta"]["check"]["summary"]["problems"], 0)          # 初稿的问题原样保留，供对照
+        self.assertEqual(v["meta"]["stages"]["fix"], False)
+        nodes = [r["node"] for r in db.query("SELECT node FROM steps WHERE task_id=?", (task["id"],))]
+        self.assertNotIn("fix", nodes)
+        self.assertNotIn("illustrate", nodes)
+
+
+class SkillWorkshopTest(WriteBase):
+    """页面里 DIY Skill：新建、校验、编辑自动升版本并留历史、按指纹找回、删除；不改业务代码就能用于写作。"""
+
+    def setUp(self):
+        super().setUp()
+        import shutil
+        from app.server import create_app
+        self._skdir = tempfile.TemporaryDirectory()
+        self._old_dir = skills.SKILL_DIR
+        shutil.copytree(self._old_dir, Path(self._skdir.name) / "skills", ignore=shutil.ignore_patterns("history", ".trash"))
+        skills.SKILL_DIR = Path(self._skdir.name) / "skills"
+        self.c = create_app().test_client()
+
+    def tearDown(self):
+        skills.SKILL_DIR = self._old_dir
+        self._skdir.cleanup()
+        super().tearDown()
+
+    def form(self, **kw):
+        f = {"id": "weekly", "name": "团队周报", "reader": "团队成员", "length": "600-900 字", "author": "我",
+             "structure": [{"id": "news", "heading": "本周进展", "goal": "列出关键事实，带出处", "words": 400},
+                           {"id": "take", "heading": "我们的判断", "goal": "以【分析】开头给出判断", "words": 200}],
+             "style": "短句\n不用套话", "references": {"min_sources": 2, "min_primary": 0, "max_per_source": 2},
+             "images": {"cover": 1, "body_min": 1}, "body": "写给团队看的周报。"}
+        f.update(kw)
+        return f
+
+    def test_create_edit_version_delete(self):
+        r = self.c.post("/api/skills/validate", json={"form": self.form(id="Bad Id")}).get_json()
+        self.assertFalse(r["ok"])
+        r = self.c.post("/api/skills", json={"form": self.form()})
+        self.assertEqual(r.status_code, 201, r.get_json())
+        self.assertEqual(self.c.post("/api/skills", json={"form": self.form()}).status_code, 400)   # id 重复
+        lst = self.c.get("/api/skills").get_json()["skills"]
+        mine = next(x for x in lst if x["id"] == "weekly")
+        self.assertTrue(mine["custom"])
+        # 新 Skill 直接用于写作（没有改任何业务代码）
+        task, v = self.write("weekly", no_llm=True)
+        self.assertEqual([s["heading"] for s in task["state"]["sections"]], ["本周进展", "我们的判断"])
+        fp1 = v["meta"]["skill"]["fingerprint"]
+        # 编辑：内容变了没改版本号 → 自动升版本，旧版存历史
+        d = self.c.get("/api/skills/weekly").get_json()
+        r = self.c.put("/api/skills/weekly", json={"form": {**self.form(summary="新简介"), "base": d["text"]}}).get_json()
+        self.assertTrue(r["bumped"])
+        self.assertEqual(r["skill"]["version"], "1.0.1")
+        self.assertEqual(len(self.c.get("/api/skills/weekly").get_json()["history"]), 1)
+        # 文章记录的指纹能找回写作时的 Skill 原文
+        old = self.c.get(f"/api/skills/weekly/fingerprint/{fp1}").get_json()["text"]
+        self.assertIn("version: 1.0.0", old)
+        self.assertNotIn("新简介", old)
+        # 源码编辑同样可以
+        txt = self.c.get("/api/skills/weekly").get_json()["text"].replace("version: 1.0.1", "version: 2.0.0")
+        r = self.c.put("/api/skills/weekly", json={"text": txt}).get_json()
+        self.assertEqual((r["skill"]["version"], r["bumped"]), ("2.0.0", False))
+        # 编辑内置 Skill 时表单里没有的字段保留
+        b = self.c.get("/api/skills/compare").get_json()
+        k = b["skill"]
+        r = self.c.put("/api/skills/compare", json={"form": {**k, "summary": "改了简介", "base": b["text"]}}).get_json()
+        self.assertTrue(skills.get("compare")["references"].get("both_sides"))
+        # 删除：移到回收站，不再出现
+        self.assertEqual(self.c.delete("/api/skills/weekly").status_code, 200)
+        self.assertNotIn("weekly", skills.load_all())

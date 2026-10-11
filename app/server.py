@@ -683,6 +683,80 @@ def list_skills():
                    dir=str(skills.SKILL_DIR))
 
 
+@app.get("/api/skills/<sid>")
+def get_skill(sid):
+    from . import skills
+    try:
+        text = skills.raw(sid)
+        v = skills.validate(text)
+    except skills.SkillError as e:
+        return jsonify(error=str(e)), 404
+    used = db.query("SELECT COUNT(*) n FROM articles WHERE skill=?", (sid,))[0]["n"]
+    return jsonify(text=text, **v, history=skills.history(sid), articles=used)
+
+
+@app.get("/api/skills/<sid>/history/<fname>")
+def get_skill_history(sid, fname):
+    from . import skills
+    try:
+        return jsonify(text=skills.history_text(sid, fname))
+    except skills.SkillError as e:
+        return jsonify(error=str(e)), 404
+
+
+@app.get("/api/skills/<sid>/fingerprint/<fp>")
+def get_skill_by_fingerprint(sid, fp):
+    """文章里记录的 Skill 指纹 → 写这篇文章时 Skill 的原文。"""
+    from . import skills
+    text = skills.find_by_fingerprint(sid, fp)
+    return jsonify(text=text) if text else (jsonify(error="找不到这个指纹对应的 Skill 原文"), 404)
+
+
+def _skill_text(b):
+    from . import skills
+    return b["text"] if isinstance(b.get("text"), str) else skills.from_form(b.get("form") or {})
+
+
+@app.post("/api/skills/validate")
+def validate_skill():
+    from . import skills
+    b = request.get_json(force=True) or {}
+    try:
+        text = _skill_text(b)
+        return jsonify(ok=True, text=text, **skills.validate(text))
+    except (skills.SkillError, ValueError, TypeError) as e:
+        return jsonify(ok=False, error=str(e)), 200
+
+
+@app.post("/api/skills")
+def create_skill():
+    from . import skills
+    b = request.get_json(force=True) or {}
+    try:
+        return jsonify(skills.save(_skill_text(b))), 201
+    except (skills.SkillError, ValueError, TypeError) as e:
+        return jsonify(error=str(e)), 400
+
+
+@app.put("/api/skills/<sid>")
+def update_skill(sid):
+    from . import skills
+    b = request.get_json(force=True) or {}
+    try:
+        return jsonify(skills.save(_skill_text(b), editing=sid))
+    except (skills.SkillError, ValueError, TypeError) as e:
+        return jsonify(error=str(e)), 400
+
+
+@app.delete("/api/skills/<sid>")
+def delete_skill(sid):
+    from . import skills
+    try:
+        return jsonify(moved_to=skills.remove(sid))
+    except skills.SkillError as e:
+        return jsonify(error=str(e)), 404
+
+
 @app.post("/api/tasks/<tid>/write")
 def start_write(tid):
     from . import skills

@@ -1,7 +1,7 @@
 ---
 id: brief
 name: 主题速览
-version: 1.0.0
+version: 1.1.0
 summary: 5 分钟看懂发生了什么、为什么重要、还有什么没定论
 reader: 时间紧、想在 5 分钟内掌握进展的读者；了解行业常识，但没有跟踪这个主题
 length: 700-1000 字
@@ -32,6 +32,12 @@ style:
   - 短句为主，每段不超过 4 句
   - 数字、日期、引语必须带出处编号
   - 用读者熟悉的说法，必要的术语第一次出现时用半句话解释
+references:
+  min_sources: 3          # 正文至少引用几个不同来源（站点/机构），避免一家之言
+  min_primary: 1          # 至少引用几篇一手资料（论文、官方公告、代码仓库），有就必须用
+  max_per_source: 2       # 选材时同一来源最多几篇
+  prefer: [primary, media]
+  dated: true             # 参考资料列出发布日期；“发生了什么”里的事件写日期
 images:
   cover: 1
   body_min: 2

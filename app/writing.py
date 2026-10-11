@@ -111,7 +111,7 @@ def select_material(research_task: str, skill: dict, extra_ids: list[str] | None
     # 清单内的顺序基本保持，prefer 只在相近位置上调整（每个加分相当于提前 3 位）
     pos = {i: k for k, i in enumerate(order)}
     order.sort(key=lambda i: pos[i] - 3 * boost(i))
-    chosen = order[:int(mat.get("max_docs") or 10)]
+    chosen, notes = _apply_reference_rules(order, skill, int(mat.get("max_docs") or 10), why)
     for e in extra_ids or []:
         if e not in chosen:
             chosen.append(e)
@@ -131,7 +131,66 @@ def select_material(research_task: str, skill: dict, extra_ids: list[str] | None
                      "why": why.get(i, "")})
     for n, d in enumerate(docs, 1):
         d["n"] = n
-    return {"docs": docs, "skipped": [i for i in order[len(chosen):]][:20], "ranking_version": rk.get("version")}
+    return {"docs": docs, "skipped": [i for i in order if i not in chosen][:20], "ranking_version": rk.get("version"),
+            "ref_notes": notes}
+
+
+def _apply_reference_rules(order: list[str], skill: dict, max_docs: int, why: dict) -> tuple[list[str], list[str]]:
+    """Skill 的参考资料要求在选材时生效：同一来源最多 max_per_source 篇；一手资料不足 min_primary 时，
+    从后面的候选里换进来（替换排在最后的非一手资料）。"""
+    ref = skill.get("references") or {}
+    cap = int(ref.get("max_per_source") or 99)
+    need_primary = int(ref.get("min_primary") or 0)
+    rows = _doc_rows(order[:120])
+    usable = [i for i in order if i in rows and (rows[i]["text"] or rows[i]["summary"])]
+    is_primary = {i: bool((rows[i]["meta"] or {}).get("primary")) for i in usable}
+    chosen, per, notes = [], {}, []
+    capped = 0
+    for i in usable:
+        if len(chosen) >= max_docs:
+            break
+        src = rows[i]["source_id"]
+        if per.get(src, 0) >= cap:
+            capped += 1
+            continue
+        per[src] = per.get(src, 0) + 1
+        chosen.append(i)
+    if capped:
+        notes.append(f"同一来源最多 {cap} 篇：跳过 {capped} 篇，让位给其他来源")
+    have = sum(1 for i in chosen if is_primary[i])
+    if have < need_primary:
+        extra = [i for i in usable if is_primary[i] and i not in chosen][:need_primary - have]
+        for e in extra:
+            victim = next((i for i in reversed(chosen) if not is_primary[i]), None)
+            if victim and len(chosen) >= max_docs:
+                chosen.remove(victim)
+            chosen.append(e)
+            why[e] = (why.get(e) or "") + "（Skill 要求至少 {} 篇一手资料，换入）".format(need_primary)
+        notes.append(f"一手资料 {have} 篇少于要求的 {need_primary} 篇：换入 {len(extra)} 篇"
+                     + ("" if have + len(extra) >= need_primary else "（候选里一手资料不够，写作时如实说明）"))
+    return chosen, notes
+
+
+def reference_check(rep: dict, docs: list[dict], skill: dict) -> dict:
+    """成稿是否满足 Skill 的参考资料要求：引用了几个不同来源、几篇一手资料，参考资料是否都有日期。"""
+    ref = skill.get("references") or {}
+    used = set(rep.get("used") or [])
+    cited = [d for d in docs if d["n"] in used]
+    srcs = sorted({d.get("source_id") for d in cited if d.get("source_id")})
+    prim = [d for d in cited if d.get("primary")]
+    undated = [d["n"] for d in cited if not d.get("published_at")] if ref.get("dated") else []
+    avail_src = len({d.get("source_id") for d in docs})
+    avail_prim = sum(1 for d in docs if d.get("primary"))
+    items = [
+        {"name": "不同来源", "ok": len(srcs) >= min(ref.get("min_sources", 0), avail_src),
+         "detail": f"引用 {len(srcs)} 个（要求 ≥{ref.get('min_sources', 0)}，素材里共 {avail_src} 个）"},
+        {"name": "一手资料", "ok": len(prim) >= min(ref.get("min_primary", 0), avail_prim),
+         "detail": f"引用 {len(prim)} 篇（要求 ≥{ref.get('min_primary', 0)}，素材里共 {avail_prim} 篇）"},
+    ]
+    if ref.get("dated"):
+        items.append({"name": "参考资料日期", "ok": not undated,
+                      "detail": "都有发布日期" if not undated else f"资料 {undated} 缺少发布日期"})
+    return {"items": items, "ok": all(i["ok"] for i in items), "sources": srcs, "primary": [d["n"] for d in prim]}
 
 
 def topic_facts(topic: str, mode: str = "all", limit: int = 12) -> list[dict]:

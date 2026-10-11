@@ -1,7 +1,7 @@
 ---
 id: explainer
 name: 专题解读
-version: 1.0.0
+version: 1.1.0
 summary: 讲清来龙去脉、关键概念、各方观点和证据强弱，给出有依据的判断
 reader: 想真正弄懂这个主题的从业者或学生，有基础背景，愿意花 15 分钟阅读
 length: 1800-2600 字
@@ -40,6 +40,12 @@ style:
   - 每个概念配一个资料中的具体例子
   - 观点比较要说清“谁说的、基于什么”，不要“有人认为”
   - 来源结论带编号；系统自己的推断以【分析】开头，和来源结论分开
+references:
+  min_sources: 4
+  min_primary: 2
+  max_per_source: 3
+  prefer: [primary, academic, media]
+  dated: true
 images:
   cover: 1
   body_min: 3

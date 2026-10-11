@@ -45,6 +45,7 @@ SECTION_PROMPT = """你在按 Skill「{name}」写文章《{title}》中的一�
 风格：{style}
 {body}
 {prefs}
+{refs}
 本节小标题：{heading}
 本节目标：{goal}
 要点：{points}
@@ -80,6 +81,22 @@ def _docs(st) -> list[dict]:
             for d in st["docs"]]
 
 
+DEFAULT_STAGES = {"gap": True, "fix": True, "naturalize": True, "natural_recheck": True, "illustrate": True}
+
+
+def _stages(ctx) -> dict:
+    """写作各步骤的开关（对照/消融实验用）：gap 补检、fix 核对后改写、naturalize 自然化改写、
+    natural_recheck 自然化后重新核对并回退变差的节、illustrate 配图。默认全开。"""
+    return {**DEFAULT_STAGES, **(ctx.params.get("stages") or {})}
+
+
+def _after_check(ctx) -> str:
+    stg = _stages(ctx)
+    if stg["naturalize"] and _use_llm(ctx) and not ctx.state.get("naturalized"):
+        return "naturalize"
+    return "illustrate" if stg["illustrate"] else "save"
+
+
 def _use_llm(ctx):
     return llm.available() and not ctx.params.get("no_llm")
 
@@ -95,6 +112,7 @@ def load(ctx):
         raise ValueError("研究任务不存在或还没有完成")
     st["research_task"] = rt["id"]
     st["write_task"] = ctx.task_id
+    st["stages_used"] = _stages(ctx)
     rs = rt["state"] or {}
     st["terms"] = ((rs.get("plan") or {}).get("terms_zh") or [])[:6]
     st["source_ids"] = ((rs.get("report") or {}).get("source_ids") or [])
@@ -148,12 +166,14 @@ def select(ctx):
     st["docs"] = [{k: v for k, v in d.items() if k != "text"} | {"label": writing.source_label(d, names),
                                                                  "chars": len(d["text"])} for d in mat["docs"]]
     st["ranking_version"] = mat["ranking_version"]
+    st["ref_notes"] = mat.get("ref_notes") or []
     n_of = {d["id"]: d["n"] for d in st["docs"]}
     for f in st["facts"]:
         f["refs"] = sorted({n_of[x] for x in f["docs"] if x in n_of})
     ctx.observe(f"按 Skill 选材 {len(st['docs'])} 篇（{'五分钟' if sk['material']['list'] == '5' else '三十分钟'}清单优先，"
                 f"偏好 {sk['material'].get('prefer') or '无'}）；记忆中的事实 {len(st['facts'])} 条：\n" +
-                "\n".join(f"[{d['n']}] {d['title'][:40]}（{d['why']}）" for d in st["docs"]))
+                "\n".join(f"[{d['n']}] {d['title'][:40]}（{d['why']}）" for d in st["docs"])
+                + ("\n参考资料要求：" + "；".join(st["ref_notes"]) if st["ref_notes"] else ""))
     if not st["docs"]:
         raise ValueError("没有可用的素材（研究任务里没有正文或摘要）")
     return "outline"
@@ -207,7 +227,7 @@ def outline(ctx):
     st["sections"] = base
     st["outline_by"] = "llm" if title else "rule"
     ctx.think(f"提纲《{st['title']}》：" + "；".join(f"{s['heading']}（素材 {s['sources'] or '全部'}）" for s in base))
-    if gaps and st["gap_round"] == 0:
+    if gaps and st["gap_round"] == 0 and _stages(ctx)["gap"]:
         head = {x["id"]: x["heading"] for x in base}
         st["gap_queue"] = [{"query": str(g["query"])[:30],
                             "why": f"提纲发现「{head.get(g.get('section'), g.get('section'))}」缺资料：{g.get('question', '')}",
@@ -315,6 +335,18 @@ def _prefs_text(st) -> str:
     return ("用户的写作偏好和以往反馈（必须遵守）：\n" + "\n".join(f"- {x}" for x in st["prefs"])) if st["prefs"] else ""
 
 
+def _refs_text(sk) -> str:
+    r = sk.get("references") or {}
+    if not r:
+        return ""
+    parts = [f"全文至少引用 {r.get('min_sources', 0)} 个不同来源", f"至少 {r.get('min_primary', 0)} 篇一手资料（论文、官方、代码仓库）"]
+    if r.get("both_sides"):
+        parts.append("正反两方各至少有一个独立来源，没有就如实说明")
+    if r.get("background_cited"):
+        parts.append("背景知识同样要带出处，不能凭常识写")
+    return "参考资料要求：" + "；".join(parts) + "。本节优先用还没被其他节引用过的来源。"
+
+
 def _section_materials(sec, docs) -> str:
     use = [d for d in docs if d["n"] in sec["sources"]] or docs
     focus = f"{sec['heading']} {sec['goal']} {' '.join(sec['points'])}"
@@ -331,7 +363,7 @@ def _section_input(ctx, sec, docs, fix_items=None) -> dict:
     prev = f"\n上一稿：\n{sec['md']}" if fix_items else ""
     return {"json_mode": False, "max_tokens": 1600, "messages": [{"role": "user", "content": SECTION_PROMPT.format(
         name=sk["name"], title=st["title"], reader=sk["reader"], style="；".join(sk["style"]),
-        body=sk["body"], prefs=_prefs_text(st), heading=sec["heading"], goal=sec["goal"],
+        body=sk["body"], prefs=_prefs_text(st), refs=_refs_text(sk), heading=sec["heading"], goal=sec["goal"],
         points="；".join(sec["points"]) or "（按目标自行组织）", words=sec["words"],
         materials=_section_materials(sec, docs),
         facts="记忆中的事实：\n" + _facts_text(st["facts"]), fix=fix + prev)}]}
@@ -472,11 +504,11 @@ def check(ctx):
                 f"（支持率 {(s['support_rate'] or 0) * 100:.0f}%），数字对不上 {s['number']}，找不到依据 {s['weak']}，"
                 f"无出处的数字 {s['uncited']}，分析 {s['analysis']} 句" + (f"；自动改正出处 {len(fixes)} 处" if fixes else ""))
     serious = _serious(ctx, rep)
-    if serious and st["fix_round"] == 0:
+    if serious and st["fix_round"] == 0 and _stages(ctx)["fix"]:
         st["fix_round"] = 1
         # 分析里编的数字只需改写；来源结论找不到依据才值得回到检索核验
         unresolved = [i for i in serious if not i.get("alt") and i["status"] in ("number", "weak")]
-        if unresolved and st["gap_round"] < 2:
+        if unresolved and st["gap_round"] < 2 and _stages(ctx)["gap"]:
             qs = []
             for i in unresolved[:2]:
                 core = " ".join(i.get("numbers", [])[:1] + st["terms"][:2])
@@ -488,7 +520,7 @@ def check(ctx):
                 ctx.think(f"{len(unresolved)} 句在现有资料里找不到依据，先补充检索核验，再改写")
                 return "gap"
         return "fix"
-    return "illustrate"
+    return _after_check(ctx)
 
 
 def fix(ctx):
@@ -523,6 +555,74 @@ def fix(ctx):
                             "before": before[:300], "after": sec["md"][:300], "rewrite": True})
     ctx.observe(f"按核对结果改写 {len(by_sec)} 节：{'、'.join(next(x['heading'] for x in st['sections'] if x['id'] == k) for k in by_sec)}")
     return "check"
+
+
+# ---------------------------------------------------------------- naturalize（自然化改写，降低“AI 腔”）
+
+AI_TROPES = ["首先", "其次", "最后", "综上所述", "总而言之", "值得注意的是", "值得一提的是", "不难看出", "由此可见",
+             "总的来说", "不仅", "而且", "此外", "与此同时", "随着", "在……的背景下", "毋庸置疑", "至关重要", "显著",
+             "进一步", "赋能", "助力", "全方位", "深度融合", "具有重要意义", "扮演着", "关键角色", "日益", "不可或缺"]
+
+NATURAL_PROMPT = """把下面这节文章改得更像一位懂行的编辑写的，而不是 AI 生成的。读者：{reader}。风格：{style}
+要求：
+1. 事实、数字、日期、人名机构名一个都不能改，也不能新增；每个 [n] 出处编号都要保留，跟着它原来支持的那句话。
+2. 去掉套话和空泛连接词（如：{tropes}），不用排比和对仗，不要每段都“总—分—总”。
+3. 句子长短错开，能用短句就用短句；用具体的主语和动词，少用“进行”“实现”“具有……性”。
+4. 以“【分析】”开头的段落仍以“【分析】”开头；表格和列表的结构保留。
+5. 只输出改好的正文，不要解释。
+原文：
+{text}"""
+
+
+def naturalize(ctx):
+    """自然化改写：逐节去掉 AI 腔；改完重新核对，某节的问题变多（引错、丢出处、数字走样）就退回原稿。"""
+    st = ctx.state
+    docs = _docs(st)
+    st["naturalized"] = True
+    sk = st["skill"]
+    before = {sec["id"]: sec["md"] for sec in st["sections"]}
+    jobs = [sec for sec in st["sections"] if (sec.get("md") or "").strip()]
+    t0 = time.time()
+    res = ctx.tool_parallel([("llm", {"json_mode": False, "max_tokens": 1800, "messages": [{"role": "user", "content": NATURAL_PROMPT.format(
+        reader=sk.get("reader", ""), style="；".join(sk.get("style") or []), tropes="、".join(AI_TROPES[:14]), text=sec["md"])}]})
+        for sec in jobs], max_workers=6)
+    log = []
+    for sec, (stt, r) in zip(jobs, res):
+        if stt != "ok" or not (r.get("content") or "").strip():
+            log.append({"section": sec["id"], "result": "失败，保留原稿"})
+            continue
+        new = _finish_section(st, sec, r["content"])
+        lost = set(writing.CITE.findall(sec["md"])) - set(writing.CITE.findall(new))
+        if lost:
+            log.append({"section": sec["id"], "result": f"丢了出处 {sorted(lost)}，保留原稿"})
+            continue
+        sec["md"] = new
+        log.append({"section": sec["id"], "result": "已改写"})
+    st.setdefault("timing", {})["自然化改写（并行）"] = round(time.time() - t0, 1)
+    if _stages(ctx)["natural_recheck"]:
+        old_rep = st.get("check") or writing.check([{**x, "md": before[x["id"]]} for x in st["sections"]], docs)
+        rep = _check(ctx, docs)
+        bad_old = {}
+        for i in _serious(ctx, old_rep):
+            bad_old[i["section"]] = bad_old.get(i["section"], 0) + 1
+        bad_new = {}
+        for i in _serious(ctx, rep):
+            bad_new[i["section"]] = bad_new.get(i["section"], 0) + 1
+        reverted = []
+        for sec in st["sections"]:
+            if bad_new.get(sec["id"], 0) > bad_old.get(sec["id"], 0):
+                sec["md"] = before[sec["id"]]
+                reverted.append(sec["id"])
+                for x in log:
+                    if x["section"] == sec["id"]:
+                        x["result"] = f"改写后核对问题从 {bad_old.get(sec['id'], 0)} 处变成 {bad_new[sec['id']]} 处，退回原稿"
+        st["check"] = _check(ctx, docs) if reverted else rep
+    else:
+        st["check"] = writing.check(st["sections"], docs, st["verdicts"])
+    st["natural_log"] = log
+    ctx.observe("自然化改写：" + "；".join(f"{next(x['heading'] for x in st['sections'] if x['id'] == l['section'])} {l['result']}"
+                                       for l in log))
+    return "illustrate" if _stages(ctx)["illustrate"] else "save"
 
 
 # ---------------------------------------------------------------- illustrate（配图）
@@ -855,6 +955,8 @@ def build_and_save(st, note: str, task_id: str | None, extra_meta: dict | None =
             "gap_log": st["gap_log"], "prefs": st["prefs"],
             "figures": figs, "cover": cover, "image_rejected": st.get("image_rejected") or [], "image_checks": image_checks,
             "chart_log": st.get("chart_log") or [], "outline_by": st["outline_by"], "draft_by": st["draft_by"],
+            "ref_check": writing.reference_check(rep, docs, sk), "ref_notes": st.get("ref_notes") or [],
+            "natural_log": st.get("natural_log") or [], "stages": st.get("stages_used"),
             "write_task": st.get("write_task"), "revisions": st.get("revisions") or [], **(extra_meta or {})}
     v = save_version(st["article_id"], md, meta, note=note, title=st["title"], task_id=task_id)
     return v, md, rep
@@ -876,7 +978,7 @@ def save_version(aid: str, md: str, meta: dict, note: str, title: str | None = N
 register_graph(Graph(
     name="write",
     nodes=dict(load=load, select=select, outline=outline, gap=gap, draft=draft, check=check, fix=fix,
-               illustrate=illustrate, save=save),
+               naturalize=naturalize, illustrate=illustrate, save=save),
     start="load",
     on_budget="save",
 ))
