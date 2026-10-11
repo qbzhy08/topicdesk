@@ -337,3 +337,21 @@ class TranslateTest(CollectBase):
         run_task(tid)
         task = db.query_one("SELECT * FROM tasks WHERE id=?", (tid,))
         self.assertEqual(task["state"]["plan"]["queries_en"], ["my custom query"])   # 用户填写的优先，不被覆盖
+
+
+
+class EarlyStopTest(CollectBase):
+    def test_stops_soon_after_full_coverage(self):
+        tid = create_task("research", "开源大模型 长上下文 评测",
+                          params={"no_llm": True, "max_docs": 200, "max_fetch": 50, "enrich_after_cover": 1,
+                                  "en_keywords": ["long context LLM"],
+                                  "sources": ["ithome", "36kr", "sspai", "juejin", "arxiv", "hn", "github"]},
+                          budget={"max_tool_calls": 300, "max_steps": 300})
+        self.assertEqual(run_task(tid), "done")
+        task = db.query_one("SELECT * FROM tasks WHERE id=?", (tid,))
+        rep = task["state"]["report"]
+        self.assertIsNotNone(rep["covered_at"])
+        fetched_after = task["state"]["fetches"] - rep["covered_at"]["fetches"]
+        self.assertLessEqual(fetched_after, 1)                 # 覆盖后最多再补抓 1 篇
+        thoughts = " ".join(s["thought"] or "" for s in db.query("SELECT thought FROM steps WHERE task_id=?", (tid,)))
+        self.assertIn("所有子问题已覆盖", thoughts)

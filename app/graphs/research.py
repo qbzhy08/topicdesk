@@ -363,6 +363,32 @@ def decide(ctx):
         queue = [a for a in queue if a["type"] == "fetch" or a.get("initial")]
     if p.get("max_fetch", 15) <= st["fetches"]:
         queue = [a for a in queue if a["type"] != "fetch"]
+
+    # ---- 子问题全部覆盖：进入收尾模式，不再继续扩量
+    #   保留：还没查过的来源各查一次（来源多样性，且是并行批次，很快）；
+    #         少量高价值全文补抓（追溯一手来源、高分聚合条目、高相关摘要），最多 enrich_after_cover 篇；
+    #   放弃：其余摘要补抓和后续检索。
+    if not gaps:
+        if "covered_at" not in st:
+            st["covered_at"] = {"fetches": st["fetches"], "docs": n_docs}
+        budget_left = max(0, p.get("enrich_after_cover", 6) - (st["fetches"] - st["covered_at"]["fetches"]))
+        initial = [a for a in queue if a.get("initial") and a["type"] == "search"]
+        valuable = sorted([a for a in queue if a["type"] == "fetch" and
+                           (a["prio"] >= 40 or ((a.get("base") or {}).get("relevance") or 0) >= 0.6)],
+                          key=lambda a: -a["prio"])[:budget_left]
+        dropped = len(queue) - len(initial) - len(valuable)
+        if dropped > 0:
+            st["dropped_after_cover"] = st.get("dropped_after_cover", 0) + dropped
+        queue = initial + valuable
+        if not queue:
+            st["queue"] = []
+            ctx.think(f"覆盖矩阵：{cov_txt}。所有子问题已覆盖，收尾补抓完成"
+                      + (f"，放弃剩余 {st.get('dropped_after_cover', 0)} 个低价值行动" if st.get("dropped_after_cover") else "")
+                      + "，停止检索")
+            return "images"
+        if dropped > 0:
+            ctx.think(f"所有子问题已覆盖，进入收尾：只保留 {len(initial)} 个未查来源和 {len(valuable)} 篇高价值全文补抓，"
+                      f"放弃 {dropped} 个低价值行动")
     st["queue"] = queue
 
     if queue:
@@ -803,6 +829,7 @@ def report(ctx):
                   for f in (mem.get(i) for i in fact_ids) if f][:30],
     }
     st["report"] = {
+        "covered_at": st.get("covered_at"), "dropped_after_cover": st.get("dropped_after_cover", 0),
         "domains": st.get("domains"), "source_ids": st.get("source_ids"),
         "memory": memory_report,
         "total_docs": len(docs),
