@@ -228,7 +228,24 @@ function renderLive(t) {
 
 // ---------------------------------------------------------------- 新主题（居中大输入框）
 const GREETINGS = ["今天想追踪什么？", "有什么值得深挖的主题？", "想读懂哪个话题？"];
-const EXAMPLES = ["开源大模型的长上下文评测", "固态电池量产进展", "GLP-1 减重药的长期安全性", "A 股量化监管新规影响"];
+// 测试话题：覆盖不同领域，标注各自适合测什么（点击后填入主题并勾选对应领域）
+const EXAMPLES = [
+  { t: "开源大模型的长上下文评测", d: "tech", why: "论文 + 评测数据 · 专题解读" },
+  { t: "固态电池量产进展", d: "auto", why: "时间线多 · 测示意图" },
+  { t: "GLP-1 减重药的长期安全性", d: "health", why: "学术 + 新闻 · 测出处核对" },
+  { t: "A 股量化监管新规影响", d: "finance", why: "传闻与回应 · 观点交锋" },
+  { t: "人形机器人量产与订单", d: "tech", why: "产品图多 · 测配图" },
+  { t: "新能源汽车价格战", d: "auto", why: "数字密集 · 测柱状图" },
+  { t: "司美格鲁肽国内仿制药上市", d: "health", why: "专利到期事件 · 测时间线" },
+  { t: "AI 眼镜值不值得买", d: "consumer", why: "测评 + 用户口碑 · 测社区来源" },
+  { t: "现制茶饮价格战与加盟扩张", d: "consumer", why: "商业新闻 + 社交平台" },
+  { t: "国产 GPU 替代进展", d: "tech", why: "数据与争议并存" },
+  { t: "低空经济与 eVTOL 商业化", d: "general", why: "政策 + 企业动态" },
+  { t: "国产买断制单机游戏出海", d: "game", why: "销量数据 + 玩家讨论" },
+  { t: "外卖平台补贴大战", d: "consumer", why: "多方表态 · 观点交锋" },
+  { t: "大模型 API 降价潮", d: "tech", why: "价格数字多 · 测柱状图" },
+];
+let exampleStart = 0;
 
 function showComposer() {
   $$("#task-list a").forEach((a) => a.classList.remove("active"));
@@ -239,14 +256,28 @@ function showComposer() {
       <p class="hero-hello"><span class="spark big">✳</span>${hello}</p>
       <h1 class="hero-title">${GREETINGS[Math.floor(Math.random() * GREETINGS.length)]}</h1>
       <div class="hero-slot"></div>
-      <div class="hero-examples">${EXAMPLES.map((x) => `<button type="button" class="example">${esc(x)}</button>`).join("")}</div>
+      <div class="hero-examples" id="hero-examples"></div>
       <p class="hero-foot">TopicDesk 会自动拆分子问题、从 20+ 个来源检索、去重核验、按价值排序，并记住你的偏好和上次的结论。</p>
     </div>`;
   const form = $("#new-task");
   form.classList.remove("sending");
   $(".hero-slot", el).append(form);
   const ta = form.topic;
-  $$(".example", el).forEach((b) => b.onclick = () => { ta.value = b.textContent; autoGrow(ta); ta.focus(); translateKeywords(false); });
+  const box = $("#hero-examples", el);
+  const drawExamples = () => {
+    const n = 6, pick = [];
+    for (let i = 0; i < n; i++) pick.push(EXAMPLES[(exampleStart + i) % EXAMPLES.length]);
+    box.innerHTML = pick.map((x) => `<button type="button" class="example" data-t="${esc(x.t)}" data-d="${esc(x.d)}" title="${esc(x.why)}">
+        ${esc(x.t)}<small>${esc(x.why)}</small></button>`).join("") +
+      `<button type="button" class="example more" id="ex-more">换一批 ↻</button>`;
+    $$(".example[data-t]", box).forEach((b) => b.onclick = () => {
+      ta.value = b.dataset.t;
+      if (DOMAIN_NAME[b.dataset.d]) renderDomainChips(b.dataset.d, true);   // 只勾这个话题的领域
+      autoGrow(ta); ta.focus(); translateKeywords(false);
+    });
+    $("#ex-more", box).onclick = () => { exampleStart = (exampleStart + n) % EXAMPLES.length; drawExamples(); };
+  };
+  drawExamples();
   autoGrow(ta);
   setTimeout(() => ta.focus(), 50);
 }
@@ -932,10 +963,10 @@ async function loadDomains() {
 }
 
 // 新主题界面：领域胶囊（内置 + 自建）+ “＋ 标签”就地新建
-function renderDomainChips(checkId) {
+function renderDomainChips(checkId, only = false) {
   const box = $("#domain-chips");
   if (!box) return;
-  const checked = new Set($$("#domain-chips input:checked").map((i) => i.value));
+  const checked = only ? new Set() : new Set($$("#domain-chips input:checked").map((i) => i.value));
   if (checkId) checked.add(checkId);
   box.innerHTML = domainsCache.map((d) => `<label class="chip-t ${d.custom ? "custom" : ""}" title="${esc(d.desc || d.name)}">
     <input type="checkbox" name="domain" value="${esc(d.id)}" ${checked.has(d.id) ? "checked" : ""}><span>${esc(d.name)}</span></label>`).join("");
