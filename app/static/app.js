@@ -677,7 +677,9 @@ async function showSources() {
       const okRecent = h.last_ok && (!h.last_fail || h.last_ok > h.last_fail);
       return `<tr><td><b>${esc(s.name)}</b><br><small>${esc(s.config?.feed || s.base_url || "")}</small></td>
         <td><span class="tag">${esc(s.method)}</span><br>${(s.config?.domains || []).map((d) => `<span class="tag">${DOMAIN_NAME[d] || d}</span>`).join(" ")}</td><td>${s.docs}</td>
-        <td>${h.calls ? (okRecent ? `<span class="ok">正常</span> ${fmtTime(h.last_ok)}` : `<span class="gap">失败</span> ${esc(err?.kind || "")} ${esc(err?.reason || "")}<br><small>${fmtTime(h.last_fail)}，连续 ${h.consecutive_fail} 次</small>`) : "<small>未使用</small>"}</td>
+        <td>${h.calls ? (okRecent ? `<span class="ok">正常</span> ${fmtTime(h.last_ok)}${h.last_count === 0
+          ? `<br><small class="gap">最近一次 0 条：${esc(h.last_note || "没有匹配结果")}</small>`
+          : h.last_count != null ? `<br><small>最近一次 ${h.last_count} 条</small>` : ""}` : `<span class="gap">失败</span> ${esc(err?.kind || "")} ${esc(err?.reason || "")}<br><small>${fmtTime(h.last_fail)}，连续 ${h.consecutive_fail} 次</small>`) : "<small>未使用</small>"}</td>
         <td class="nowrap">${s.id !== "web" ? `<button class="ghost sm" data-test="${s.id}">测试</button>` : ""}
           <button class="ghost sm" data-toggle="${s.id}" data-on="${s.enabled}">${s.enabled ? "停用" : "启用"}</button></td></tr>
         <tr class="test-row" id="test-${s.id}" hidden><td colspan="5"></td></tr>`;
@@ -773,7 +775,10 @@ async function renderWebsearchForm() {
   $("#ws-test").onclick = async () => {
     $("#ws-result").textContent = "测试中…";
     const r = await api("/api/settings/websearch/test", { method: "POST", body: {} });
-    $("#ws-result").innerHTML = Object.entries(r.results).map(([k, v]) => `${k}：${v.ok ? `成功，${v.count} 条${v.first ? "，例如「" + esc(v.first) + "」" : ""}` : "失败，" + esc(v.error)}`).join("<br>");
+    $("#ws-result").innerHTML = `<table class="tbl small"><tr><th>平台</th><th>服务返回</th><th>属于该平台</th><th>例子 / 说明</th></tr>${Object.entries(r.results).map(([k, v]) => v.ok
+      ? `<tr><td>${esc(k)}</td><td>${v.raw}</td><td class="${v.count ? "ok" : "gap"}">${v.count}${v.retried ? "（site: 重试）" : ""}</td><td>${v.first ? esc(v.first) : v.raw ? "服务返回了结果，但都不是该平台的页面：该服务对这个平台收录少" : "没有结果"}</td></tr>`
+      : `<tr><td>${esc(k)}</td><td colspan="3" class="gap">失败：${esc(v.error)}</td></tr>`).join("")}</table>
+      <p class="small">用同一个查询「${esc(r.query)}」测试，看你选的搜索服务对各平台的收录情况。</p>`;
   };
 }
 

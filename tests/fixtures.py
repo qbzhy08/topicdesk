@@ -1,6 +1,7 @@
 """离线测试用的假网站：模拟 RSS、API、网页、图片、robots.txt、限流和访问受限。"""
 import io
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 from app.collect import fetch
@@ -271,7 +272,14 @@ class FakeWeb:
         if url == "https://api.bochaai.com/v1/web-search" and method == "POST":
             if headers.get("Authorization") != "Bearer test-key":
                 return 401, J, b'{"code":401,"msg":"invalid key"}', url
-            rows = _bocha_rows((json_body or {}).get("include"))
+            q = (json_body or {}).get("query") or ""
+            m = re.search(r"site:(\S+)", q)
+            if m:
+                rows = _bocha_rows(m.group(1))
+            elif self.state.get("ignore_include"):       # 模拟不支持站点限定参数的服务：总是返回全网结果
+                rows = _bocha_rows(None)
+            else:
+                rows = _bocha_rows((json_body or {}).get("include"))
             return 200, J, json.dumps({"code": 200, "data": {"webPages": {"value": rows}}}, ensure_ascii=False).encode(), url
         if url == "https://mp.weixin.qq.com/s/aaa":
             return 200, H, wechat_page("某某动漫", 0).encode(), url

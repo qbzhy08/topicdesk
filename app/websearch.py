@@ -70,8 +70,23 @@ def _host_ok(url: str, site: str | None) -> bool:
     return h == site or h.endswith("." + site)
 
 
-def search(query: str, *, site: str | None = None, count: int = 10, since: float | None = None) -> list[dict]:
-    """返回 [{title, url, snippet, published_at, site_name}]。未配置时抛 FetchError("config")。"""
+def search(query: str, *, site: str | None = None, count: int = 10, since: float | None = None,
+           stats: dict | None = None) -> list[dict]:
+    """返回 [{title, url, snippet, published_at, site_name}]。未配置时抛 FetchError("config")。
+    stats（可选）记录：raw=服务返回条数，matched=属于目标站点的条数，retried=是否用 site: 语法重试过。"""
+    stats = stats if stats is not None else {}
+    rows = _search(query, site=site, count=count, since=since)
+    stats.update(raw=len(rows), matched=sum(_host_ok(x["url"], site) for x in rows), retried=False)
+    if site and rows and not stats["matched"] and settings()["provider"] != "brave":
+        # 返回了结果但没有一条来自目标站点：多半是服务不支持站点限定参数，改用查询语法 site: 再试一次
+        rows2 = _search(f"{query} site:{site}", site=None, count=count, since=since)
+        stats.update(retried=True, raw=stats["raw"] + len(rows2),
+                     matched=sum(_host_ok(x["url"], site) for x in rows2))
+        rows = rows2
+    return [x for x in rows if _host_ok(x["url"], site)]
+
+
+def _search(query: str, *, site: str | None, count: int, since: float | None) -> list[dict]:
     s = settings()
     if not available():
         raise FetchError("config", "未配置搜索 API（在“设置”页选择服务并填写 key 后即可使用）", "websearch")
@@ -119,4 +134,4 @@ def search(query: str, *, site: str | None = None, count: int = 10, since: float
             raise FetchError("config", f"{PROVIDERS[prov]} 拒绝了请求（HTTP {e.status}）：API key 无效或额度用完",
                              prov, e.status) from e
         raise
-    return [x for x in out if x.get("url") and _host_ok(x["url"], site)]
+    return [x for x in out if x.get("url")]

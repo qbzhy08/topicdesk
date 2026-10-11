@@ -169,13 +169,14 @@ def list_sources(enabled_only=True) -> list[dict]:
     return db.query(sql + " ORDER BY rowid")
 
 
-def record_health(source_id: str, ok: bool, err: FetchError | None = None, n: int = 0):
+def record_health(source_id: str, ok: bool, err: FetchError | None = None, n: int = 0, note: str | None = None):
     row = db.query_one("SELECT health FROM sources WHERE id=?", (source_id,))
     if not row:
         return
     h = row["health"] or {}
     if ok:
-        h.update(last_ok=db.now(), consecutive_fail=0, last_count=n)
+        h.update(last_ok=db.now(), consecutive_fail=0, last_count=n, last_note=note)
+        h["empty_streak"] = 0 if n else h.get("empty_streak", 0) + 1
     else:
         h.update(last_fail=db.now(), consecutive_fail=h.get("consecutive_fail", 0) + 1,
                  last_error=err.to_dict() if err else None)
@@ -542,7 +543,13 @@ SUMMARY_ONLY = {"zhihu", "tieba", "xiaohongshu", "douyin"}
 def search_web(source: dict, query: str, limit: int = 10, since: float | None = None, **_) -> list[dict]:
     from .. import websearch
     site, platform = WEB_PLATFORMS.get(source["id"], (None, "全网搜索"))
-    rows = websearch.search(query, site=site, count=limit, since=since)
+    ws = {}
+    rows = websearch.search(query, site=site, count=limit, since=since, stats=ws)
+    if not rows:
+        source["_note"] = (f"搜索服务返回 {ws.get('raw', 0)} 条，但没有一条来自 {site}"
+                           + ("（已改用 site: 语法重试）" if ws.get("retried") else "")
+                           + "：该服务对这个平台收录少，或主题在这个平台讨论少") if site and ws.get("raw") \
+            else f"搜索服务对「{query}」没有返回结果"
     items = []
     for x in rows:
         snippet = re.sub(r"\s+", " ", x.get("snippet") or "").strip()
@@ -688,6 +695,7 @@ def in_window(published_at, since: float | None) -> bool:
 
 def search(source_id: str, query: str, limit: int = 15, terms: list[str] | None = None,
            since: float | None = None, stats: dict | None = None) -> list[dict]:
+    """检索一个来源。健康度记录：请求是否成功、原始条数、时间窗口过滤后条数，以及 0 条时的原因。"""
     src = db.query_one("SELECT * FROM sources WHERE id=?", (source_id,))
     if src is None:
         raise FetchError("bad_content", f"未知来源 {source_id}")
@@ -700,12 +708,18 @@ def search(source_id: str, query: str, limit: int = 15, terms: list[str] | None 
         if e.kind != "config":      # 未配置 key 不是来源故障，不计入健康度（配置后立即可用）
             record_health(source_id, False, e)
         raise
-    record_health(source_id, True, n=len(items))
+    raw = len(items)
     if since:     # 接口不支持时间过滤的来源（RSS、arXiv、掘金等）在这里统一过滤
         kept = [it for it in items if in_window(it.get("published_at"), since)]
         if stats is not None:
             stats["dropped_old"] = len(items) - len(kept)
         items = kept
+    note = src.get("_note")
+    if raw and not items:
+        note = f"返回 {raw} 条，全部早于时间窗口，已过滤"
+    elif not raw and not note:
+        note = f"对「{query[:20]}」没有匹配结果"
+    record_health(source_id, True, n=len(items), note=None if items else note)
     return items
 
 

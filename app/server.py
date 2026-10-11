@@ -416,16 +416,22 @@ def set_websearch():
 
 @app.post("/api/settings/websearch/test")
 def test_websearch():
-    """用一个固定查询测试：全网一次、限定公众号一次，返回条数和第一条标题。"""
+    """用同一个查询逐个平台测试，显示服务返回条数和其中属于该平台的条数（判断该服务对各平台的收录情况）。"""
     from .collect.fetch import FetchError
+    from .collect.sources import WEB_PLATFORMS
+    q = (request.get_json(silent=True) or {}).get("query") or "大模型"
     out = {}
-    for name, site in (("全网", None), ("公众号", "mp.weixin.qq.com")):
+    for sid, (site, name) in WEB_PLATFORMS.items():
+        st = {}
         try:
-            rows = websearch.search("大模型 长上下文", site=site, count=5)
-            out[name] = {"ok": True, "count": len(rows), "first": (rows[0]["title"] if rows else None)}
+            rows = websearch.search(q, site=site, count=10, stats=st)
+            out[name] = {"ok": True, "count": len(rows), "raw": st.get("raw", 0), "retried": st.get("retried"),
+                         "first": (rows[0]["title"] if rows else None)}
         except FetchError as e:
             out[name] = {"ok": False, "error": f"{e.kind}：{e.reason}"}
-    return jsonify(ok=all(v["ok"] for v in out.values()), results=out)
+            if e.kind == "config":
+                break
+    return jsonify(ok=all(v["ok"] for v in out.values()), results=out, query=q)
 
 
 # ---------------------------------------------------------------- 记忆

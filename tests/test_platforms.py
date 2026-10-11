@@ -109,3 +109,19 @@ class PlatformTest(CollectBase):
         self.assertEqual(websearch.settings()["api_key"], "test-key")
         t = c.post("/api/settings/websearch/test", json={}).json
         self.assertTrue(t["ok"], t)
+
+
+class EmptyReasonTest(CollectBase):
+    def test_site_filter_retry_and_empty_reason(self):
+        websearch.save_settings("bocha", "test-key")
+        self.web.state["ignore_include"] = True
+        items = sources.search("zhihu", "极创工作室")                      # include 被忽略 → 用 site: 重试
+        self.assertEqual([i["url"] for i in items], ["https://www.zhihu.com/question/789"])
+        items = sources.search("tieba", "极创工作室")                      # 该平台确实没有结果
+        self.assertEqual(items, [])
+        h = db.query_one("SELECT health FROM sources WHERE id='tieba'")["health"]
+        self.assertEqual(h["last_count"], 0)
+        self.assertIn("tieba.baidu.com", h["last_note"])
+        h2 = db.query_one("SELECT health FROM sources WHERE id='zhihu'")["health"]
+        self.assertEqual(h2["last_count"], 1)
+        self.assertIsNone(h2["last_note"])
