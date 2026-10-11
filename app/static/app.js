@@ -442,6 +442,7 @@ function memRow(m) {
       <small>${esc(m.kind)} · 更新 ${fmtTime(m.updated_at)} · 使用 ${m.used_count} 次${m.last_used_at ? `（最近 ${fmtTime(m.last_used_at)}）` : ""}${m.note ? ` · ${esc(m.note)}` : ""}</small></div>
     <div class="doc-tags">
       <span class="tag st-${m.status}">${MSTATUS[m.status] || m.status}</span>
+      ${m.invalid_value ? `<span class="tag v-refuted">内容无效，未生效（建议删除）</span>` : ""}
       ${v ? `<span class="tag v-${v}">${VERIFY[v] || v}</span>` : ""}
       ${m.meta?.independent != null ? `<span class="tag">独立来源 ${m.meta.independent}${m.meta.reprints ? ` · 转载 ${m.meta.reprints}` : ""}</span>` : ""}
       ${m.applies_to && m.applies_to !== "all" ? `<span class="tag">${esc(m.applies_to)}</span>` : ""}

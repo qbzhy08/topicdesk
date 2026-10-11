@@ -178,3 +178,13 @@ class PreferenceValidationTest(CollectBase):
         self.assertEqual(c.post("/api/preferences", json={"type": "source_prefer", "value": ["arXiv"]}).status_code, 201)
         p = mem.list_memories(scope="user", kind="preference", status="alive")[0]
         self.assertEqual(p["meta"]["value"], ["arxiv"])      # 名称自动转成来源 ID
+
+
+class LegacyPrefTest(CollectBase):
+    def test_old_garbage_preferences_not_recalled(self):
+        mem.add("user", "preference", "关注重点：12", mkey="focus@all", meta={"type": "focus", "value": ["12"]})
+        mem.add("user", "preference", "写作要求：q", mkey="style@all", meta={"type": "style", "value": "q"})
+        rec = mem.recall(topic="T", record_use=False)
+        self.assertEqual(rec["preferences"], [])
+        rows = mem.list_memories(scope="user", kind="preference")
+        self.assertTrue(all(r.get("invalid_value") for r in rows))

@@ -239,8 +239,8 @@ def plan(ctx):
             ctx.think(f"未配置 LLM，从历史交付记忆复用有效的英文关键词 {queries_en}")
 
     # ---- 偏好影响检索：关注重点 → 增加关键词和子问题；排除内容 → 过滤；来源偏好 → 提高优先级
-    if prefs.get("focus"):
-        fv = _vals(prefs["focus"]["value"])
+    fv = _vals(prefs["focus"]["value"]) if prefs.get("focus") else []
+    if fv:
         terms_zh = list(dict.fromkeys(terms_zh + fv))
         aspects.append({"id": "user_focus", "name": f"用户关注：{'、'.join(fv)}", "kind": "keywords",
                         "need": 2, "keywords": fv})

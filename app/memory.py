@@ -189,6 +189,7 @@ def recall(user_id: str = "default", topic: str | None = None, purpose: str = "r
         "SELECT * FROM memories WHERE scope='user' AND user_id=? AND status IN ('active','stale') "
         "AND (applies_to IS NULL OR applies_to IN ('all', ?, ?)) ORDER BY updated_at DESC",
         (user_id, f"topic:{topic}", purpose))]
+    prefs = [p for p in prefs if pref_valid(p)]      # 早期保存的无意义偏好（如“q”“12”）不召回
     topic_rows = [_row(r) for r in db.query(
         "SELECT * FROM memories WHERE scope='topic' AND topic=? AND status IN ('active','stale') "
         "ORDER BY updated_at DESC", (topic,))] if topic else []
@@ -285,6 +286,17 @@ def validate_preference(ptype: str, value):
     return text
 
 
+def pref_valid(m: dict) -> bool:
+    meta = m.get("meta") or {}
+    if m.get("kind") != "preference" or not meta.get("type"):
+        return True
+    try:
+        validate_preference(meta["type"], meta.get("value"))
+        return True
+    except PreferenceError:
+        return False
+
+
 def set_preference(user_id: str, ptype: str, value, *, applies_to: str = "all", actor: str = "user",
                    task_id=None) -> str:
     """长期偏好：只在用户明确确认“长期保存”时调用。同类型同范围的旧偏好被更正取代。"""
@@ -340,7 +352,11 @@ def list_memories(scope: str | None = None, topic: str | None = None, kind: str 
     elif status:
         sql += " AND status=?"
         args.append(status)
-    return [_row(r) for r in db.query(sql + " ORDER BY updated_at DESC LIMIT 500", args)]
+    rows = [_row(r) for r in db.query(sql + " ORDER BY updated_at DESC LIMIT 500", args)]
+    for r in rows:
+        if r["kind"] == "preference" and not pref_valid(r):
+            r["invalid_value"] = True
+    return rows
 
 
 def detail(mid: str) -> dict:
