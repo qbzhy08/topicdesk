@@ -27,6 +27,8 @@ async function init() {
   graphs = await api("/api/graphs");
   const sel = $("#new-task [name=graph]");
   sel.innerHTML = graphs.map((g) => `<option value="${esc(g.name)}" ${g.name === "research" ? "selected" : ""}>${esc(GRAPH_NAME[g.name] || g.name)}</option>`).join("");
+  await loadDomains();
+  setupTagPop();
   await loadSourceChecks();
   $("#new-task").addEventListener("submit", submitTask);
   const ta = $("#new-task").topic;
@@ -789,7 +791,55 @@ async function showDoc(id) {
 }
 
 // ---------------------------------------------------------------- 记忆
-const DOMAIN_NAME = { tech: "科技", finance: "金融", science: "学术", general: "综合", community: "社区" };
+const DOMAIN_NAME = { tech: "科技", finance: "金融", science: "学术", general: "综合", community: "社区" };   // 启动后被 /api/domains 覆盖
+let domainsCache = [];
+
+async function loadDomains() {
+  domainsCache = await api("/api/domains");
+  for (const k of Object.keys(DOMAIN_NAME)) delete DOMAIN_NAME[k];
+  for (const d of domainsCache) DOMAIN_NAME[d.id] = d.name;
+  renderDomainChips();
+}
+
+// 新主题界面：领域胶囊（内置 + 自建）+ “＋ 标签”就地新建
+function renderDomainChips(checkId) {
+  const box = $("#domain-chips");
+  if (!box) return;
+  const checked = new Set($$("#domain-chips input:checked").map((i) => i.value));
+  if (checkId) checked.add(checkId);
+  box.innerHTML = domainsCache.map((d) => `<label class="chip-t ${d.custom ? "custom" : ""}" title="${esc(d.desc || d.name)}">
+    <input type="checkbox" name="domain" value="${esc(d.id)}" ${checked.has(d.id) ? "checked" : ""}><span>${esc(d.name)}</span></label>`).join("");
+}
+
+function tagForm(prefix) {
+  return `<div class="tag-form">
+    <label>标签名称<input name="${prefix}name" maxlength="12" placeholder="例如：宠物、留学、户外运动"></label>
+    <label>判断关键词（可空，逗号分隔）<input name="${prefix}hints" placeholder="例如：猫, 狗, 猫粮, 宠物医院"></label>
+    <p class="small">主题里出现这些词时会自动归到这个标签；新标签默认用知乎、小红书、抖音、B站、全网搜索和公众号检索，可在“信息源”页给其他来源加上它。</p>
+    <div class="row"><button type="button" data-tag-save>新建标签</button><button type="button" class="ghost" data-tag-cancel>取消</button><small class="gap" data-tag-msg></small></div></div>`;
+}
+
+function setupTagPop() {
+  const pop = $("#tag-pop");
+  $("#tag-add-btn").onclick = () => {
+    pop.hidden = !pop.hidden;
+    if (pop.hidden) return;
+    pop.innerHTML = tagForm("tp_");
+    pop.querySelector("[name=tp_name]").focus();
+    pop.querySelector("[data-tag-cancel]").onclick = () => { pop.hidden = true; };
+    const save = async () => {
+      const name = pop.querySelector("[name=tp_name]").value.trim();
+      try {
+        const d = await api("/api/domains", { method: "POST", body: { name, hints: pop.querySelector("[name=tp_hints]").value } });
+        pop.hidden = true;
+        await loadDomains();
+        renderDomainChips(d.id);
+      } catch (err) { pop.querySelector("[data-tag-msg]").textContent = err.message; }
+    };
+    pop.querySelector("[data-tag-save]").onclick = save;
+    pop.querySelectorAll("input").forEach((i) => i.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); save(); } });
+  };
+}
 const PREF_TYPES = { reading_minutes: "阅读时间（分钟）", background: "知识背景", focus: "关注重点",
   exclude: "不想看的内容", source_prefer: "来源偏好", style: "写作要求" };
 
@@ -952,26 +1002,35 @@ async function showSources() {
   sourcesCache = await api("/api/sources");
   el.innerHTML = `
     <div class="detail-head"><div><p class="kicker">信息源</p><h1>采集来源与健康状况</h1></div></div>
-    <table class="tbl"><tr><th>来源</th><th>方式</th><th>资料</th><th>最近状态</th><th></th></tr>
+    <div class="card" id="tag-mgr"><h3>领域标签</h3>
+      <p class="small">主题被判定为哪些领域，就用带这些标签的来源检索。可以新建自己的标签，再在下面的来源上点“标签”勾选。</p>
+      <div class="tag-list">${domainsCache.map((d) => `<span class="dtag ${d.custom ? "custom" : ""}" title="${esc(d.desc)}${d.hints?.length ? "\n关键词：" + esc(d.hints.slice(0, 12).join("、")) : ""}">
+        ${esc(d.name)} <small>${d.sources} 个来源</small>${d.custom ? `<button class="x" data-del-tag="${esc(d.id)}" title="删除这个标签">×</button>` : ""}</span>`).join("")}
+        <button class="chip-add" id="mgr-add">＋ 新建标签</button></div>
+      <div id="mgr-form" hidden></div></div>
+    <table class="tbl src-tbl"><tr><th>来源</th><th>方式</th><th>资料</th><th>最近状态</th><th></th></tr>
     ${sourcesCache.map((s) => {
       const h = s.health || {};
       const err = h.last_error;
       const okRecent = h.last_ok && (!h.last_fail || h.last_ok > h.last_fail);
       return `<tr><td><b>${esc(s.name)}</b><br><small>${esc(s.config?.feed || s.base_url || "")}</small></td>
-        <td><span class="tag">${esc(s.method)}</span><br>${(s.config?.domains || []).map((d) => `<span class="tag">${DOMAIN_NAME[d] || d}</span>`).join(" ")}</td><td>${s.docs}</td>
+        <td><span class="tag">${esc(s.method)}</span><br>${s.config?.any_domain ? `<span class="tag">适用所有领域</span>` : (s.config?.domains || []).map((d) => `<span class="tag">${esc(DOMAIN_NAME[d] || d)}</span>`).join(" ")}
+          ${s.config?.any_domain || s.id === "web" ? "" : `<button class="linkish" data-edit-tags="${s.id}">标签</button>`}</td><td class="c-docs">${s.docs}<span class="m-only"> 篇资料</span></td>
         <td>${h.calls ? (okRecent ? `<span class="ok">正常</span> ${fmtTime(h.last_ok)}${h.last_count === 0
           ? `<br><small class="muted">最近一次 0 条：${esc(h.last_note || "没有匹配结果")}</small>`
           : h.last_count != null ? `<br><small>最近一次 ${h.last_count} 条</small>` : ""}` : `<span class="gap">失败</span> ${esc(err?.kind || "")} ${esc(err?.reason || "")}<br><small>${fmtTime(h.last_fail)}，连续 ${h.consecutive_fail} 次</small>`) : "<small>未使用</small>"}</td>
         <td class="nowrap">${s.id !== "web" ? `<button class="ghost sm" data-test="${s.id}">测试</button>` : ""}
           <button class="ghost sm" data-toggle="${s.id}" data-on="${s.enabled}">${s.enabled ? "停用" : "启用"}</button></td></tr>
-        <tr class="test-row" id="test-${s.id}" hidden><td colspan="5"></td></tr>`;
+        <tr class="test-row" id="test-${s.id}" hidden><td colspan="5"></td></tr>
+        <tr class="test-row" id="tags-${s.id}" hidden><td colspan="5"></td></tr>`;
     }).join("")}</table>
     <form class="card" id="add-src"><h3>添加 RSS 来源</h3>
       <div class="row"><input name="name" placeholder="名称" required><input name="feed" placeholder="RSS 地址" required></div>
       <label class="opt"><input type="checkbox" name="full_text"> RSS 内含全文</label>
       <label class="opt"><input type="checkbox" name="browser"> 文章页需要浏览器渲染</label>
       <input name="search_feed" placeholder="可选：站内搜索 RSS 模板，用 {q} 表示关键词，如 https://example.com/?s={q}&feed=rss2" style="width:100%;padding:6px;margin:4px 0">
-      <div class="row"><small>领域（至少选一个，检索这些领域的主题时才会用到它）：</small>${Object.entries(DOMAIN_NAME).map(([k, v]) => `<label class="opt"><input type="checkbox" name="domains" value="${k}"> ${v}</label>`).join("")}</div>
+      <p class="small">领域（至少选一个，检索这些领域的主题时才会用到它）：</p>
+      <div class="chips">${domainsCache.map((d) => `<label class="chip-t"><input type="checkbox" name="domains" value="${esc(d.id)}"><span>${esc(d.name)}</span></label>`).join("")}</div>
       <p class="small gap" id="add-src-msg"></p>
       <select name="lang"><option value="zh">中文</option><option value="en">英文</option></select>
       <button>添加</button></form>`;
@@ -984,6 +1043,42 @@ async function showSources() {
       ? `<span class="ok">可用</span> ${r.ms}ms，返回 ${r.count} 条：${r.sample.map((x) => `<br>· ${esc(x.title)} <small>${KIND[x.kind]}</small>`).join("")}`
       : `<span class="gap">失败</span> ${esc(r.error.kind)}：${esc(r.error.reason)}（${r.ms}ms）`;
   });
+  $$("[data-edit-tags]").forEach((b) => b.onclick = () => {
+    const sid = b.dataset.editTags, row = $(`#tags-${sid}`), src = sourcesCache.find((x) => x.id === sid);
+    row.hidden = !row.hidden;
+    if (row.hidden) return;
+    const cur = new Set(src.config?.domains || []);
+    row.firstElementChild.innerHTML = `<div class="chips">${domainsCache.map((d) => `<label class="chip-t"><input type="checkbox" value="${esc(d.id)}" ${cur.has(d.id) ? "checked" : ""}><span>${esc(d.name)}</span></label>`).join("")}</div>
+      <div class="row" style="margin-top:6px"><button class="sm" data-save>保存「${esc(src.name)}」的标签</button><small class="gap" data-msg></small></div>`;
+    row.querySelector("[data-save]").onclick = async () => {
+      const doms = [...row.querySelectorAll("input:checked")].map((i) => i.value);
+      try { await api(`/api/sources/${sid}`, { method: "PATCH", body: { domains: doms } }); await loadDomains(); showSources(); }
+      catch (err) { row.querySelector("[data-msg]").textContent = err.message; }
+    };
+  });
+  $$("[data-del-tag]").forEach((b) => b.onclick = async () => {
+    const d = domainsCache.find((x) => x.id === b.dataset.delTag);
+    const box = $("#mgr-form");
+    box.hidden = false;
+    box.innerHTML = `<div class="fc-action"><p>删除标签「${esc(d.name)}」？它会从 ${d.sources} 个来源上摘掉，已有资料不受影响。</p>
+      <div class="row"><button class="danger" data-yes>删除</button><button class="ghost" data-no>取消</button></div></div>`;
+    box.querySelector("[data-no]").onclick = () => { box.hidden = true; };
+    box.querySelector("[data-yes]").onclick = async () => { await api(`/api/domains/${d.id}`, { method: "DELETE" }); await loadDomains(); showSources(); };
+  });
+  $("#mgr-add").onclick = () => {
+    const box = $("#mgr-form");
+    box.hidden = false;
+    box.innerHTML = tagForm("mg_") + `<p class="small">挂到哪些来源：</p><div class="chips">${sourcesCache.filter((s) => s.id !== "web" && !s.config?.any_domain).map((s) =>
+      `<label class="chip-t"><input type="checkbox" value="${esc(s.id)}" ${["zhihu", "xiaohongshu", "douyin", "bilibili"].includes(s.id) ? "checked" : ""}><span>${esc(s.name)}</span></label>`).join("")}</div>`;
+    box.querySelector("[data-tag-cancel]").onclick = () => { box.hidden = true; };
+    box.querySelector("[data-tag-save]").onclick = async () => {
+      const sources = [...box.querySelectorAll(".chips input:checked")].map((i) => i.value);
+      try {
+        await api("/api/domains", { method: "POST", body: { name: box.querySelector("[name=mg_name]").value, hints: box.querySelector("[name=mg_hints]").value, sources } });
+        await loadDomains(); showSources();
+      } catch (err) { box.querySelector("[data-tag-msg]").textContent = err.message; }
+    };
+  };
   $$("[data-toggle]").forEach((b) => b.onclick = async () => {
     await api(`/api/sources/${b.dataset.toggle}`, { method: "PATCH", body: { enabled: b.dataset.on !== "1" } });
     showSources();

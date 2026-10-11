@@ -23,6 +23,7 @@ from urllib.parse import urlsplit
 from datetime import datetime, timedelta, timezone
 
 from .. import aspects as aspects_mod
+from .. import domains as domains_mod
 from .. import db, llm, ranking, websearch
 from .. import memory as mem
 from .. import memory_facts as mf
@@ -219,9 +220,8 @@ def _prev_research(topic: str, exclude: str) -> dict | None:
 
 PLAN_PROMPT = """你是信息检索规划助手。用户想了解的主题：「{topic}」。
 {memory}
-先判断主题属于哪些领域（可多选）：tech=科技/AI/软件，finance=金融/经济/公司，science=学术/医学/科研，
-general=综合新闻/政策/社会，community=社区/小众话题/亚文化/个人经验/具体博主或团队（资料主要在 B站、公众号、
-知乎、贴吧、小红书、抖音）。系统会按领域选择信息源。
+先判断主题属于哪些领域（可多选，只能用下面的 id）：{domain_list}。
+其中 community 的资料主要在 B站、公众号、知乎、贴吧、小红书、抖音。系统会按领域选择信息源。
 再把主题拆成需要覆盖的子问题，并给出检索关键词。
 {aspect_rules}
 中文来源是各领域媒体 RSS（按关键词过滤最新文章）和站内搜索（掘金、华尔街见闻等）。中文核心词要用中文媒体
@@ -326,7 +326,7 @@ def plan(ctx):
             res = ctx.tool("llm", messages=[
                 {"role": "system", "content": "你只输出 JSON。"},
                 {"role": "user", "content": PLAN_PROMPT.format(
-                    topic=ctx.topic, memory=memory_note,
+                    topic=ctx.topic, memory=memory_note, domain_list=domains_mod.prompt_list(),
                     aspect_rules=aspects_mod.plan_rules(prev_aspects, "community" in (p.get("domains") or [])))}])
             d = res["data"]
             llm_domains = [x for x in (d.get("domains") or []) if x in DOMAINS] or llm_domains
@@ -391,7 +391,7 @@ def plan(ctx):
         srcs = [s for s in enabled if s["id"] in set(p["sources"])]
         ctx.think(f"使用用户指定的 {len(srcs)} 个来源")
     else:
-        srcs = [s for s in enabled if set(source_domains(s)) & set(domains)]
+        srcs = [s for s in enabled if set(source_domains(s)) & set(domains) or (s["config"] or {}).get("any_domain")]
         if len(srcs) < 4:     # 来源太少时用综合新闻和跨学科学术库兜底
             srcs += [s for s in enabled if s not in srcs and set(source_domains(s)) & {"general"}]
         skipped = [s["name"] for s in enabled if s not in srcs]

@@ -176,7 +176,7 @@ PROMPT = """把下面的检索主题整理成中英文检索关键词。
 - terms_zh：2-4 个中文核心词，用中文媒体常见说法，短（2-5 字）；保留用户已填写的。
 - queries_en：2-4 条英文检索式，每条 2-4 个词，用英文论文/社区常用说法；保留用户已填写的。
 - alt_zh / alt_en：同义词或替代说法（各 2-4 个），检索无结果时用来自动调整。
-- domains：从 tech、finance、science、general 中选。
+- domains：从这些 id 中选（可多选）：{domain_list}。
 只输出 JSON：{{"terms_zh":[],"queries_en":[],"alt_zh":[],"alt_en":[],"domains":[],"note":"一句话"}}"""
 
 
@@ -192,13 +192,14 @@ def suggest(topic: str, zh: list[str] | None = None, en: list[str] | None = None
     if use_llm and llm.available():
         try:
             msgs = [{"role": "system", "content": "你只输出 JSON。"},
-                    {"role": "user", "content": PROMPT.format(topic=topic, zh=zh, en=en)}]
+                    {"role": "user", "content": PROMPT.format(topic=topic, zh=zh, en=en, domain_list=__import__("app.domains", fromlist=["x"]).prompt_list())}]
             out = call(msgs) if call else llm.chat(msgs, json_mode=True, max_tokens=600)
             d = out["data"]
             res = {"terms_zh": list(dict.fromkeys(zh + (d.get("terms_zh") or [])))[:5],
                    "queries_en": list(dict.fromkeys(en + (d.get("queries_en") or [])))[:4],
                    "alt_zh": d.get("alt_zh") or [], "alt_en": d.get("alt_en") or [],
-                   "domains": d.get("domains") or [], "by": "llm",
+                   "domains": [x for x in d.get("domains") or [] if x in __import__("app.domains", fromlist=["x"]).ids()],
+                   "by": "llm",
                    "notes": [f"大模型：{d.get('note', '')}"]}
         except Exception as e:
             res = None

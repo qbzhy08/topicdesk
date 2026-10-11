@@ -399,3 +399,37 @@ small.muted, .muted { color: var(--muted); }
 .fix-row button { margin-left: 8px; }
 .tag.st-archived { color: var(--muted); border-style: dashed; }
 button.danger:not(.ghost) { background: var(--accent); color: #fff; }
+
+/* ---------------- 领域标签 ---------------- */
+.chips-inline { display: contents; }
+.chip-t.custom span { border-style: dashed; }
+.chip-add { font-size: 12.5px; padding: 4px 11px; border-radius: 999px; border: 1px dashed var(--accent); background: transparent;
+  color: var(--accent); }
+.chip-add:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.tag-pop { margin-top: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px;
+  box-shadow: 0 8px 24px rgba(31,28,24,.08); animation: rise .25s ease both; }
+.tag-pop[hidden], #mgr-form[hidden] { display: none; }
+.tag-form label { display: block; margin-bottom: 8px; font-size: 13px; }
+.tag-form input { width: 100%; }
+.tag-list { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+.dtag { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line);
+  background: var(--paper); font-size: 13px; }
+.dtag.custom { border-style: dashed; border-color: var(--accent); }
+.dtag small { color: var(--muted); font-size: 11px; }
+.dtag .x { background: none; color: var(--muted); padding: 0 2px; font-size: 14px; line-height: 1; }
+.dtag .x:hover { color: var(--accent); }
+button.linkish { background: none; color: var(--info); padding: 0; font-size: 12px; text-decoration: underline; }
+#mgr-form { margin-top: 10px; }
+
+/* 信息源表：窄屏改成卡片式，避免长链接撑出横向滚动 */
+.m-only { display: none; }
+.src-tbl td small { word-break: break-all; }
+@media (max-width: 640px) {
+  .src-tbl, .src-tbl tbody, .src-tbl tr, .src-tbl td { display: block; width: 100%; box-sizing: border-box; }
+  .src-tbl tr:first-child { display: none; }
+  .src-tbl tr:not(.test-row) { border: 1px solid var(--line); border-radius: 8px; margin: 8px 0; padding: 4px 0; }
+  .src-tbl tr.test-row[hidden] { display: none; }
+  .src-tbl td { border-bottom: 0; padding: 3px 10px; }
+  .src-tbl td.nowrap { white-space: normal; }
+  .m-only { display: inline; color: var(--muted); }
+}

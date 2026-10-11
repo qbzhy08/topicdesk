@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>主题编辑台</title>
-<link rel="stylesheet" href="/static/style.css?v=1011g">
+<link rel="stylesheet" href="/static/style.css?v=1011i">
 </head>
 <body>
 <header class="masthead">
@@ -79,16 +79,14 @@
       <textarea name="topic" rows="2" required placeholder="想追踪什么主题？例如：开源大模型的长上下文评测"></textarea>
       <div class="composer-bar">
         <div class="chips" id="domain-pick" title="不选 = 自动判断领域，并据此挑选信息源">
-          <label class="chip-t"><input type="checkbox" name="domain" value="tech"><span>科技/AI</span></label>
-          <label class="chip-t"><input type="checkbox" name="domain" value="finance"><span>金融</span></label>
-          <label class="chip-t"><input type="checkbox" name="domain" value="science"><span>学术/医学</span></label>
-          <label class="chip-t"><input type="checkbox" name="domain" value="general"><span>综合/政策</span></label>
-          <label class="chip-t"><input type="checkbox" name="domain" value="community"><span>社区/小众</span></label>
+          <span id="domain-chips" class="chips-inline"></span>
+          <button type="button" class="chip-add" id="tag-add-btn" title="新建领域标签">＋ 标签</button>
           <select name="days" class="chip-sel" title="时间范围"><option value="7">近 7 天</option><option value="30">近 30 天</option><option value="90" selected>近 90 天</option><option value="180">近半年</option><option value="365">近一年</option></select>
         </div>
         <button type="submit" class="send" title="开始检索（Enter）" aria-label="开始检索">↑</button>
       </div>
     </div>
+    <div class="tag-pop" id="tag-pop" hidden></div>
     <p class="composer-hint">Enter 开始 · Shift+Enter 换行 · 不选领域时自动判断</p>
     <details class="composer-more">
       <summary>关键词与高级设置</summary>
@@ -123,6 +121,6 @@
     </details>
   </form>
 </div>
-<script src="/static/app.js?v=1011g"></script>
+<script src="/static/app.js?v=1011i"></script>
 </body>
 </html>

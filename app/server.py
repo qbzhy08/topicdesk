@@ -11,6 +11,7 @@ from flask import Flask, abort, jsonify, request, send_from_directory
 
 from . import config, db, graphs, llm  # noqa: F401  导入即注册编排图
 from . import memory as mem
+from . import domains as domains_mod
 from . import ranking, websearch
 from .collect import sources as sources_mod
 from .collect.dedup import canonical_url
@@ -298,7 +299,7 @@ def add_source():
     name = (b.get("name") or "").strip()
     if not feed.startswith("http") or not name:
         return jsonify(error="需要名称和 RSS 地址"), 400
-    if not b.get("domains"):
+    if not [d for d in b.get("domains") or [] if d in domains_mod.ids()]:
         return jsonify(error="请至少选一个领域"), 400
     sid = "rss_" + canonical_url(feed).split("//")[1].replace("/", "_").replace(".", "_")[:40]
     if db.query_one("SELECT id FROM sources WHERE id=?", (sid,)):
@@ -318,7 +319,65 @@ def patch_source(sid):
     b = request.get_json(force=True)
     if "enabled" in b:
         db.update("sources", "id", sid, {"enabled": 1 if b["enabled"] else 0})
+    if "domains" in b:
+        row = db.query_one("SELECT config FROM sources WHERE id=?", (sid,))
+        if not row:
+            abort(404)
+        valid = domains_mod.ids()
+        doms = [d for d in b["domains"] or [] if d in valid]
+        if not doms:
+            return jsonify(error="至少保留一个领域标签"), 400
+        # domains_custom：用户改过，重启时不再用内置默认值覆盖
+        db.update("sources", "id", sid, {"config": {**(row["config"] or {}), "domains": doms, "domains_custom": True}})
     return jsonify(ok=True)
+
+
+# ---------------------------------------------------------------- 领域标签
+
+@app.get("/api/domains")
+def list_domains():
+    srcs = db.query("SELECT id, config FROM sources WHERE enabled=1")
+    out = []
+    for d in domains_mod.all_domains():
+        n = sum(1 for x in srcs if d["id"] in ((x["config"] or {}).get("domains") or []))
+        out.append({**d, "sources": n})
+    return jsonify(out)
+
+
+DEFAULT_TAG_SOURCES = ("zhihu", "xiaohongshu", "douyin", "bilibili")
+
+
+@app.post("/api/domains")
+def add_domain():
+    """新建领域标签。sources 不传时，默认挂到知乎、小红书、抖音、B站（全网搜索和公众号本来就适用于所有领域）。"""
+    b = request.get_json(force=True)
+    try:
+        d = domains_mod.add(b.get("name"), b.get("hints"), b.get("desc"))
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    targets = b.get("sources")
+    if targets is None:
+        targets = list(DEFAULT_TAG_SOURCES)
+    tagged = []
+    for sid in targets:
+        row = db.query_one("SELECT config FROM sources WHERE id=?", (sid,))
+        if not row:
+            continue
+        cfg = row["config"] or {}
+        doms = list(dict.fromkeys((cfg.get("domains") or []) + [d["id"]]))
+        db.update("sources", "id", sid, {"config": {**cfg, "domains": doms, "domains_custom": True}})
+        tagged.append(sid)
+    return jsonify({**d, "tagged_sources": tagged}), 201
+
+
+@app.delete("/api/domains/<did>")
+def del_domain(did):
+    try:
+        return jsonify(domains_mod.remove(did))
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    except KeyError:
+        abort(404)
 
 
 @app.post("/api/sources/<sid>/test")

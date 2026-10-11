@@ -41,28 +41,25 @@ PRIMARY_DOMAINS = (
     "ssrn.com", "nber.org")
 
 # 领域：决定一个主题用哪些来源。general 为综合新闻，任何领域都可兜底。
-DOMAINS = {"tech": "科技 / AI / 软件", "finance": "金融 / 经济 / 公司", "science": "学术 / 医学 / 科研",
-           "general": "综合新闻 / 政策 / 社会", "community": "社区 / 小众 / 亚文化 / 生活经验"}
-DOMAIN_HINTS = {
-    "finance": ["股票", "股市", "基金", "证券", "金融", "经济", "财报", "上市", "利率", "汇率", "通胀", "央行",
-                "债券", "期货", "投资", "量化", "A股", "港股", "美股", "估值", "营收", "stock", "market", "finance",
-                "econom", "inflation", "bond", "fund", "trading", "earnings"],
-    "science": ["医学", "药", "疾病", "临床", "基因", "蛋白", "细胞", "疫苗", "癌", "健康", "物理", "化学", "生物",
-                "气候", "材料", "论文", "研究", "clinical", "disease", "drug", "gene", "protein", "climate",
-                "physics", "biology", "medical", "health"],
-    "tech": ["大模型", "人工智能", "AI", "模型", "算法", "芯片", "编程", "软件", "开源", "互联网", "手机", "机器人",
-             "自动驾驶", "云", "数据库", "LLM", "GPU", "agent", "software", "chip", "robot", "代码", "框架"],
-    "general": ["政策", "法规", "社会", "教育", "国际", "外交", "城市", "就业", "消费", "文化", "体育", "policy"],
-    "community": ["工作室", "博主", "up主", "UP主", "网红", "主播", "粉丝", "圈", "二次元", "动漫", "游戏", "cos",
-                  "男娘", "伪娘", "女装", "饭圈", "八卦", "吐槽", "攻略", "避坑", "探店", "有男娘", "成员",
-                  "小红书", "抖音", "b站", "B站", "贴吧", "知乎", "公众号"],
-}
+class _Domains(dict):
+    """兼容旧代码的 DOMAINS：每次访问都读取最新的领域（含用户自建标签）。"""
+    def _d(self):
+        from .. import domains
+        return domains.descs()
+    def __contains__(self, k): return k in self._d()
+    def get(self, k, default=None): return self._d().get(k, default)
+    def __getitem__(self, k): return self._d()[k]
+    def keys(self): return self._d().keys()
+    def items(self): return self._d().items()
+    def __iter__(self): return iter(self._d())
+
+
+DOMAINS = _Domains()
 
 
 def guess_domains(text: str) -> list[str]:
-    low = (text or "").lower()
-    hits = [d for d, kws in DOMAIN_HINTS.items() if any(k.lower() in low for k in kws)]
-    return hits or ["general", "tech"]
+    from .. import domains
+    return domains.guess(text)
 
 
 def source_domains(src: dict) -> list[str]:
@@ -70,22 +67,22 @@ def source_domains(src: dict) -> list[str]:
 
 BUILTIN = [
     dict(id="ithome", name="IT之家", method="rss", lang="zh", base_url="https://www.ithome.com",
-         config={"domains": ['tech'], "feed": "https://www.ithome.com/rss/", "full_text": True}),
+         config={"domains": ['tech', "auto", "game", "consumer"], "feed": "https://www.ithome.com/rss/", "full_text": True}),
     dict(id="36kr", name="36氪", method="rss", lang="zh", base_url="https://36kr.com",
-         config={"domains": ['tech', 'finance'], "feed": "https://36kr.com/feed", "full_text": True}),
+         config={"domains": ['tech', 'finance', "auto", "consumer"], "feed": "https://36kr.com/feed", "full_text": True}),
     dict(id="sspai", name="少数派", method="rss", lang="zh", base_url="https://sspai.com",
-         config={"domains": ['tech'], "feed": "https://sspai.com/feed", "full_text": False, "detail": "browser"}),
+         config={"domains": ['tech', "game", "consumer"], "feed": "https://sspai.com/feed", "full_text": False, "detail": "browser"}),
     dict(id="leiphone", name="雷锋网", method="rss", lang="zh", base_url="https://www.leiphone.com",
          config={"domains": ['tech'], "feed": "https://www.leiphone.com/feed", "full_text": "auto"}),
     dict(id="ifanr", name="爱范儿", method="rss", lang="zh", base_url="https://www.ifanr.com",
-         config={"domains": ['tech'], "feed": "https://www.ifanr.com/feed", "full_text": "auto"}),
+         config={"domains": ['tech', "auto", "consumer"], "feed": "https://www.ifanr.com/feed", "full_text": "auto"}),
     dict(id="infoq", name="InfoQ 中文", method="rss", lang="zh", base_url="https://www.infoq.cn",
          config={"domains": ['tech'], "feed": "https://www.infoq.cn/feed", "full_text": False, "detail": "browser",
                  "note": "RSS 只有链接，正文页为前端渲染"}),
     dict(id="geekpark", name="极客公园", method="rss", lang="zh", base_url="https://www.geekpark.net",
-         config={"domains": ['tech'], "feed": "https://www.geekpark.net/rss", "full_text": "auto"}),
+         config={"domains": ['tech', "auto"], "feed": "https://www.geekpark.net/rss", "full_text": "auto"}),
     dict(id="huxiu", name="虎嗅", method="rss", lang="zh", base_url="https://www.huxiu.com",
-         config={"domains": ['tech', 'finance'], "feed": "https://www.huxiu.com/rss/0.xml", "full_text": "auto"}),
+         config={"domains": ['tech', 'finance', "auto", "consumer"], "feed": "https://www.huxiu.com/rss/0.xml", "full_text": "auto"}),
     dict(id="oschina", name="开源中国", method="rss", lang="zh", base_url="https://www.oschina.net",
          config={"domains": ['tech'], "feed": "https://www.oschina.net/news/rss", "full_text": "auto"}),
     dict(id="juejin", name="掘金", method="api", lang="zh", base_url="https://juejin.cn",
@@ -102,43 +99,43 @@ BUILTIN = [
          config={"domains": ['tech'], }),
     # ---- 金融
     dict(id="wallstcn", name="华尔街见闻", method="api", lang="zh", base_url="https://wallstreetcn.com",
-         config={"domains": ["finance"], "note": "站内搜索接口，返回全文"}),
+         config={"domains": ["finance", "auto", "consumer"], "note": "站内搜索接口，返回全文"}),
     dict(id="chinanews_fin", name="中新网财经", method="rss", lang="zh", base_url="https://www.chinanews.com.cn",
-         config={"domains": ["finance"], "feed": "https://www.chinanews.com.cn/rss/finance.xml",
+         config={"domains": ["finance", "consumer"], "feed": "https://www.chinanews.com.cn/rss/finance.xml",
                  "full_text": False}),
     dict(id="ftchinese", name="FT中文网", method="rss", lang="zh", base_url="https://www.ftchinese.com",
          config={"domains": ["finance", "general"], "feed": "https://www.ftchinese.com/rss/news",
                  "full_text": "auto"}),
     # ---- 综合新闻
     dict(id="chinanews", name="中新网滚动新闻", method="rss", lang="zh", base_url="https://www.chinanews.com.cn",
-         config={"domains": ["general"], "feed": "https://www.chinanews.com.cn/rss/scroll-news.xml",
+         config={"domains": ["general", "health"], "feed": "https://www.chinanews.com.cn/rss/scroll-news.xml",
                  "full_text": False}),
     # ---- 学术 / 医学
     dict(id="openalex", name="OpenAlex 学术", method="api", lang="en", base_url="https://openalex.org",
-         config={"domains": ["science", "finance", "tech", "general"],
+         config={"domains": ["science", "finance", "tech", "general", "health"],
                  "note": "开放学术数据库，覆盖各学科，按相关度检索论文摘要"}),
     dict(id="pubmed", name="PubMed", method="api", lang="en", base_url="https://pubmed.ncbi.nlm.nih.gov",
-         config={"domains": ["science"], "note": "NCBI 官方 E-utilities 接口（按其条款限速）"}),
+         config={"domains": ["science", "health"], "note": "NCBI 官方 E-utilities 接口（按其条款限速）"}),
     # ---- 社区 / 内容平台（小众话题、经验、亚文化）
     dict(id="bilibili", name="B站", method="api", lang="zh", base_url="https://www.bilibili.com",
-         config={"domains": ["community", "general", "tech"], "fetch": False,
+         config={"domains": ["community", "general", "tech", "game", "consumer", "auto"], "fetch": False,
                  "note": "公开搜索接口（WBI 签名），取视频标题、简介、标签、播放量"}),
     dict(id="sogou_wechat", name="公众号（搜狗）", method="search", lang="zh", base_url="https://weixin.sogou.com",
          config={"domains": ["community", "general", "tech", "finance"],
                  "note": "搜狗微信搜索，无需 key；频繁访问会出验证码，只做低频补充"}),
     dict(id="web_search", name="全网搜索", method="websearch", lang="zh", base_url="",
-         config={"domains": ["community", "general", "tech", "finance", "science"],
+         config={"any_domain": True, "domains": ["community", "general", "tech", "finance", "science"],
                  "note": "通过搜索 API 检索全网（需在设置页填写 key），替代不允许抓取的百度搜索"}),
     dict(id="wechat", name="微信公众号", method="websearch", lang="zh", base_url="https://mp.weixin.qq.com",
-         config={"domains": ["community", "general", "tech", "finance"], "note": "搜索 API 限定 mp.weixin.qq.com，文章页可抓全文"}),
+         config={"any_domain": True, "domains": ["community", "general", "tech", "finance"], "note": "搜索 API 限定 mp.weixin.qq.com，文章页可抓全文"}),
     dict(id="zhihu", name="知乎", method="websearch", lang="zh", base_url="https://www.zhihu.com",
-         config={"domains": ["community", "general", "tech", "finance", "science"], "fetch": False, "note": "只保留搜索摘要（正文需登录）"}),
+         config={"domains": ["community", "general", "tech", "finance", "science", "health", "game", "auto", "consumer"], "fetch": False, "note": "只保留搜索摘要（正文需登录）"}),
     dict(id="tieba", name="百度贴吧", method="websearch", lang="zh", base_url="https://tieba.baidu.com",
-         config={"domains": ["community", "general"], "fetch": False, "note": "只保留搜索摘要"}),
+         config={"domains": ["community", "general", "game"], "fetch": False, "note": "只保留搜索摘要"}),
     dict(id="xiaohongshu", name="小红书", method="websearch", lang="zh", base_url="https://www.xiaohongshu.com",
-         config={"domains": ["community", "general", "tech", "finance"], "fetch": False, "note": "只保留搜索摘要（网页需登录，条款禁止抓取）"}),
+         config={"domains": ["community", "general", "tech", "finance", "health", "consumer", "game"], "fetch": False, "note": "只保留搜索摘要（网页需登录，条款禁止抓取）"}),
     dict(id="douyin", name="抖音", method="websearch", lang="zh", base_url="https://www.douyin.com",
-         config={"domains": ["community", "general", "tech", "finance"], "fetch": False, "note": "只保留搜索摘要（网页需登录，条款禁止抓取）"}),
+         config={"domains": ["community", "general", "tech", "finance", "consumer", "game", "auto"], "fetch": False, "note": "只保留搜索摘要（网页需登录，条款禁止抓取）"}),
     dict(id="web", name="通用网页", method="html", lang="any", base_url="", config={"domains": ['tech', 'finance', 'science', 'general'], }),
 ]
 
@@ -151,12 +148,14 @@ def is_primary(url: str) -> bool:
 def seed_sources():
     for s in BUILTIN:
         row = db.query_one("SELECT id, config FROM sources WHERE id=?", (s["id"],))
-        if row and ((row["config"] or {}).get("domains") != s["config"].get("domains")
-                    or (row["config"] or {}).get("fetch") != s["config"].get("fetch")):
-            # 内置来源的领域和抓取策略随版本更新同步（新增了“社区”领域）
-            db.update("sources", "id", s["id"], {"config": {**(row["config"] or {}),
-                                                            "domains": s["config"].get("domains", ["tech"]),
-                                                            "fetch": s["config"].get("fetch")}})
+        if row:
+            cfg = row["config"] or {}
+            # 内置来源的抓取策略随版本同步；领域标签用户改过（domains_custom）就保留用户的
+            want = {"fetch": s["config"].get("fetch"), "any_domain": s["config"].get("any_domain")}
+            if not cfg.get("domains_custom"):
+                want["domains"] = s["config"].get("domains", ["tech"])
+            if any(cfg.get(k) != v for k, v in want.items()):
+                db.update("sources", "id", s["id"], {"config": {**cfg, **want}})
         if not row:
             db.insert("sources", dict(id=s["id"], name=s["name"], method=s["method"],
                                       base_url=s["base_url"],
