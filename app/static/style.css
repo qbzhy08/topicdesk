@@ -493,8 +493,8 @@ button.linkish { background: none; color: var(--info); padding: 0; font-size: 12
   text-underline-offset: 4px; text-decoration-thickness: 1px; }
 .flash { animation: flashbg 1.6s ease-out; }
 @keyframes flashbg { 0%, 30% { background: color-mix(in srgb, var(--warn) 45%, transparent); } 100% { background: transparent; } }
-@media (max-width: 1100px) {
-  .art-layout { grid-template-columns: 1fr; }
+@media (max-width: 1320px) {   /* 左栏 320 + 正文至少 600 + 右栏 300：放不下就把右栏移到正文下面，避免正文被挤成窄条 */
+  .art-layout { grid-template-columns: minmax(0, 760px); }
   .art-side { position: static; max-height: none; }
 }
 .stats.sm { grid-template-columns: repeat(4, 1fr); } .stats.sm b { font-size: 18px; }
