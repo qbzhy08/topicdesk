@@ -211,6 +211,24 @@ def list_docs():
     return jsonify(rows)
 
 
+@app.get("/api/docs/methods")
+def doc_methods():
+    """各获取方式的资料篇数（范围与资料库当前的主题 / 任务筛选一致），用于筛选框显示数量。"""
+    a = request.args
+    where, args = ["status='active'"], []
+    if a.get("topic"):
+        where.append("topic=?"); args.append(a["topic"])
+    if a.get("task"):
+        where.append("meta LIKE ?"); args.append(f"%{a['task']}%")
+    w = " AND ".join(where)
+    out = {r["m"] or "other": r["n"] for r in db.query(
+        f"SELECT json_extract(meta,'$.extract_method') m, COUNT(*) n FROM documents WHERE {w} GROUP BY 1", args)}
+    out["browser"] = db.query_one(f"SELECT COUNT(*) n FROM documents WHERE {w} AND json_extract(meta,'$.via_browser')=1", args)["n"]
+    out["html"] = db.query_one(f"SELECT COUNT(*) n FROM documents WHERE {w} AND json_extract(meta,'$.extract_method')='html' "
+                               "AND COALESCE(json_extract(meta,'$.via_browser'),0)=0", args)["n"]
+    return jsonify(out)
+
+
 @app.get("/api/docs/<did>")
 def get_doc(did):
     d = db.query_one("SELECT * FROM documents WHERE id=?", (did,))

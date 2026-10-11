@@ -556,6 +556,9 @@ async function showLibrary(qs) {
     refreshList();
     location.hash = `#/task/${id}`;
   };
+  api("/api/docs/methods?" + new URLSearchParams([...qs.entries()].filter(([k]) => k === "topic" || k === "task"))).then((cnt) => {
+    $$("#lib-filter select[name=how] option").forEach((o) => { if (o.value) o.textContent = `${HOW_NAME[o.value]}（${cnt[o.value] || 0}）`; });
+  }).catch(() => {});
   const rows = await api("/api/docs?" + qs.toString());
   $("#doc-list").innerHTML = rows.length ? `<p class="small">${rows.length} 条</p>` + rows.map(docRow).join("") : `<p class="empty">没有资料</p>`;
 }
