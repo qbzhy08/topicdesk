@@ -288,11 +288,33 @@ def plan(ctx):
     prefs = eff["prefs"]
     llm_domains = []
     alt_zh, alt_en = [], []
+    # “关键词互译”和“大模型规划”互不依赖：同时发出，省一次大模型等待
+    prev_aspects = [a for a in ((prev or {}).get("state") or {}).get("aspects") or []
+                    if a.get("origin") in ("llm", "data", "user") and not a.get("optional")] if prev else []
+    pre = {}
+    calls = []
+    if p.get("auto_translate", True):
+        calls.append(("tr", ("translate_keywords", {"topic": ctx.topic, "zh": list(p.get("keywords") or []),
+                                                    "en": list(p.get("en_keywords") or []), "use_llm": not p.get("no_llm")})))
+    if llm.available() and not p.get("no_llm"):
+        calls.append(("plan", ("llm", {"messages": [
+            {"role": "system", "content": "你只输出 JSON。"},
+            {"role": "user", "content": PLAN_PROMPT.format(
+                topic=ctx.topic, memory=memory_note, domain_list=domains_mod.prompt_list(),
+                aspect_rules=aspects_mod.plan_rules(prev_aspects, "community" in (p.get("domains") or [])))}]})))
+    if calls:
+        pre = dict(zip([k for k, _ in calls], ctx.tool_parallel([c for _, c in calls])))
+
+    def _pre(key):
+        stt, out = pre[key]
+        if stt != "ok":
+            raise out if isinstance(out, Exception) else RuntimeError(str(out))
+        return out
+
     # ---- 中英文关键词自动翻译（默认开启）：缺哪种语言就补哪种；同义词留作检索无结果时自动调整
     if p.get("auto_translate", True):
         try:
-            tr = ctx.tool("translate_keywords", topic=ctx.topic, zh=list(p.get("keywords") or []),
-                          en=list(p.get("en_keywords") or []), use_llm=not p.get("no_llm"))
+            tr = _pre("tr")
             added_zh = [t for t in tr["terms_zh"] if t not in terms_zh]
             added_en = [q for q in tr["queries_en"] if q not in queries_en]
             if not p.get("keywords") or english_topic:
@@ -319,15 +341,9 @@ def plan(ctx):
         return [x for x in xs if len(x) >= 2 and not x.isdigit()]     # 过滤“5”“q”这类无意义输入
     plan_src = "rules"
     llm_aspects, qtype = [], None
-    prev_aspects = [a for a in ((prev or {}).get("state") or {}).get("aspects") or []
-                    if a.get("origin") in ("llm", "data", "user") and not a.get("optional")] if prev else []
     if llm.available() and not p.get("no_llm"):
         try:
-            res = ctx.tool("llm", messages=[
-                {"role": "system", "content": "你只输出 JSON。"},
-                {"role": "user", "content": PLAN_PROMPT.format(
-                    topic=ctx.topic, memory=memory_note, domain_list=domains_mod.prompt_list(),
-                    aspect_rules=aspects_mod.plan_rules(prev_aspects, "community" in (p.get("domains") or [])))}])
+            res = _pre("plan")
             d = res["data"]
             llm_domains = [x for x in (d.get("domains") or []) if x in DOMAINS] or llm_domains
             terms_zh = list(dict.fromkeys((d.get("core_terms_zh") or []) + list(p.get("keywords") or []))) or terms_zh
@@ -641,8 +657,12 @@ def decide(ctx):
             st["covered_at"] = {"fetches": st["fetches"], "docs": n_docs}
         budget_left = max(0, p.get("enrich_after_cover", 6) - (st["fetches"] - st["covered_at"]["fetches"]))
         initial = [a for a in queue if a.get("initial") and a["type"] == "search"]
+        # 站内搜索的命中：是网站自己的搜索引擎按检索词找出来的，标题不含关键词也常常相关，要看全文才能判断
+        site_search = {x["id"] for x in list_sources() if (x["config"] or {}).get("search_feed")
+                       or (x["method"] == "api" and (x["config"] or {}).get("lang") == "zh")}
         valuable = sorted([a for a in queue if a["type"] == "fetch" and
-                           (a["prio"] >= 40 or ((a.get("base") or {}).get("relevance") or 0) >= 0.6)],
+                           (a["prio"] >= 40 or ((a.get("base") or {}).get("relevance") or 0) >= 0.6
+                            or (a.get("base") or {}).get("source_id") in site_search)],
                           key=lambda a: -a["prio"])[:budget_left]
         dropped = len(queue) - len(initial) - len(valuable)
         if dropped > 0:
@@ -662,22 +682,26 @@ def decide(ctx):
     if queue:
         queue.sort(key=lambda a: -a["prio"])
         # 一次取一批同类型、不同站点的行动并行执行（同一站点仍串行，遵守限速）
-        first = queue[0]
-        width = p.get("parallel", 6)
-        if first["type"] == "fetch":
-            width = min(width, max(1, p.get("max_fetch", 15) - st["fetches"]))
+        # 搜索和抓全文可以混在同一批（不同站点互不等待）；抓全文受总数上限约束
+        width = p.get("parallel", 8)
+        fetch_room = max(0, p.get("max_fetch", 15) - st["fetches"])
         batch, hosts = [], set()
         for a in list(queue):
             if len(batch) >= width:
                 break
-            if a["type"] != first["type"]:
-                continue
+            if a["type"] == "fetch":
+                if fetch_room <= 0:
+                    continue
             host = a.get("source") or urlsplit(a.get("url", "")).netloc
             if host in hosts:
                 continue
             hosts.add(host)
             batch.append(a)
             queue.remove(a)
+            if a["type"] == "fetch":
+                fetch_room -= 1
+        if not batch:                      # 只剩抓全文且已达上限：交给 act 的上限逻辑处理
+            batch = [queue.pop(0)]
         st["current_batch"] = batch
         lines = [f"{a['type']} {a.get('source', '') or a.get('url', '')} {a.get('query', '')}：{a['why']}" for a in batch]
         ctx.think(f"覆盖：{cov_txt}。下一步并行执行 {len(batch)} 个行动 →\n" + "\n".join(lines))
@@ -778,18 +802,21 @@ def judge(ctx):
     docs = docs[:p.get("judge_top", 30)]
     names = "、".join(a["name"] for a in st["aspects"])
     floor = _min_rel(st)
-    for i0 in range(0, len(docs), 15):
-        chunk = docs[i0:i0 + 15]
+    chunks = [docs[i0:i0 + 15] for i0 in range(0, len(docs), 15)]
+    reqs = []
+    for chunk in chunks:
         lines = []
         for i, d in enumerate(chunk):
             head = re.sub(r"\s+", " ", d["text"] or "")[:200]
             lines.append(f"[{i}] {d['title'] or ''} | {d['source_id']} | {(d['published_at'] or '')[:10]} | {head}")
-        try:
-            res = ctx.tool("llm", messages=[{"role": "user", "content": JUDGE_PROMPT.format(
-                topic=ctx.topic, aspects=names, items="\n".join(lines))}])["data"]
-        except Exception as e:
-            ctx.think(f"大模型复核失败（{str(e)[:60]}），保留规则相关度")
-            break
+        reqs.append(("llm", {"messages": [{"role": "user", "content": JUDGE_PROMPT.format(
+            topic=ctx.topic, aspects=names, items="\n".join(lines))}]}))
+    outs = ctx.tool_parallel(reqs) if reqs else []        # 各批同时复核
+    for chunk, (stt, out) in zip(chunks, outs):
+        res = out.get("data") if stt == "ok" and isinstance(out, dict) else None
+        if not isinstance(res, dict):
+            ctx.think(f"一批大模型复核失败（{str(out)[:60]}），这批保留规则相关度")
+            continue
         for x in res.get("scores") or []:
             try:
                 d = chunk[int(x["i"])]

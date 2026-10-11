@@ -43,6 +43,9 @@ def render(url: str, wait_selector: str | None = None, timeout: float = 25) -> d
         try:
             page = browser.new_page(user_agent=UA, viewport={"width": 1280, "height": 900},
                                     locale="zh-CN")
+            # 只要正文：不加载视频、音频、字体（图片地址仍在 HTML 里，配图另行下载），页面打开更快
+            page.route("**/*", lambda route: route.abort()
+                       if route.request.resource_type in ("media", "font") else route.continue_())
             try:
                 resp = page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
             except PWTimeout as e:

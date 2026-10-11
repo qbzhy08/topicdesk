@@ -84,14 +84,17 @@ def extract_claims(ctx, docs: list[dict], terms: list[str]) -> list[dict]:
     """有 LLM 时批量抽取，并校验引句真实存在；否则用规则（含数字且命中主题词的句子）。"""
     claims = []
     if llm.available() and not ctx.params.get("no_llm"):
-        for i in range(0, len(docs), 5):
-            batch = docs[i:i + 5]
-            body = "\n\n".join(f"[{d['id']}] 标题：{d['title']}\n{(d['text'] or '')[:1800]}" for d in batch)
+        batches = [docs[i:i + 5] for i in range(0, len(docs), 5)]
+        reqs = [("llm", {"messages": [
+            {"role": "system", "content": "你只输出 JSON。"},
+            {"role": "user", "content": EXTRACT_PROMPT.format(topic=ctx.topic, docs="\n\n".join(
+                f"[{d['id']}] 标题：{d['title']}\n{(d['text'] or '')[:1800]}" for d in batch))}],
+            "max_tokens": 1800}) for batch in batches]
+        outs = ctx.tool_parallel(reqs) if reqs else []        # 各批同时抽取
+        for batch, (stt, res) in zip(batches, outs):
             try:
-                res = ctx.tool("llm", messages=[
-                    {"role": "system", "content": "你只输出 JSON。"},
-                    {"role": "user", "content": EXTRACT_PROMPT.format(topic=ctx.topic, docs=body)}],
-                    max_tokens=1800)
+                if stt != "ok":
+                    raise res if isinstance(res, Exception) else RuntimeError(str(res))
                 for c in (res.get("data") or {}).get("claims", []):
                     d = next((x for x in batch if x["id"] == c.get("doc")), None)
                     q = (c.get("quote") or "").strip()
