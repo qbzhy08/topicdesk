@@ -601,37 +601,48 @@ def illustrate(ctx):
         f["why"] = "信息图（" + next(c for c in cands if c["id"] == f["image_id"])["cls"]["why"] + "）；" + f["why"]
     taken = {f["section"] for f in figs}
     diagrams = []
+    chart_log = []
     # ---- 2. 用资料里的数字画图（主动做，不只是补位）
+    if not _use_llm(ctx):
+        chart_log.append("未配置大模型：不自动找图表数据")
+    specs = []
     if _use_llm(ctx):
         lines = ill.numeric_lines(docs, st["check"]["items"])
-        if lines:
+        if not lines:
+            chart_log.append("资料里带数字的句子太少，没法画图")
+        else:
             try:
                 d = ctx.tool("llm", messages=[{"role": "system", "content": "你只输出 JSON。"}, {
                     "role": "user", "content": ill.CHARTS_PROMPT.format(lines=lines, sections="、".join(x["id"] for x in st["sections"]))}],
                     max_tokens=1500)["data"]
                 specs = (d.get("charts") or [])[:2]
+                if not specs:
+                    chart_log.append("大模型认为资料里没有适合画柱状图/折线图的同类数字（需要 3 个以上单位相同、可比较的数值）")
             except Exception as e:  # noqa: BLE001
                 ctx.think(f"找图表数据失败（{str(e)[:60]}）")
+                chart_log.append(f"找图表数据失败：{str(e)[:60]}")
                 specs = []
-            for spec in specs:
-                kind = spec.get("kind")
-                if kind not in ("bar", "line"):
-                    continue
-                problem = ill.verify_chart(spec, docs)
-                if problem:
-                    rejected.append({"image": None, "url": None, "doc": f"示意图「{str(spec.get('title'))[:16]}」", "why": f"没画：{problem}"})
-                    continue
-                refs = sorted({int(r) for r in spec["refs"] if str(r).isdigit()})
-                items = [{"label": str(i["label"]), "value": float(i["value"])} for i in spec["items"]]
-                title, unit = str(spec.get("title") or "数据对比")[:18], str(spec.get("unit") or "")
-                svg = (ill.bar_svg if kind == "bar" else ill.line_svg)(title, unit, items, "数值均摘自文中引用的资料，已逐个核对")
-                sid = _free_section(st, taken, spec.get("section"))
-                taken.add(sid)
-                tk = str(spec.get("takeaway") or "")[:40]
-                diagrams.append({"kind": "diagram", "diagram": kind, "src": "/media/" + ill._save_svg(svg), "section": sid,
-                                 "para": _last_para(st, sid), "alt": title,
-                                 "caption": f"{title}{'：' + tk if tk else ''}（示意图，数据来自 " + "".join(f"[{r}]" for r in refs) + "）",
-                                 "why": f"{'柱状图' if kind == 'bar' else '折线图'}：把资料里 {len(items)} 个同类数字放在一起比较，每个数值都在出处里找到"})
+    for spec in specs:
+        kind = spec.get("kind")
+        if kind not in ("bar", "line"):
+            continue
+        problem = ill.verify_chart(spec, docs)
+        if problem:
+            rejected.append({"image": None, "url": None, "doc": f"示意图「{str(spec.get('title'))[:16]}」", "why": f"没画：{problem}"})
+            chart_log.append(f"「{str(spec.get('title'))[:16]}」没画：{problem}")
+            continue
+        refs = sorted({int(r) for r in spec["refs"] if str(r).isdigit()})
+        items = [{"label": str(i["label"]), "value": float(i["value"])} for i in spec["items"]]
+        title, unit = str(spec.get("title") or "数据对比")[:18], str(spec.get("unit") or "")
+        svg = (ill.bar_svg if kind == "bar" else ill.line_svg)(title, unit, items, "数值均摘自文中引用的资料，已逐个核对")
+        sid = _free_section(st, taken, spec.get("section"))
+        taken.add(sid)
+        tk = str(spec.get("takeaway") or "")[:40]
+        chart_log.append(f"「{title}」画出{'柱状图' if kind == 'bar' else '折线图'}（{len(items)} 个数值，全部在出处中找到）")
+        diagrams.append({"kind": "diagram", "diagram": kind, "src": "/media/" + ill._save_svg(svg), "section": sid,
+                         "para": _last_para(st, sid), "alt": title,
+                         "caption": f"{title}{'：' + tk if tk else ''}（示意图，数据来自 " + "".join(f"[{r}]" for r in refs) + "）",
+                         "why": f"{'柱状图' if kind == 'bar' else '折线图'}：把资料里 {len(items)} 个同类数字放在一起比较，每个数值都在出处里找到"})
     ev = ill.timeline_events(st["check"]["items"], st["sections"])
     if len(ev) >= 3 and len(figs) + len(diagrams) < need + 1:
         refs = sorted({c for e in ev for c in e["cites"]})
@@ -714,10 +725,11 @@ def illustrate(ctx):
                        "alt": "示意封面", "caption": "示意封面：素材中没有合适的横版原图，按标题生成",
                        "why": "没有满足封面要求（横版照片类、宽 ≥ 960、清晰）的原始图片"}
     st["image_rejected"] = rejected
+    st["chart_log"] = chart_log
     n_info = sum(1 for f in figs if f.get("info"))
     ctx.observe(f"配图：候选 {len(cands)} 张（信息图 {len(info)}、照片 {len(photos)}）；正文放原文信息图 {n_info} 张、"
                 f"数据图/时间线/数字卡片 {len(diagrams)} 张、照片补位 {len(filler)} 张（要求至少 {need} 张）；"
-                f"封面{'用原图' if st['cover']['kind'] == 'photo' else '为示意封面'}")
+                f"封面{'用原图' if st['cover']['kind'] == 'photo' else '为示意封面'}；数据图：" + ("；".join(chart_log) or "无"))
     return "save"
 
 
@@ -744,7 +756,8 @@ def save(ctx):
             "refmap": {str(k): v for k, v in refmap.items()},
             "facts": st["facts"], "sections": st["sections"], "check": rep, "fixes": st["fixes"],
             "gap_log": st["gap_log"], "prefs": st["prefs"],
-            "figures": figs, "cover": cover, "image_rejected": st.get("image_rejected") or [], "image_checks": image_checks, "outline_by": st["outline_by"], "draft_by": st["draft_by"]}
+            "figures": figs, "cover": cover, "image_rejected": st.get("image_rejected") or [], "image_checks": image_checks,
+            "chart_log": st.get("chart_log") or [], "outline_by": st["outline_by"], "draft_by": st["draft_by"]}
     v = save_version(st["article_id"], md, meta, note=ctx.params.get("note") or "初稿", title=st["title"],
                      task_id=ctx.task_id)
     st["result"] = {"article_id": st["article_id"], "version": v}

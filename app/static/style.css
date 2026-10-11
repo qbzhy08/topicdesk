@@ -558,3 +558,4 @@ button.linkish { background: none; color: var(--info); padding: 0; font-size: 12
 .img-checks { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
 .side-tabs button { padding: 10px 2px; }
 .art-body figure img[src$=".svg"] { background: #fbfaf7; border: 1px solid var(--line); }
+.chart-log { background: var(--paper); border-radius: 6px; padding: 8px 10px; margin: 6px 0 4px; line-height: 1.6; }

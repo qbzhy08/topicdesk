@@ -1139,6 +1139,7 @@ async function showArticle(id, ver) {
         ${f.kind === "photo" && f.w ? `<p class="small muted">${f.w}×${f.h} · 清晰度 ${f.sharpness ?? "—"}${(f.warn || []).length ? ` · <span class="gap">${f.warn.map(esc).join("；")}</span>` : ""}
           ${f.url ? ` · <a href="${esc(f.url)}" target="_blank" rel="noopener">原图链接</a>` : ""}</p>` : ""}</div></div>`;
   panes.imgs = `${ich.length ? `<div class="img-checks">${ich.map((c) => `<span class="tag ${c.ok ? "" : "rel-lo"}">${c.ok ? "✓" : "✗"} ${esc(c.name)}：${esc(c.detail)}</span>`).join("")}</div>` : ""}
+    ${(m.chart_log || []).length ? `<div class="chart-log small"><b>数据图：</b>${m.chart_log.map(esc).join("；")}</div>` : ""}
     ${cover ? figRow(cover, "封面") : ""}
     ${figs.map((f) => figRow(f, `「${esc(secName(f.section))}」第 ${f.para + 1} 段后`)).join("") || '<p class="small muted">这篇文章写于配图功能上线之前，重新写一次即可配图。</p>'}
     ${irej.length ? `<details class="small"><summary>没用上的图（${irej.length}）</summary>${irej.map((r) => `<div class="chk">${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc((r.doc || "").slice(0, 30))}</a>` : esc(r.doc || "")}：${esc(r.why)}</div>`).join("")}</details>` : ""}

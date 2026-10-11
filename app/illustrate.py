@@ -343,26 +343,35 @@ PHOTO_WORDS = re.compile(r"图\s*/\s*IC|视觉中国|东方IC|新华社|中新�
 
 
 def classify(im: dict, q: dict) -> dict:
-    """这张图对读者有没有信息量：图表/信息图/流程图/参数表/数据截图 = info；新闻现场照、图库照片 = photo。
-    看两类信号：图注和图片前后正文里的词，以及图片本身（图表通常白底多、颜色少、笔画细密；照片颜色多）。"""
-    text = f"{im.get('caption') or ''} {im.get('context_text') or ''}"
-    score, why = 0, []
-    if INFO_WORDS.search(text):
+    """这张图对读者有没有信息量：图表/信息图/流程图/参数表/数据截图 = info；新闻现场照、产品照、图库照片 = photo。
+    图注描述的是图片本身，权重高；图片前后的正文讲的是文章内容（提到“价格”不代表图里有价格数据），权重低。
+    判为信息图必须有直接证据：图片本身像图表，或者图注明确说了它是图表/数据。"""
+    cap, ctx = (im.get("caption") or ""), (im.get("context_text") or "")
+    score, why, direct = 0, [], False
+    m = INFO_WORDS.search(cap)
+    if m:
         score += 2
-        why.append(f"图注/上下文提到「{INFO_WORDS.search(text).group(0)}」")
+        direct = True
+        why.append(f"图注提到「{m.group(0)}」")
+    elif INFO_WORDS.search(ctx):
+        score += 1
+        why.append(f"图片附近的正文提到「{INFO_WORDS.search(ctx).group(0)}」")
     if q.get("chartlike"):
         score += 2
+        direct = True
         why.append("白底、笔画细密，像图表")
     elif (q.get("colors") or 9999) < 900 and (q.get("white") or 0) > 0.25:
         score += 1
+        direct = True
         why.append("颜色少、有大面积底色，像图形")
-    if PHOTO_WORDS.search(text):
+    p = PHOTO_WORDS.search(cap) or PHOTO_WORDS.search(ctx[:80])
+    if p:
         score -= 3
-        why.append(f"图注像新闻照片（「{PHOTO_WORDS.search(text).group(0)}」）")
+        why.append(f"像新闻照片（「{p.group(0)}」）")
     if (q.get("colors") or 0) > 3000 and not q.get("chartlike"):
-        score -= 1
+        score -= 2
         why.append("颜色丰富，像照片")
-    return {"info": score >= 2, "score": score, "why": "；".join(why) or "没有明显的图表特征"}
+    return {"info": score >= 2 and direct, "score": score, "why": "；".join(why) or "没有明显的图表特征"}
 
 
 CHARTS_PROMPT = """下面是一篇文章引用的资料中带数字的句子（[n] 是出处编号）。找出最多 2 组适合画图、能帮读者看清数据的同类数字：

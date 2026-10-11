@@ -316,7 +316,8 @@ class ImageClarityTest(WriteBase):
         task, v = self.write("brief")
         meta = v["meta"]
         bars = [f for f in meta["figures"] if f.get("diagram") == "bar"]
-        self.assertEqual(len(bars), 1, meta["image_rejected"])                                   # 真实数字画出来了
+        steps = db.query("SELECT node, summary, thought, error FROM steps WHERE task_id=? AND node='illustrate'", (task["id"],))
+        self.assertEqual(len(bars), 1, (meta.get("chart_log"), steps))                                   # 真实数字画出来了
         self.assertIn("实测的上下文长度", bars[0]["caption"])
         self.assertTrue(any("编造的趋势" in r["doc"] and "999" in r["why"] for r in meta["image_rejected"]))  # 编造的被拒
         self.assertFalse(any(f.get("decorative") for f in meta["figures"]))
@@ -328,4 +329,9 @@ class ImageClarityTest(WriteBase):
         self.assertTrue(ill.classify({"caption": "图表：2026年各品牌销量对比"}, q_chart)["info"])
         self.assertFalse(ill.classify({"caption": "图/IC"}, q_photo)["info"])
         self.assertFalse(ill.classify({"caption": "小米 YU7 发布会现场"}, q_photo)["info"])
+        # 图片前后的正文提到“售价/价格”，但图本身是照片：不是信息图
+        self.assertFalse(ill.classify({"caption": None, "context_text": "YU7 售价 32.99 万元起，价格战再起"}, q_photo)["info"])
+        self.assertFalse(ill.classify({"caption": "", "context_text": "碳酸锂价格上涨"}, {"chartlike": False, "colors": 1500, "white": 0.1})["info"])
+        # 没有图注、但图片本身像图表：是信息图
+        self.assertTrue(ill.classify({"caption": "", "context_text": "销量对比如下"}, q_chart)["info"])
 
