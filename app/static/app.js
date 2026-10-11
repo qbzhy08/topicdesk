@@ -29,6 +29,11 @@ async function init() {
   sel.innerHTML = graphs.map((g) => `<option value="${esc(g.name)}" ${g.name === "research" ? "selected" : ""}>${esc(GRAPH_NAME[g.name] || g.name)}</option>`).join("");
   await loadSourceChecks();
   $("#new-task").addEventListener("submit", submitTask);
+  const ta = $("#new-task").topic;
+  ta.addEventListener("input", () => autoGrow(ta));
+  ta.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#new-task").requestSubmit(); }
+  });
   setupTranslate();
   $("#import-form").addEventListener("submit", submitImport);
   window.addEventListener("hashchange", route);
@@ -96,11 +101,26 @@ async function submitTask(e) {
     sources: allChecked() ? undefined : f.getAll("src"), max_docs: Number(f.get("max_docs")), max_fetch: Number(f.get("max_fetch")), confirm_aspects: !!f.get("confirm_aspects"),
     days: Number(f.get("days")), min_relevance: Number(f.get("min_relevance")),
     hitl_on_block: !!f.get("hitl_on_block"), ...extra } : extra;
+  const form = e.target;
+  form.classList.add("sending");
+  const hero = $(".hero");
+  if (hero) hero.classList.add("leaving");
   try {
-    const { id } = await api("/api/tasks", { method: "POST", body: { topic: f.get("topic"), graph, params, budget } });
+    const [{ id }] = await Promise.all([
+      api("/api/tasks", { method: "POST", body: { topic: f.get("topic").trim(), graph, params, budget } }),
+      new Promise((r) => setTimeout(r, 650))]);          // 让过渡动效走完
+    form.reset();
+    kwState.edited = { keywords: false, en_keywords: false };
+    kwState.lastTopic = "";
+    $("#kw-note").textContent = "";
+    sessionStorage.setItem("td:justStarted", id);
     location.hash = `#/task/${id}`;
     refreshList();
-  } catch (err) { alert(err.message); }
+  } catch (err) {
+    form.classList.remove("sending");
+    if (hero) hero.classList.remove("leaving");
+    alert(err.message);
+  }
 }
 
 function allChecked() {
@@ -137,7 +157,10 @@ const store = {
 
 function route() {
   if (current?.timer) clearTimeout(current.timer);
+  if (current?.liveTimer) clearInterval(current.liveTimer);
   current = null;
+  const form = $("#new-task");
+  if (form && !$("#composer-holder").contains(form)) $("#composer-holder").append(form);   // 离开前收回，保留事件和已填内容
   const h = location.hash || "#/";
   if (h === "#/" && store.get("lastTask")) {
     location.replace(`#/task/${store.get("lastTask")}`);
@@ -159,7 +182,61 @@ function route() {
   if (h.startsWith("#/memory")) return showMemoryHome(new URLSearchParams(h.split("?")[1] || ""));
   if (h.startsWith("#/sources")) return showSources();
   if (h.startsWith("#/settings")) return showSettings();
-  $("#detail").innerHTML = `<div class="empty">从左侧提交一个主题，或打开已有任务。<br>任务进度保存在本地数据库，刷新页面不会丢失。</div>`;
+  showComposer();
+}
+
+// ---------------------------------------------------------------- 运行中：告诉用户此刻在做什么
+const PHASE = { plan: "正在理解主题、拆分子问题", decide: "正在决定下一步检索", act: "正在检索与抓取资料",
+  judge: "大模型正在复核相关度", images: "正在挑选配图", remember: "正在核验事实、写入记忆", rank: "正在做价值评估与排序",
+  verify: "正在补充核验可疑资料", report: "正在生成报告", recheck: "正在复查页面", reassess: "正在重新评估",
+  import_fetch: "正在抓取链接", import_images: "正在处理图片" };
+
+function renderLive(t) {
+  const bar = $("[data-f=live]");
+  if (!bar) return;
+  const active = ["pending", "running", "cancelling"].includes(t.status) || t.running;
+  bar.hidden = !active;
+  if (!active) { if (current?.liveTimer) { clearInterval(current.liveTimer); current.liveTimer = null; } return; }
+  const node = t.current_node && t.current_node !== "__end__" ? t.current_node : "plan";
+  $("[data-f=live-text]", bar).textContent = t.status === "pending" ? "排队中，马上开始…" :
+    t.status === "cancelling" ? "正在取消…" : (PHASE[node] || `正在执行 ${node}`) + "…";
+  const base = (t.usage?.seconds || 0), t0 = Date.now();
+  if (current) {
+    if (current.liveTimer) clearInterval(current.liveTimer);
+    const tick = () => { const el = $("[data-f=live-time]"); if (el) el.textContent = `${Math.round(base + (Date.now() - t0) / 1000)}s`; };
+    tick();
+    current.liveTimer = setInterval(tick, 1000);
+  }
+}
+
+// ---------------------------------------------------------------- 新主题（居中大输入框）
+const GREETINGS = ["今天想追踪什么？", "有什么值得深挖的主题？", "想读懂哪个话题？"];
+const EXAMPLES = ["开源大模型的长上下文评测", "固态电池量产进展", "GLP-1 减重药的长期安全性", "A 股量化监管新规影响"];
+
+function showComposer() {
+  $$("#task-list a").forEach((a) => a.classList.remove("active"));
+  const hour = new Date().getHours();
+  const hello = hour < 6 ? "夜深了" : hour < 11 ? "早上好" : hour < 14 ? "中午好" : hour < 18 ? "下午好" : "晚上好";
+  const el = $("#detail");
+  el.innerHTML = `<div class="hero">
+      <p class="hero-hello"><span class="spark big">✳</span>${hello}</p>
+      <h1 class="hero-title">${GREETINGS[Math.floor(Math.random() * GREETINGS.length)]}</h1>
+      <div class="hero-slot"></div>
+      <div class="hero-examples">${EXAMPLES.map((x) => `<button type="button" class="example">${esc(x)}</button>`).join("")}</div>
+      <p class="hero-foot">TopicDesk 会自动拆分子问题、从 20+ 个来源检索、去重核验、按价值排序，并记住你的偏好和上次的结论。</p>
+    </div>`;
+  const form = $("#new-task");
+  form.classList.remove("sending");
+  $(".hero-slot", el).append(form);
+  const ta = form.topic;
+  $$(".example", el).forEach((b) => b.onclick = () => { ta.value = b.textContent; autoGrow(ta); ta.focus(); translateKeywords(false); });
+  autoGrow(ta);
+  setTimeout(() => ta.focus(), 50);
+}
+
+function autoGrow(ta) {
+  ta.style.height = "auto";
+  ta.style.height = Math.min(ta.scrollHeight, 240) + "px";
 }
 
 // ---------------------------------------------------------------- 任务详情
@@ -168,6 +245,9 @@ function showTask(id) {
   current = { id, lastStepId: 0, timer: null, rkTab: (store.get("rkTabs") || {})[id] || null };
   const el = $("#detail");
   el.innerHTML = "";
+  let fresh = false;
+  try { fresh = sessionStorage.getItem("td:justStarted") === id; sessionStorage.removeItem("td:justStarted"); } catch { /* */ }
+  el.classList.toggle("arrive", fresh);
   el.append($("#tpl-detail").content.cloneNode(true));
   el.querySelector("[data-act=resume]").onclick = () => act("resume");
   el.querySelector("[data-act=cancel]").onclick = () => act("cancel");
@@ -226,6 +306,7 @@ function renderTask(t) {
   $("[data-f=node]", d).textContent = t.current_node && t.current_node !== "__end__"
     ? `下一步：${t.current_node} · 已保存 ${t.checkpoints} 个检查点` : `已保存 ${t.checkpoints} 个检查点`;
   $("[data-f=error]", d).textContent = t.error || "";
+  renderLive(t);
   $("[data-act=resume]", d).disabled = !["interrupted", "failed", "pending"].includes(t.status) || t.running;
   $("[data-act=cancel]", d).disabled = ["done", "cancelled"].includes(t.status);
   $("[data-f=docs-link]", d).style.display = ["research", "import", "recheck"].includes(t.graph) ? "" : "none";

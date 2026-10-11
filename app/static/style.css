@@ -262,3 +262,97 @@ small.muted, .muted { color: var(--muted); }
 .ws-row input[type=password] { flex: 1 1 260px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--card); }
 .ws-row label { display: flex; align-items: center; gap: 6px; margin: 0; }
 .ws-row label input { width: auto; }
+
+/* ================= 新主题：居中大输入框（类似新对话） ================= */
+.new-topic-btn {
+  display: flex; align-items: center; gap: 8px; text-decoration: none;
+  padding: 11px 14px; border-radius: 10px; background: var(--card); border: 1px solid var(--line);
+  font-weight: 600; box-shadow: 0 1px 0 rgba(0,0,0,.03); transition: border-color .15s, transform .15s, box-shadow .15s;
+}
+.new-topic-btn:hover { border-color: var(--accent); transform: translateY(-1px); box-shadow: 0 4px 14px rgba(184,67,47,.12); }
+.spark { color: var(--accent); display: inline-block; font-size: 18px; line-height: 1; }
+.new-topic-btn:hover .spark { animation: spin 1.2s ease-in-out; }
+.import-box { margin: 12px 0 4px; font-size: 14px; }
+.import-box summary { cursor: pointer; color: var(--muted); padding: 4px 2px; }
+.import-box form { padding-top: 8px; }
+
+.hero { max-width: 760px; margin: 9vh auto 0; text-align: center; animation: rise .5s cubic-bezier(.2,.8,.2,1) both; }
+.hero-hello { margin: 0 0 6px; color: var(--muted); font-size: 15px; display: flex; align-items: center; justify-content: center; gap: 8px; }
+.spark.big { font-size: 26px; animation: breathe 3.2s ease-in-out infinite; }
+.hero-title { font: 600 clamp(28px, 4.2vw, 42px)/1.2 var(--serif); margin: 0 0 26px; letter-spacing: .01em; }
+.hero-slot { text-align: left; }
+.hero-examples { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin: 18px 0 0; }
+.example { background: transparent; color: var(--ink); border: 1px solid var(--line); border-radius: 999px;
+  padding: 6px 14px; font-size: 13px; transition: border-color .15s, background .15s; }
+.example:hover { border-color: var(--accent); background: var(--card); }
+.hero-foot { color: var(--muted); font-size: 12.5px; margin: 28px auto 0; max-width: 560px; line-height: 1.7; }
+
+.composer { position: relative; background: var(--card); border: 1px solid var(--line); border-radius: 18px;
+  padding: 16px 16px 10px; box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 10px 30px rgba(31,28,24,.07);
+  transition: border-color .2s, box-shadow .2s, transform .5s cubic-bezier(.2,.8,.2,1), opacity .5s; }
+.composer:focus-within { border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 10%, transparent), 0 12px 34px rgba(31,28,24,.09); }
+.composer textarea { width: 100%; border: 0; outline: 0; resize: none; background: transparent; padding: 2px 4px;
+  font: 18px/1.55 var(--sans); color: var(--ink); min-height: 56px; }
+.composer textarea::placeholder { color: color-mix(in srgb, var(--muted) 75%, transparent); }
+.composer-bar { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; margin-top: 8px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip-t { margin: 0; cursor: pointer; position: relative; }
+.chip-t input { position: absolute; left: 0; top: 0; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
+.chip-t span { display: inline-block; font-size: 12.5px; padding: 4px 11px; border-radius: 999px; border: 1px solid var(--line);
+  color: var(--muted); transition: all .15s; user-select: none; }
+.chip-t:hover span { border-color: var(--muted); color: var(--ink); }
+.chip-t input:checked + span { background: var(--ink); border-color: var(--ink); color: var(--paper); }
+.chip-t input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chip-sel { font-size: 12.5px; padding: 4px 8px; border-radius: 999px; border: 1px solid var(--line); background: var(--card); color: var(--muted); }
+.send { width: 38px; height: 38px; border-radius: 12px; padding: 0; font-size: 19px; font-weight: 700; flex: none;
+  background: var(--accent); color: #fff; transition: transform .15s, opacity .15s; }
+.send:hover { transform: translateY(-1px); }
+.composer-form:has(textarea:placeholder-shown) .send { opacity: .35; }
+.composer-hint { margin: 8px 6px 0; font-size: 12px; color: var(--muted); text-align: right; }
+.composer-more { margin-top: 14px; background: transparent; }
+.composer-more > summary { cursor: pointer; color: var(--muted); font-size: 13px; padding: 4px 6px; list-style: none; }
+.composer-more > summary::before { content: "＋ "; }
+.composer-more[open] > summary::before { content: "－ "; }
+.composer-more[open] { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 8px 14px 14px; }
+.more-group { border: 0; border-top: 1px solid var(--line); padding: 10px 0 0; margin: 12px 0 0; }
+.more-group legend { font-size: 12px; color: var(--muted); padding-right: 8px; }
+
+/* 发送：输入框上浮淡出，出现“正在规划” */
+.composer-form.sending .composer { transform: translateY(-26px) scale(.98); opacity: .0; }
+.composer-form.sending .composer-hint, .composer-form.sending .composer-more { opacity: 0; transition: opacity .2s; }
+.hero.leaving .hero-title, .hero.leaving .hero-examples, .hero.leaving .hero-foot { opacity: 0; transform: translateY(-12px); transition: all .4s; }
+.hero.leaving .hero-hello { animation: none; }
+.hero-slot { position: relative; }
+.hero.leaving .hero-slot::after { content: "✳  正在规划子问题与检索路线…"; position: absolute; left: 0; right: 0; top: 34px;
+  text-align: center; color: var(--accent); font-size: 16px; animation: fadein .3s .2s both; }
+
+/* 任务页：进入动画 + 运行中状态条 */
+.detail.arrive .detail-head, .detail.arrive .live { animation: rise .55s cubic-bezier(.2,.8,.2,1) both; }
+.detail.arrive .budget { animation: rise .55s .08s cubic-bezier(.2,.8,.2,1) both; }
+.live { display: flex; align-items: center; gap: 12px; margin: 0 0 14px; padding: 12px 16px; border-radius: 12px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 9%, var(--card)), var(--card) 70%);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line)); font-weight: 500; }
+.live[hidden] { display: none; }
+.live .orb { width: 14px; height: 14px; border-radius: 50%; flex: none; background: var(--accent);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 50%, transparent); animation: pulse 1.6s ease-out infinite; }
+.live [data-f=live-text] { background: linear-gradient(90deg, var(--ink) 0%, var(--ink) 40%, var(--muted) 50%, var(--ink) 60%, var(--ink) 100%);
+  background-size: 300% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: shimmer 2.4s linear infinite; }
+.live-time { margin-left: auto; font: 12px var(--mono); color: var(--muted); }
+
+@keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+@keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
+@keyframes breathe { 0%, 100% { transform: rotate(0) scale(1); opacity: .9; } 50% { transform: rotate(45deg) scale(1.12); opacity: 1; } }
+@keyframes spin { to { transform: rotate(180deg); } }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); }
+  100% { box-shadow: 0 0 0 12px transparent; } }
+@keyframes shimmer { from { background-position: 100% 0; } to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .hero, .spark.big, .live .orb, .live [data-f=live-text], .detail.arrive * { animation: none !important; }
+  .live [data-f=live-text] { color: var(--ink); background: none; }
+}
+@media (max-width: 820px) {
+  .hero { margin-top: 3vh; }
+  .composer-bar { flex-direction: column; align-items: stretch; }
+  .send { align-self: flex-end; }
+}
