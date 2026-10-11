@@ -534,3 +534,9 @@ button.linkish { background: none; color: var(--info); padding: 0; font-size: 12
 .art-item > span:first-child { display: flex; flex-direction: column; min-width: 0; }
 .art-item .btn { padding: 5px 12px; font-size: 13px; flex: none; }
 .art-layout .art-body > h1:first-child { display: none; }
+
+/* 左栏固定：桌面端左栏不随中间内容滚动，自己单独滚动 */
+@media (min-width: 821px) {
+  .rail { position: sticky; top: 0; align-self: start; height: 100vh; overflow-y: auto; overscroll-behavior: contain;
+    box-sizing: border-box; scrollbar-width: thin; }
+}
