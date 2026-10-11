@@ -4,7 +4,7 @@
 做法是调用正规的搜索服务，用站点限定（site / include_domains）找到相关页面，拿到标题、摘要、链接、日期；
 之后能公开访问的页面（公众号文章等）再抓正文，需要登录的平台只保留摘要和链接，正文由用户粘贴。
 
-支持三家（任选其一，在“设置”页填写 key）：
+支持三家（可以同时配置多家，在“设置”页填写 key；检索某个平台时自动选收录好的那家）：
     bocha   博查 Web Search API      中文网页覆盖好（含公众号等），按次计费
     tavily  Tavily Search API        每月有免费额度，中文覆盖一般
     brave   Brave Search API         独立索引，免费档需绑卡
@@ -26,55 +26,94 @@ def _path():
     return config.DATA_DIR / "websearch.json"
 
 
-def settings() -> dict:
-    d = {"provider": os.environ.get("WEBSEARCH_PROVIDER", ""), "api_key": os.environ.get("WEBSEARCH_API_KEY", "")}
+def _raw() -> dict:
     p = _path()
     if p.exists():
         try:
-            d.update({k: v for k, v in json.loads(p.read_text()).items() if v})
-            d.setdefault("coverage", {})
+            return json.loads(p.read_text())
         except (OSError, json.JSONDecodeError):
             pass
-    return d
+    return {}
+
+
+def settings() -> dict:
+    """{keys: {provider: key}, primary, coverage: {provider: {site: n}}}。兼容旧格式（provider + api_key）。"""
+    d = _raw()
+    keys = dict(d.get("keys") or {})
+    if d.get("provider") and d.get("api_key"):
+        keys.setdefault(d["provider"], d["api_key"])
+    env_p, env_k = os.environ.get("WEBSEARCH_PROVIDER", ""), os.environ.get("WEBSEARCH_API_KEY", "")
+    if env_p in PROVIDERS and env_k:
+        keys.setdefault(env_p, env_k)
+    keys = {k: v for k, v in keys.items() if k in PROVIDERS and v}
+    primary = d.get("primary") or d.get("provider") or next(iter(keys), "")
+    if primary not in keys:
+        primary = next(iter(keys), "")
+    return {"keys": keys, "primary": primary, "coverage": d.get("coverage") or {},
+            # 兼容旧调用
+            "provider": primary, "api_key": keys.get(primary, "")}
 
 
 def available() -> bool:
-    s = settings()
-    return s["provider"] in PROVIDERS and bool(s["api_key"])
+    return bool(settings()["keys"])
 
 
 def public_settings() -> dict:
     s = settings()
-    return {"provider": s["provider"], "api_key": "***" if s["api_key"] else "", "available": available(),
-            "providers": PROVIDERS}
+    return {"provider": s["primary"], "api_key": "***" if s["api_key"] else "", "available": available(),
+            "providers": PROVIDERS, "keys": {p: ("***" if s["keys"].get(p) else "") for p in PROVIDERS},
+            "coverage": s["coverage"]}
 
 
-def coverage() -> dict:
-    """当前搜索服务对各站点的收录情况（设置页“测试”的结果）：{site: 属于该站点的条数}。"""
+def coverage(provider: str | None = None) -> dict:
+    """某个搜索服务对各站点的收录情况（设置页“测试”的结果）：{site: 属于该站点的条数}。"""
     s = settings()
-    return ((s.get("coverage") or {}).get(s["provider"]) or {})
+    return (s["coverage"].get(provider or s["primary"]) or {})
+
+
+def providers_for(site: str | None) -> list[str]:
+    """检索某个站点时依次尝试的服务：测试显示收录多的优先；测试显示不收录的排除；没测过的放中间。"""
+    s = settings()
+    order = [s["primary"]] + [p for p in s["keys"] if p != s["primary"]]
+    if not site:
+        return order
+    scored = []
+    for i, p in enumerate(order):
+        n = (s["coverage"].get(p) or {}).get(site)
+        if n == 0:
+            continue
+        scored.append((-(n if n is not None else 0.5), i, p))
+    return [p for _, _, p in sorted(scored)]
 
 
 def not_covered(site: str | None) -> bool:
-    return bool(site) and coverage().get(site) == 0
+    """所有已配置的搜索服务都测试过且都不收录该站点。"""
+    return bool(site) and available() and not providers_for(site)
 
 
 def save_coverage(provider: str, cov: dict):
-    p = _path()
-    d = json.loads(p.read_text()) if p.exists() else {}
+    d = _raw()
     d.setdefault("coverage", {})[provider] = cov
-    p.write_text(json.dumps(d))
+    _path().write_text(json.dumps(d))
 
 
-def save_settings(provider: str, api_key: str):
+def save_settings(provider: str, api_key: str, primary: bool = True):
+    """保存某个服务的 key（"***" 表示不改，空字符串表示删除）。可以同时配置多个服务。"""
     if provider and provider not in PROVIDERS:
         raise ValueError(f"不支持的搜索服务：{provider}")
-    old = settings()
-    if api_key == "***":
-        api_key = old.get("api_key", "")
-    d = {"provider": provider, "api_key": (api_key or "").strip()}
-    if old.get("coverage"):
-        d["coverage"] = old["coverage"]
+    d = _raw()
+    s = settings()
+    keys = dict(s["keys"])
+    if provider:
+        if api_key == "***":
+            pass
+        elif (api_key or "").strip():
+            keys[provider] = api_key.strip()
+        else:
+            keys.pop(provider, None)
+    d.update(keys=keys, primary=provider if (primary and provider in keys) else s["primary"])
+    d.pop("provider", None)
+    d.pop("api_key", None)
     _path().write_text(json.dumps(d))
 
 
@@ -96,22 +135,40 @@ def search(query: str, *, site: str | None = None, count: int = 10, since: float
     """返回 [{title, url, snippet, published_at, site_name}]。未配置时抛 FetchError("config")。
     stats（可选）记录：raw=服务返回条数，matched=属于目标站点的条数，retried=是否用 site: 语法重试过。"""
     stats = stats if stats is not None else {}
-    rows = _search(query, site=site, count=count, since=since)
-    stats.update(raw=len(rows), matched=sum(_host_ok(x["url"], site) for x in rows), retried=False)
-    if site and not stats["matched"] and settings()["provider"] != "brave":
-        # 返回了结果但没有一条来自目标站点：多半是服务不支持站点限定参数，改用查询语法 site: 再试一次
-        rows2 = _search(f"{query} site:{site}", site=None, count=count, since=since)
-        stats.update(retried=True, raw=stats["raw"] + len(rows2),
-                     matched=sum(_host_ok(x["url"], site) for x in rows2))
-        rows = rows2
-    return [x for x in rows if _host_ok(x["url"], site)]
-
-
-def _search(query: str, *, site: str | None, count: int, since: float | None) -> list[dict]:
-    s = settings()
     if not available():
         raise FetchError("config", "未配置搜索 API（在“设置”页选择服务并填写 key 后即可使用）", "websearch")
-    prov, key = s["provider"], s["api_key"]
+    order = providers_for(site)
+    stats.update(raw=0, matched=0, retried=False, tried=[], provider=None)
+    if not order:
+        return []
+    last_err = None
+    for prov in order:          # 依次尝试：哪个服务对该站点收录好就用哪个，拿到结果就停
+        try:
+            rows = _search(query, site=site, count=count, since=since, provider=prov)
+            matched = [x for x in rows if _host_ok(x["url"], site)]
+            if site and not matched and prov != "brave":
+                # 没有一条来自目标站点：多半是服务不支持站点限定参数，改用查询语法 site: 再试一次
+                rows2 = _search(f"{query} site:{site}", site=None, count=count, since=since, provider=prov)
+                rows += rows2
+                matched = [x for x in rows2 if _host_ok(x["url"], site)]
+                stats["retried"] = True
+        except FetchError as e:
+            if e.kind != "config" or len(order) == 1:
+                last_err = e
+            stats["tried"].append(f"{PROVIDERS[prov]}：{e.reason[:40]}")
+            continue
+        stats["raw"] += len(rows)
+        stats["tried"].append(f"{PROVIDERS[prov]} {len(matched)} 条")
+        if matched or not site:
+            stats.update(matched=len(matched), provider=prov)
+            return matched
+    if last_err and not stats["raw"]:
+        raise last_err
+    return []
+
+
+def _search(query: str, *, site: str | None, count: int, since: float | None, provider: str) -> list[dict]:
+    prov, key = provider, settings()["keys"][provider]
     days = _freshness(since)
     try:
         if prov == "bocha":

@@ -269,6 +269,14 @@ class FakeWeb:
             if self.state["waf_36kr"]:
                 return 200, {"content-type": "text/html"}, WAF_PAGE.encode(), url
             return 200, X, kr_feed().encode(), url
+        if url == "https://api.tavily.com/search" and method == "POST":
+            dom = ((json_body or {}).get("include_domains") or [None])[0]
+            rows = [{"title": "如何看待极创工作室？", "url": "https://www.zhihu.com/question/42", "content": "知乎讨论极创工作室"}] \
+                if dom == "zhihu.com" else []
+            return 200, J, json.dumps({"results": rows}, ensure_ascii=False).encode(), url
+        if url == "https://api.bochaai.com/v1/web-search" and method == "POST" and self.state.get("bocha_no_zhihu") \
+                and "zhihu" in json.dumps(json_body or {}):
+            return 200, J, json.dumps({"code": 200, "data": {"webPages": {"value": _bocha_rows(None)}}}).encode(), url
         if url == "https://api.bochaai.com/v1/web-search" and method == "POST":
             if headers.get("Authorization") != "Bearer test-key":
                 return 401, J, b'{"code":401,"msg":"invalid key"}', url

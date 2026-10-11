@@ -433,8 +433,9 @@ def plan(ctx):
             if s["method"] == "websearch" and websearch.not_covered(WEB_PLATFORMS.get(s["id"], (None,))[0]):
                 st.setdefault("not_covered", []).append(s["name"])      # 设置页测试显示当前搜索服务不收录该平台
                 continue
-            q = " ".join(terms_zh[:2]) or ctx.topic
-            _push(st, _search_action(s["id"], q, terms_zh, f"{s['name']}检索「{q}」", prio=55))
+            # 两种说法各搜一次：单个核心词（平台用户常用的短说法）+ 两个核心词组合（更精确）
+            for q in dict.fromkeys([terms_zh[0] if terms_zh else ctx.topic, " ".join(terms_zh[:2]) or ctx.topic]):
+                _push(st, _search_action(s["id"], q, terms_zh, f"{s['name']}检索「{q}」", prio=55))
         elif lang == "en":
             if not queries_en:
                 continue

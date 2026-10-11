@@ -406,9 +406,16 @@ def get_websearch():
 
 @app.post("/api/settings/websearch")
 def set_websearch():
+    """保存搜索服务的 key。新格式 {keys: {bocha: "...", tavily: "..."}, primary}；兼容旧格式 {provider, api_key}。"""
     b = request.get_json(force=True)
     try:
-        websearch.save_settings(b.get("provider", ""), b.get("api_key", ""))
+        if isinstance(b.get("keys"), dict):
+            for prov, key in b["keys"].items():
+                websearch.save_settings(prov, key or "", primary=False)
+            if b.get("primary"):
+                websearch.save_settings(b["primary"], "***", primary=True)
+        else:
+            websearch.save_settings(b.get("provider", ""), b.get("api_key", ""))
     except ValueError as e:
         return jsonify(error=str(e)), 400
     return jsonify(websearch.public_settings())
@@ -416,27 +423,39 @@ def set_websearch():
 
 @app.post("/api/settings/websearch/test")
 def test_websearch():
-    """用同一个查询逐个平台测试，显示服务返回条数和其中属于该平台的条数（判断该服务对各平台的收录情况）。"""
+    """每个已配置的搜索服务 × 每个平台，用同一个查询测试，记录各服务对各平台的收录情况。
+    之后检索某个平台时自动选收录好的服务；所有服务都不收录的平台跳过。"""
     from .collect.fetch import FetchError
     from .collect.sources import WEB_PLATFORMS
     q = (request.get_json(silent=True) or {}).get("query") or "大模型"
-    out = {}
-    for sid, (site, name) in WEB_PLATFORMS.items():
-        st = {}
-        try:
-            rows = websearch.search(q, site=site, count=10, stats=st)
-            out[name] = {"ok": True, "count": len(rows), "raw": st.get("raw", 0), "retried": st.get("retried"),
-                         "first": (rows[0]["title"] if rows else None)}
-        except FetchError as e:
-            out[name] = {"ok": False, "error": f"{e.kind}：{e.reason}"}
-            if e.kind == "config":
-                break
-    cov = {site: out[name]["count"] for sid, (site, name) in WEB_PLATFORMS.items()
-           if site and name in out and out[name]["ok"]}
-    if cov:
-        websearch.save_coverage(websearch.settings()["provider"], cov)
-    skipped = [name for sid, (site, name) in WEB_PLATFORMS.items() if site and cov.get(site) == 0]
-    return jsonify(ok=all(v["ok"] for v in out.values()), results=out, query=q, skipped=skipped)
+    s = websearch.settings()
+    if not s["keys"]:
+        return jsonify(ok=False, error="还没有配置任何搜索服务的 key"), 400
+    matrix = {}
+    for prov in s["keys"]:
+        row, cov = {}, {}
+        for sid, (site, name) in WEB_PLATFORMS.items():
+            try:
+                rows = websearch._search(q, site=site, count=10, since=None, provider=prov)
+                hit = [x for x in rows if websearch._host_ok(x["url"], site)]
+                if site and not hit and prov != "brave":
+                    rows2 = websearch._search(f"{q} site:{site}", site=None, count=10, since=None, provider=prov)
+                    rows += rows2
+                    hit = [x for x in rows2 if websearch._host_ok(x["url"], site)]
+                row[name] = {"ok": True, "raw": len(rows), "count": len(hit), "first": hit[0]["title"] if hit else None}
+                if site:
+                    cov[site] = len(hit)
+            except FetchError as e:
+                row[name] = {"ok": False, "error": f"{e.kind}：{e.reason}"}
+                if e.kind == "config":
+                    break
+        if cov:
+            websearch.save_coverage(prov, cov)
+        matrix[websearch.PROVIDERS[prov]] = row
+    routes = {name: [websearch.PROVIDERS[p] for p in websearch.providers_for(site)]
+              for sid, (site, name) in WEB_PLATFORMS.items()}
+    skipped = [n for n, r in routes.items() if not r]
+    return jsonify(ok=True, matrix=matrix, routes=routes, skipped=skipped, query=q)
 
 
 # ---------------------------------------------------------------- 记忆

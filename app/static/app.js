@@ -761,25 +761,36 @@ async function renderWebsearchForm() {
   const w = await api("/api/settings/websearch");
   f.innerHTML = `<h3>搜索 API（公众号 / 知乎 / 贴吧 / 小红书 / 抖音 / 全网）</h3>
     <p class="small">这些平台没有开放搜索接口，或网页需要登录，所以通过正规搜索服务按站点检索：拿到标题、摘要和链接；公众号文章再抓全文，
-      需要登录的平台只保留摘要。B站和“公众号（搜狗）”不需要 key。中文内容推荐博查。</p>
-    <label>服务<select name="provider"><option value="">不使用</option>${Object.entries(w.providers).map(([k, n]) => `<option value="${k}" ${w.provider === k ? "selected" : ""}>${n}</option>`).join("")}</select></label>
-    <label>API Key<input name="api_key" type="password" value="${esc(w.api_key)}" placeholder="粘贴 key"></label>
-    <div class="row"><button>保存</button><button type="button" class="ghost" id="ws-test">测试</button>
+      需要登录的平台只保留摘要。B站和“公众号（搜狗）”不需要 key。<b>可以同时填多家</b>：测试后，检索每个平台时自动选收录好的那家
+      （例如博查不收录知乎时，知乎改用 Tavily）。</p>
+    ${Object.entries(w.providers).map(([k, n]) => `<div class="ws-row"><label><input type="radio" name="primary" value="${k}" ${w.provider === k ? "checked" : ""}> ${n}</label>
+      <input name="key_${k}" type="password" value="${esc(w.keys[k] || "")}" placeholder="${k === "bocha" ? "博查 key（中文推荐）" : k === "tavily" ? "tvly-…（每月有免费额度）" : "Brave key"}"></div>`).join("")}
+    <p class="small">单选框表示首选服务；key 留空表示不用这家。</p>
+    <div class="row"><button>保存</button><button type="button" class="ghost" id="ws-test">测试各平台收录</button>
       <span class="${w.available ? "ok" : "gap"}">${w.available ? "已配置" : "未配置"}</span></div>
-    <p id="ws-result" class="small"></p>`;
+    <div id="ws-result" class="small"></div>`;
   f.onsubmit = async (e) => {
     e.preventDefault();
-    try { await api("/api/settings/websearch", { method: "POST", body: Object.fromEntries(new FormData(f).entries()) }); renderWebsearchForm(); }
+    const fd = new FormData(f);
+    const keys = Object.fromEntries(Object.keys(w.providers).map((k) => [k, fd.get("key_" + k) || ""]));
+    try { await api("/api/settings/websearch", { method: "POST", body: { keys, primary: fd.get("primary") } }); renderWebsearchForm(); }
     catch (err) { $("#ws-result").textContent = err.message; }
   };
   $("#ws-test").onclick = async () => {
-    $("#ws-result").textContent = "测试中…";
-    const r = await api("/api/settings/websearch/test", { method: "POST", body: {} });
-    $("#ws-result").innerHTML = `<table class="tbl small"><tr><th>平台</th><th>服务返回</th><th>属于该平台</th><th>例子 / 说明</th></tr>${Object.entries(r.results).map(([k, v]) => v.ok
-      ? `<tr><td>${esc(k)}</td><td>${v.raw}</td><td class="${v.count ? "ok" : "gap"}">${v.count}${v.retried ? "（site: 重试）" : ""}</td><td>${v.first ? esc(v.first) : v.raw ? "服务返回了结果，但都不是该平台的页面：该服务对这个平台收录少" : "没有结果"}</td></tr>`
-      : `<tr><td>${esc(k)}</td><td colspan="3" class="gap">失败：${esc(v.error)}</td></tr>`).join("")}</table>
-      <p class="small">用同一个查询「${esc(r.query)}」测试，看你选的搜索服务对各平台的收录情况。
-      ${r.skipped?.length ? `<b>${r.skipped.map(esc).join("、")}</b> 没有收录，之后检索会自动跳过（换服务后重新测试即可恢复）。` : "各平台都有收录。"}</p>`;
+    $("#ws-result").textContent = "测试中（每家服务 × 每个平台各搜一次，约十几秒）…";
+    try {
+      const r = await api("/api/settings/websearch/test", { method: "POST", body: {} });
+      const provs = Object.keys(r.matrix);
+      const plats = Object.keys(r.matrix[provs[0]] || {});
+      $("#ws-result").innerHTML = `<table class="tbl small"><tr><th>平台</th>${provs.map((p) => `<th>${esc(p)}</th>`).join("")}<th>检索时使用</th></tr>
+        ${plats.map((pl) => `<tr><td>${esc(pl)}</td>${provs.map((p) => {
+          const v = r.matrix[p][pl];
+          if (!v) return "<td>—</td>";
+          if (!v.ok) return `<td class="gap">失败：${esc(v.error)}</td>`;
+          return `<td class="${v.count ? "ok" : "gap"}" title="${esc(v.first || "")}">${v.count} 条${v.first ? `<br><small>${esc(v.first.slice(0, 24))}</small>` : v.raw ? "<br><small>有结果但不是该平台</small>" : ""}</td>`;
+        }).join("")}<td>${(r.routes[pl] || []).length ? esc(r.routes[pl].join(" → ")) : '<span class="gap">都不收录，跳过</span>'}</td></tr>`).join("")}</table>
+        <p class="small">用同一个查询「${esc(r.query)}」测试。${r.skipped.length ? `<b>${r.skipped.map(esc).join("、")}</b> 所有已配置的服务都不收录，检索时跳过；可以再填一家服务的 key 后重新测试。` : "各平台都有服务可用。"}</p>`;
+    } catch (err) { $("#ws-result").textContent = err.message; }
   };
 }
 

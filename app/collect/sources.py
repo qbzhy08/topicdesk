@@ -132,13 +132,13 @@ BUILTIN = [
     dict(id="wechat", name="微信公众号", method="websearch", lang="zh", base_url="https://mp.weixin.qq.com",
          config={"domains": ["community", "general", "tech", "finance"], "note": "搜索 API 限定 mp.weixin.qq.com，文章页可抓全文"}),
     dict(id="zhihu", name="知乎", method="websearch", lang="zh", base_url="https://www.zhihu.com",
-         config={"domains": ["community", "general", "tech"], "fetch": False, "note": "只保留搜索摘要（正文需登录）"}),
+         config={"domains": ["community", "general", "tech", "finance", "science"], "fetch": False, "note": "只保留搜索摘要（正文需登录）"}),
     dict(id="tieba", name="百度贴吧", method="websearch", lang="zh", base_url="https://tieba.baidu.com",
-         config={"domains": ["community"], "fetch": False, "note": "只保留搜索摘要"}),
+         config={"domains": ["community", "general"], "fetch": False, "note": "只保留搜索摘要"}),
     dict(id="xiaohongshu", name="小红书", method="websearch", lang="zh", base_url="https://www.xiaohongshu.com",
-         config={"domains": ["community"], "fetch": False, "note": "只保留搜索摘要（网页需登录，条款禁止抓取）"}),
+         config={"domains": ["community", "general", "tech", "finance"], "fetch": False, "note": "只保留搜索摘要（网页需登录，条款禁止抓取）"}),
     dict(id="douyin", name="抖音", method="websearch", lang="zh", base_url="https://www.douyin.com",
-         config={"domains": ["community"], "fetch": False, "note": "只保留搜索摘要（网页需登录，条款禁止抓取）"}),
+         config={"domains": ["community", "general", "tech", "finance"], "fetch": False, "note": "只保留搜索摘要（网页需登录，条款禁止抓取）"}),
     dict(id="web", name="通用网页", method="html", lang="any", base_url="", config={"domains": ['tech', 'finance', 'science', 'general'], }),
 ]
 

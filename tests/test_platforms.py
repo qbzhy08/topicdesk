@@ -146,3 +146,24 @@ class CoverageTest(CollectBase):
         calls = db.query("SELECT input FROM tool_calls WHERE task_id=? AND tool='source_search'", (tid,))
         self.assertFalse(any(c["input"]["source_id"] == "tieba" for c in calls))
         self.assertTrue(any("不收录" in o for o in st["report"]["omissions"]))
+
+
+class MultiProviderTest(CollectBase):
+    def test_route_platform_to_provider_that_covers_it(self):
+        from app import server
+        self.web.state["bocha_no_zhihu"] = True
+        c = server.app.test_client()
+        c.post("/api/settings/websearch", json={"keys": {"bocha": "test-key", "tavily": "tvly-x"}, "primary": "bocha"})
+        pub = c.get("/api/settings/websearch").json
+        self.assertEqual((pub["provider"], pub["keys"]["bocha"], pub["keys"]["tavily"]), ("bocha", "***", "***"))
+        r = c.post("/api/settings/websearch/test", json={"query": "极创工作室"}).json
+        self.assertEqual(r["routes"]["知乎"], ["Tavily"])                 # 博查不收录知乎 → 改用 Tavily
+        self.assertEqual(r["routes"]["小红书"][0], "博查")
+        st = {}
+        rows = websearch.search("极创工作室", site="zhihu.com", stats=st)
+        self.assertEqual(rows[0]["url"], "https://www.zhihu.com/question/42")
+        self.assertEqual(st["provider"], "tavily")
+        # 删除 Tavily 的 key 后，知乎没有服务可用 → 跳过
+        c.post("/api/settings/websearch", json={"keys": {"tavily": ""}})
+        self.assertTrue(websearch.not_covered("zhihu.com"))
+        self.assertFalse(websearch.not_covered("xiaohongshu.com"))
