@@ -217,7 +217,8 @@ function setupHistNav() {
     t = setTimeout(() => {
       const h = location.hash || "#/";
       const title = ($("#detail h1")?.textContent || "").trim();
-      const kind = pageKind(h);
+      let kind = pageKind(h);
+      if (kind === "任务") kind = ($("#detail [data-f=graph]")?.textContent || "").split(" · ")[0].trim() || kind;   // 主题检索 / 写作
       const label = title && kind !== "新主题" ? `${kind}：${title.length > 28 ? title.slice(0, 28) + "…" : title}` : kind;
       if (hist.labels[h] !== label) {
         hist.labels[h] = label;
@@ -433,6 +434,10 @@ async function poll() {
 
 function renderTask(t) {
   const d = $("#detail");
+  if (["research", "write"].includes(t.graph)) {
+    const sig = `${t.id}:${t.status}:${t.state?.title || ""}`;
+    if (current.flowSig !== sig) { current.flowSig = sig; loadFlow({ task: t.id }, t.graph === "write" ? 2 : 1); }
+  }
   $("[data-f=graph]", d).textContent = `${GRAPH_NAME[t.graph] || t.graph} · ${t.id}`;
   $("[data-f=topic]", d).textContent = taskTitle(t);
   const b = $("[data-f=status]", d);
@@ -476,6 +481,47 @@ function showPanelError(f, name, err) {
   if (box) box.innerHTML = `<div class="card"><p class="gap">${name}显示出错：${esc(err?.message || String(err))}</p>
     <p class="small muted">请截图发给开发者。其他部分不受影响。</p></div>`;
   if (current && f === "write") current.writeLoaded = null;
+}
+
+// ---- 流程条：整理资料 → 写作 → 文章，三步互相跳转（一次检索可写多篇，可切换看哪一篇）
+async function loadFlow(q, here) {
+  const me = current;
+  let f;
+  try { f = await api(`/api/flow?${new URLSearchParams(q)}`); } catch { return; }
+  if (current !== me) return;
+  const box = $("#detail [data-f=flow]");
+  if (!box || !f.research) return;
+  const ws = f.writes || [];
+  let pick = me.flowWrite && ws.find((w) => w.task_id === me.flowWrite);
+  pick = pick || ws.find((w) => w.task_id === f.here_write) || ws[ws.length - 1];
+  const W_ST = { done: "已完成", running: "进行中", pending: "排队中", interrupted: "等你确认", failed: "失败", cancelled: "已取消" };
+  const r = f.research;
+  const step = (n, name, sub, href, cls) => {
+    const tag = href ? "a" : "span";
+    return `<${tag} class="fs ${cls}" ${href ? `href="${href}"` : ""}><i>${cls.includes("done") && !cls.includes("here") ? "✓" : n}</i>
+      <span><b>${name}</b><small>${sub}</small></span></${tag}>`;
+  };
+  const cls = (n, ok) => `${n === here ? "here" : ""} ${ok ? "done" : ""} ${n === here ? "" : ""}`.trim();
+  const s1 = step(1, "整理资料", `${esc(r.topic)}${r.docs ? ` · ${r.docs} 篇` : ""}`, here === 1 ? null : `#/task/${r.id}`,
+    cls(1, r.status === "done"));
+  const s2 = pick ? step(2, "写作", `${esc(pick.skill || "")} · ${W_ST[pick.status] || esc(pick.status)}`,
+    here === 2 && f.here_write === pick.task_id ? null : `#/task/${pick.task_id}`, cls(2, pick.status === "done"))
+    : step(2, "写作", r.status === "done" ? "还没开始：在下方选一种写法" : "资料整理完后开始", null, "todo");
+  const s3 = pick?.article_id && (pick.status === "done" || pick.version)
+    ? step(3, "文章", esc(pick.title || "（无标题）") + (pick.version ? ` · 第 ${pick.version} 版` : ""),
+      here === 3 && f.here_article === pick.article_id ? null : `#/article/${pick.article_id}`, cls(3, true))
+    : step(3, "文章", pick ? "写完后在这里打开" : "—", null, "todo");
+  box.innerHTML = `<nav class="flow" aria-label="本主题流程">${s1}<span class="fa">→</span>${s2}<span class="fa">→</span>${s3}
+    ${ws.length > 1 ? `<label class="flow-pick small">这批资料写过 ${ws.length} 篇，切换：<select>${ws.map((w, k) =>
+      `<option value="${w.task_id}" ${w === pick ? "selected" : ""}>${k + 1}. ${esc(w.skill || "")}${w.title ? "《" + esc(w.title.slice(0, 18)) + "》" : ""}</option>`).join("")}</select></label>` : ""}</nav>`;
+  const sel = $("select", box);
+  if (sel) sel.onchange = () => {
+    const w = ws.find((x) => x.task_id === sel.value);
+    if (here === 3 && w?.article_id) { location.hash = `#/article/${w.article_id}`; return; }   // 文章页：直接打开那一篇
+    if (here === 2) { location.hash = `#/task/${w.task_id}`; return; }
+    me.flowWrite = sel.value;
+    loadFlow(q, here);
+  };
 }
 
 const NODE_NAME = { plan: "理解主题、拆子问题", decide: "决定下一步", act: "检索与抓取", judge: "复核相关度", images: "挑选配图",
@@ -1248,6 +1294,7 @@ async function showArticle(id, ver) {
     <p class="small muted">质检：清晰度（边缘锐度）、尺寸、压缩、是否缩略图/裁切、与已选图是否重复；位置按图注和图片前后的正文与段落的相似度决定。示意图只用文中已核对过的数据。</p>`;
   const TABS = [["check", "核对", bad.length], ["imgs", "配图", figs.length + (cover ? 1 : 0)], ["fixes", "改动", fixes.length], ["gaps", "补检", gaps.length], ["docs", "素材", docs.length]];
   el.innerHTML = `
+    <div data-f="flow"></div>
     <div class="detail-head art-head"><div><p class="kicker">文章 · ${esc(m.skill?.name || a.skill)} v${esc(m.skill?.version || "")}</p><h1>${esc(a.title || "")}</h1>
       <p class="meta">第 ${v.version} 版（${esc(v.note || "")}，${fmtTime(v.created_at)}）
         ${d.versions.length > 1 ? `<select id="art-ver">${d.versions.map((x) => `<option value="${x.version}" ${x.version === v.version ? "selected" : ""}>第 ${x.version} 版 · ${esc(x.note || "")}</option>`).join("")}</select>` : ""}
@@ -1262,6 +1309,7 @@ async function showArticle(id, ver) {
         <div class="side-pane">${panes[tab] || panes.check}</div>
       </aside>
     </div>`;
+  loadFlow({ article: id }, 3);
   $("#art-ver") && ($("#art-ver").onchange = (e) => location.hash = `#/article/${id}?v=${e.target.value}`);
   $$(".side-tabs button", el).forEach((b) => b.onclick = () => {
     store.set("artTab", b.dataset.tab);

@@ -737,6 +737,51 @@ def get_article(aid):
     return jsonify(article=_article_row(a), version=v, versions=versions)
 
 
+@app.get("/api/flow")
+def get_flow():
+    """同一主题的流程链：整理资料（检索任务）→ 写作任务 → 文章。任务页、文章页顶部的流程条用它互相跳转。"""
+    a = request.args
+    rid, here_write, here_article = None, None, a.get("article")
+    if here_article:
+        art = db.query_one("SELECT task_id FROM articles WHERE id=?", (here_article,))
+        if not art:
+            abort(404)
+        here_write = art["task_id"]
+    tid = a.get("task") or here_write
+    t = db.query_one("SELECT id, graph, parent_task_id, params FROM tasks WHERE id=?", (tid,)) if tid else None
+    if not t:
+        abort(404)
+    if t["graph"] == "write":
+        here_write = t["id"]
+        rid = (t.get("params") or {}).get("research_task") or t.get("parent_task_id")
+    elif t["graph"] == "research":
+        rid = t["id"]
+    else:
+        return jsonify(research=None, writes=[])
+    r = db.query_one("SELECT id, topic, status, state FROM tasks WHERE id=?", (rid,)) if rid else None
+    research = None
+    if r:
+        rep = ((r.get("state") or {}).get("report") or {})
+        research = {"id": r["id"], "topic": r["topic"], "status": r["status"],
+                    "docs": rep.get("unique_docs") or rep.get("total_docs")}
+    writes = []
+    if rid:
+        rows = db.query("SELECT id, status, params, state, created_at FROM tasks WHERE graph='write' "
+                        "AND (parent_task_id=? OR json_extract(params, '$.research_task')=?) ORDER BY created_at",
+                        (rid, rid))
+        for w in rows:
+            st = w.get("state") or {}
+            art = db.query_one("SELECT id, title, current_version FROM articles WHERE task_id=?", (w["id"],))
+            if not art and (st.get("result") or {}).get("article_id"):
+                art = db.query_one("SELECT id, title, current_version FROM articles WHERE id=?", (st["result"]["article_id"],))
+            writes.append({"task_id": w["id"], "status": w["status"], "created_at": w["created_at"],
+                           "skill": (st.get("skill") or {}).get("name") or (w.get("params") or {}).get("skill"),
+                           "article_id": art["id"] if art else None,
+                           "title": (art or {}).get("title") or st.get("title"),
+                           "version": (art or {}).get("current_version")})
+    return jsonify(research=research, writes=writes, here_write=here_write, here_article=here_article)
+
+
 PROBLEM_STATUS = {"weak", "number", "bad_cite", "uncited", "analysis_num"}
 
 

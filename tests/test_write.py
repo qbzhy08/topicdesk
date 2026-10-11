@@ -336,3 +336,25 @@ class ImageClarityTest(WriteBase):
         # 没有图注、但图片本身像图表：是信息图
         self.assertTrue(ill.classify({"caption": "", "context_text": "销量对比如下"}, q_chart)["info"])
 
+
+
+class FlowTest(WriteBase):
+    """流程条：检索任务、写作任务、文章三处都能拿到同一条链，互相跳转。"""
+
+    def test_flow_links_research_write_article(self):
+        from app.server import create_app
+        llm.available, llm.chat = (lambda: False), llm.chat
+        t1, _ = self.write("brief")
+        t2, _ = self.write("explainer")
+        c = create_app().test_client()
+        f = c.get(f"/api/flow?task={self.t1}").get_json()
+        self.assertEqual(f["research"]["id"], self.t1)
+        self.assertEqual([w["task_id"] for w in f["writes"]], [t1["id"], t2["id"]])
+        self.assertTrue(all(w["article_id"] and w["status"] == "done" for w in f["writes"]))
+        g = c.get(f"/api/flow?task={t2['id']}").get_json()
+        self.assertEqual(g["research"]["id"], self.t1)
+        self.assertEqual(g["here_write"], t2["id"])
+        aid = t1["state"]["result"]["article_id"]
+        h = c.get(f"/api/flow?article={aid}").get_json()
+        self.assertEqual((h["research"]["id"], h["here_write"], h["here_article"]), (self.t1, t1["id"], aid))
+        self.assertEqual(c.get("/api/flow?task=nope").status_code, 404)

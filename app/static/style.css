@@ -588,3 +588,26 @@ button.linkish { background: none; color: var(--info); padding: 0; font-size: 12
 .dur-chip { position: relative; border: 1px solid var(--line); border-radius: 4px; padding: 2px 8px; overflow: hidden; }
 .dur-chip::before { content: ""; position: absolute; inset: 0 auto 0 0; width: var(--w); background: color-mix(in srgb, var(--accent) 18%, transparent); z-index: -1; }
 .dur-chip { z-index: 0; }
+
+/* 流程条：整理资料 → 写作 → 文章 */
+.flow { display: flex; align-items: stretch; gap: 8px; flex-wrap: wrap; margin: 0 0 16px; font-family: var(--sans); }
+.flow .fs {
+  display: flex; align-items: center; gap: 10px; flex: 1 1 0; min-width: 170px; padding: 9px 12px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--ink); text-decoration: none;
+}
+.flow a.fs:hover { border-color: var(--accent); }
+.flow .fs i {
+  flex: none; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center;
+  font: 600 12px var(--sans); font-style: normal; background: var(--paper); color: var(--muted); border: 1px solid var(--line);
+}
+.flow .fs.done i { background: var(--ok); color: #fff; border-color: var(--ok); }
+.flow .fs.here { border-color: var(--ink); box-shadow: inset 0 -3px 0 var(--accent); }
+.flow .fs.here i { background: var(--ink); color: #fff; border-color: var(--ink); }
+.flow .fs.todo { color: var(--muted); border-style: dashed; background: none; }
+.flow .fs span { display: flex; flex-direction: column; min-width: 0; }
+.flow .fs b { font-size: 13px; }
+.flow .fs small { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.flow .fa { align-self: center; color: var(--muted); }
+.flow-pick { flex-basis: 100%; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.flow-pick select { width: auto; max-width: min(520px, 100%); margin: 0; padding: 3px 6px; font-size: 12px; }
+@media (max-width: 700px) { .flow .fa { display: none; } .flow .fs { flex-basis: 100%; } }
