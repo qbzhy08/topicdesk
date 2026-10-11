@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 
-from .. import db, llm, writing
+from .. import db, illustrate as ill, llm, writing
 from .. import memory as mem
 from .. import skills as skills_mod
 from ..collect.sources import list_sources
@@ -456,7 +456,7 @@ def check(ctx):
                 ctx.think(f"{len(unresolved)} 句在现有资料里找不到依据，先补充检索核验，再改写")
                 return "gap"
         return "fix"
-    return "save"
+    return "illustrate"
 
 
 def fix(ctx):
@@ -488,6 +488,157 @@ def fix(ctx):
     return "check"
 
 
+# ---------------------------------------------------------------- illustrate（配图）
+
+MATCH_PROMPT = """判断每张图片放在对应段落后面是否合适：图片的图注和原文上下文，与段落讲的是不是同一件事、同一个对象或同一组数据。
+{items}
+只输出 JSON：{{"results": [{{"i": 1, "match": true, "reason": "不超过 20 字"}}]}}"""
+
+
+def _names_short(sid):
+    return _names().get(sid, sid or "")
+
+
+def illustrate(ctx):
+    st = ctx.state
+    sk = st["skill"]
+    docs = _docs(st)
+    need = int(sk["images"].get("body_min") or 2)
+    used_n = set(st["check"]["used"])
+    # 引用过的资料排前面；还没下载过配图的，先下载（最多 4 篇）
+    order = [d for d in docs if d["n"] in used_n] + [d for d in docs if d["n"] not in used_n]
+    have = {r["doc_id"] for r in db.query(
+        f"SELECT DISTINCT doc_id FROM images WHERE doc_id IN ({','.join('?' * len(order))})", [d["id"] for d in order])}
+    todo = []
+    for d in order:
+        row = db.query_one("SELECT url, meta FROM documents WHERE id=?", (d["id"],))
+        if d["id"] not in have and (row["meta"] or {}).get("image_candidates") and len(todo) < 4:
+            todo.append((d["id"], row["url"], row["meta"]["image_candidates"]))
+    if todo:
+        from ..collect.images import store_images
+
+        def dl(u, referer=None):
+            try:
+                return ctx.tool("image_download", url=u, referer=referer)
+            except Exception as e:  # noqa: BLE001
+                return {"ok": False, "reason": f"下载异常：{str(e)[:80]}"}
+        for did, url, cands in todo:
+            store_images(did, url, cands, max_images=6, download_fn=dl)
+    cands = ill.candidates([d["id"] for d in order])
+    banned, figs, rejected = set(), [], []
+    for _ in range(3):           # 大模型否决的图换下一张，最多重试 2 轮
+        pool = [c for c in cands if c["id"] not in banned]
+        figs, rejected = ill.place(pool, st["sections"], docs, need)
+        if not figs or not _use_llm(ctx):
+            break
+        items = []
+        for k, f in enumerate(figs, 1):
+            sec = next(x for x in st["sections"] if x["id"] == f["section"])
+            para = ill.paragraphs(sec["md"])[f["para"]]
+            im = next(c for c in cands if c["id"] == f["image_id"])
+            items.append(f"{k}. 图注：{(im.get('caption') or '（无）')[:80]}；图片上下文：{(im.get('context_text') or '（无）')[:160]}\n"
+                         f"   段落：{writing.CITE.sub('', para)[:220]}")
+        try:
+            res = ctx.tool("llm", messages=[{"role": "system", "content": "你只输出 JSON。"},
+                                            {"role": "user", "content": MATCH_PROMPT.format(items="\n".join(items))}])["data"]
+        except Exception as e:  # noqa: BLE001
+            ctx.think(f"图文相符确认失败（{str(e)[:60]}），按相似度结果放置")
+            break
+        bad = []
+        for r in res.get("results") or []:
+            try:
+                f = figs[int(r.get("i")) - 1]
+            except (TypeError, ValueError, IndexError):
+                continue
+            if r.get("match") is False:
+                bad.append(f)
+                rejected.append({"image": f["image_id"], "url": f["url"], "doc": f["doc_title"],
+                                 "why": f"大模型判断图文不符：{str(r.get('reason') or '')[:30]}"})
+            else:
+                f["why"] += f"；大模型确认相符：{str(r.get('reason') or '')[:30]}"
+        if not bad:
+            break
+        banned |= {f["image_id"] for f in bad}
+    for f in figs:
+        src = _names_short(f["source_id"])
+        cap = (f["orig_caption"] or "").strip()
+        f["caption"] = (cap if cap else "原文配图") + f"（图源：{src}《{f['doc_title'][:24]}》）"
+        f["alt"] = cap or f["doc_title"][:30]
+        if not cap:
+            f.setdefault("warn", []).append("原文没有图注，请确认图片内容与这段一致")
+    # ---- 原图不够：用核对过的数据画示意图
+    diagrams = []
+    if len(figs) < need:
+        ev = ill.timeline_events(st["check"]["items"], st["sections"])
+        if len(ev) >= 3:
+            refs = sorted({c for e in ev for c in e["cites"]})
+            sec_counts = {}
+            for e in ev:
+                sec_counts[e["section"]] = sec_counts.get(e["section"], 0) + 1
+            sid = max(sec_counts, key=sec_counts.get)
+            if sid in {f["section"] for f in figs}:
+                sid = next((x["id"] for x in st["sections"] if x["id"] not in {f["section"] for f in figs}), sid)
+            note = "示意图：根据文中出处 " + "".join(f"[{r}]" for r in refs) + " 的内容整理，非原始图片"
+            path = ill._save_svg(ill.timeline_svg("时间线", ev, "根据文中引用的资料整理"))
+            diagrams.append({"kind": "diagram", "diagram": "timeline", "src": "/media/" + path, "section": sid,
+                             "para": max(0, len(ill.paragraphs(next(x for x in st["sections"] if x["id"] == sid)["md"])) - 1),
+                             "caption": note, "alt": "时间线示意图", "why": f"原始配图不足；正文有 {len(ev)} 个带日期的已核对事件"})
+    if len(figs) + len(diagrams) < need and _use_llm(ctx):
+        ok_items = [i for i in st["check"]["items"] if i["status"] in ("supported", "semantic") and i["numbers"]]
+        if ok_items:
+            lines = "\n".join(f"- （节 {i['section']}）{i['sentence'][:160]}" for i in ok_items[:30])
+            try:
+                spec = ctx.tool("llm", messages=[{"role": "system", "content": "你只输出 JSON。"},
+                                                 {"role": "user", "content": ill.CHART_PROMPT.format(lines=lines)}])["data"]
+            except Exception:  # noqa: BLE001
+                spec = {"kind": "none"}
+            if spec.get("kind") == "bar":
+                problem = ill.verify_chart(spec, docs)
+                if problem:
+                    rejected.append({"image": None, "url": None, "doc": "示意图", "why": f"没画柱状图：{problem}"})
+                else:
+                    refs = [int(r) for r in spec["refs"]]
+                    items = [{"label": str(i["label"]), "value": float(i["value"])} for i in spec["items"]]
+                    path = ill._save_svg(ill.bar_svg(str(spec.get("title") or "数据对比")[:18], str(spec.get("unit") or ""),
+                                                     items, "根据文中引用的资料整理，数值均可在出处中找到"))
+                    sid = spec.get("section") if spec.get("section") in {x["id"] for x in st["sections"]} else st["sections"][0]["id"]
+                    diagrams.append({"kind": "diagram", "diagram": "bar", "src": "/media/" + path, "section": sid,
+                                     "para": 0, "alt": "数据示意图",
+                                     "caption": f"示意图：{spec.get('title') or '数据对比'}，数据来自出处 " + "".join(f"[{r}]" for r in refs) + "，非原始图片",
+                                     "why": "原始配图不足；用正文中已核对的数字作图，每个数值都在出处里找到"})
+    if len(figs) + len(diagrams) < need:
+        nums = ill.number_items(st["check"]["items"])
+        if len(nums) >= 2:
+            refs = sorted({c for x in nums for c in x["cites"]})
+            path = ill._save_svg(ill.numbers_svg("关键数字", nums, "数字均摘自文中引用的资料，已逐个核对"))
+            sid = max({x["section"] for x in nums}, key=lambda k: sum(1 for x in nums if x["section"] == k))
+            if sid in {f["section"] for f in figs + diagrams}:
+                sid = next((x["id"] for x in st["sections"] if x["id"] not in {f["section"] for f in figs + diagrams}), sid)
+            diagrams.append({"kind": "diagram", "diagram": "numbers", "src": "/media/" + path, "section": sid,
+                             "para": max(0, len(ill.paragraphs(next(x for x in st["sections"] if x["id"] == sid)["md"])) - 1),
+                             "alt": "关键数字示意图",
+                             "caption": "示意图：文中的关键数字，出处 " + "".join(f"[{r}]" for r in refs) + "，非原始图片",
+                             "why": "原始配图不足；用正文中字面核对通过的数字整理"})
+    st["figures"] = figs + diagrams
+    # ---- 封面
+    cov = ill.pick_cover(cands, {f["image_id"] for f in figs}, st["terms"])
+    if cov:
+        st["cover"] = {"kind": "photo", "image_id": cov["id"], "src": "/media/" + cov["local_path"], "url": cov["url"],
+                       "doc_title": cov["doc_title"], "doc_id": cov["doc_id"],
+                       "caption": ((cov.get("caption") or "").strip() or "封面图") + f"（图源：{_names_short(cov['source_id'])}《{cov['doc_title'][:24]}》）",
+                       "alt": (cov.get("caption") or cov["doc_title"])[:30], "why": "横图、清晰、与主题最相关"}
+    else:
+        path = ill._save_svg(ill.cover_svg(st["title"], f"{sk['name']} · {ctx.topic}"))
+        st["cover"] = {"kind": "diagram", "src": "/media/" + path, "alt": "示意封面",
+                       "caption": "示意封面：素材中没有合适的横版原图，按标题生成",
+                       "why": "没有满足封面要求（横图、宽 ≥ 640、清晰）的原始图片"}
+    st["image_rejected"] = rejected
+    ctx.observe(f"配图：候选 {len(cands)} 张，正文用原图 {len(figs)} 张、示意图 {len(diagrams)} 张（要求至少 {need} 张），"
+                f"封面{'用原图' if st['cover']['kind'] == 'photo' else '为示意封面'}；未采用 {len(rejected)} 张：" +
+                "；".join(f"{r['doc'][:14]}：{r['why']}" for r in rejected[:5]))
+    return "save"
+
+
 # ---------------------------------------------------------------- save
 
 def save(ctx):
@@ -496,10 +647,13 @@ def save(ctx):
     if not st.get("sections") or not all("md" in x for x in st["sections"]):
         raise ValueError("预算耗尽，文章还没写完，无法保存")
     rep = st.get("check") or writing.check(st["sections"], docs)
-    secs, refmap = writing.renumber(st["sections"])
+    figs, cover = st.get("figures") or [], st.get("cover")
+    secs, refmap = writing.renumber(ill.insert_figures(st["sections"], figs))
     rdocs = [{**d, "n": refmap[d["n"]]} for d in docs if d["n"] in refmap]
     md = writing.assemble(st["title"], secs, rdocs, set(refmap.values()), _names(),
-                          note=None if st["draft_by"] == "llm" else "未配置大模型：正文为资料原句摘编，没有改写。")
+                          note=None if st["draft_by"] == "llm" else "未配置大模型：正文为资料原句摘编，没有改写。",
+                          cover_md=ill.figure_md(cover) if cover else None)
+    image_checks = ill.final_check(md, figs, cover, int(st["skill"]["images"].get("body_min") or 2))
     sk = st["skill"]
     meta = {"skill": {"id": sk["id"], "name": sk["name"], "version": sk["version"], "fingerprint": sk["fingerprint"]},
             "research_task": st["research_task"], "ranking_version": st.get("ranking_version"),
@@ -507,7 +661,8 @@ def save(ctx):
                       "ref": refmap.get(d["n"])} for d in st["docs"]],
             "refmap": {str(k): v for k, v in refmap.items()},
             "facts": st["facts"], "sections": st["sections"], "check": rep, "fixes": st["fixes"],
-            "gap_log": st["gap_log"], "prefs": st["prefs"], "outline_by": st["outline_by"], "draft_by": st["draft_by"]}
+            "gap_log": st["gap_log"], "prefs": st["prefs"],
+            "figures": figs, "cover": cover, "image_rejected": st.get("image_rejected") or [], "image_checks": image_checks, "outline_by": st["outline_by"], "draft_by": st["draft_by"]}
     v = save_version(st["article_id"], md, meta, note=ctx.params.get("note") or "初稿", title=st["title"],
                      task_id=ctx.task_id)
     st["result"] = {"article_id": st["article_id"], "version": v}
@@ -532,7 +687,8 @@ def save_version(aid: str, md: str, meta: dict, note: str, title: str | None = N
 
 register_graph(Graph(
     name="write",
-    nodes=dict(load=load, select=select, outline=outline, gap=gap, draft=draft, check=check, fix=fix, save=save),
+    nodes=dict(load=load, select=select, outline=outline, gap=gap, draft=draft, check=check, fix=fix,
+               illustrate=illustrate, save=save),
     start="load",
     on_budget="save",
 ))

@@ -348,9 +348,11 @@ def renumber(sections: list[dict]) -> tuple[list[dict], dict]:
 
 
 def assemble(title: str, sections: list[dict], docs: list[dict], used: set[int], names: dict | None = None,
-             note: str | None = None) -> str:
-    parts = [f"# {title}", "",
-             "> 阅读说明：句末的 [n] 是出处，对应文末参考资料；以“【分析】”开头的段落是本文的分析判断，不是来源原话。"]
+             note: str | None = None, cover_md: str | None = None) -> str:
+    parts = [f"# {title}", ""]
+    if cover_md:
+        parts += [cover_md, ""]
+    parts += ["> 阅读说明：句末的 [n] 是出处，对应文末参考资料；以“【分析】”开头的段落是本文的分析判断，不是来源原话。"]
     if note:
         parts += ["", f"> {note}"]
     for s in sections:

@@ -205,7 +205,8 @@ const PHASE = { plan: "正在理解主题、拆分子问题", decide: "正在决
   verify: "正在补充核验可疑资料", report: "正在生成报告", recheck: "正在复查页面", reassess: "正在重新评估",
   import_fetch: "正在抓取链接", import_images: "正在处理图片",
   load: "正在读取 Skill 和写作记忆", select: "正在按 Skill 选材", outline: "正在列提纲", gap: "资料有缺口，正在补充检索",
-  draft: "正在逐节写作", check: "正在逐句核对出处和数字", fix: "正在按核对结果改写", save: "正在保存文章" };
+  draft: "正在逐节写作", check: "正在逐句核对出处和数字", fix: "正在按核对结果改写", illustrate: "正在配图：选图、质检、找位置",
+  save: "正在保存文章" };
 
 function renderLive(t) {
   const bar = $("[data-f=live]");
@@ -362,7 +363,7 @@ function showPanelError(f, name, err) {
 const NODE_NAME = { plan: "理解主题、拆子问题", decide: "决定下一步", act: "检索与抓取", judge: "复核相关度", images: "挑选配图",
   remember: "核验事实、写入记忆", rank: "价值排序", verify: "补充核验", report: "生成报告",
   load: "读取 Skill 和记忆", select: "选材", outline: "列提纲", gap: "补充检索", draft: "逐节写作", check: "逐句核对",
-  fix: "按核对结果改写", save: "保存文章", recheck: "复查页面", reassess: "重新评估" };
+  fix: "按核对结果改写", illustrate: "配图", save: "保存文章", recheck: "复查页面", reassess: "重新评估" };
 const REWIND_EG = {
   write: ["改了 Skill 文件或写作偏好 → 从“读取 Skill 和记忆”重跑：按新的要求重新选材、列提纲、写作",
     "检索任务后来补充或重评了资料 → 从“选材”重跑，用新的素材重写",
@@ -1097,7 +1098,19 @@ async function showArticle(id, ver) {
     docs: `<p class="small muted">按 Skill 的选材规则从价值排序里选出；带编号的是正文引用了的。</p>` +
       docs.map((x) => `<div class="chk small">${x.ref ? `<b>[${x.ref}]</b> ` : `<span class="muted">未引用</span> `}<a href="#/doc/${x.id}">${esc(x.title)}</a><br><small class="muted">${esc(x.label || "")} · ${esc(x.why || "")}</small></div>`).join(""),
   };
-  const TABS = [["check", "核对", bad.length], ["fixes", "改动", fixes.length], ["gaps", "补检", gaps.length], ["docs", "素材", docs.length]];
+  const figs = m.figures || [], cover = m.cover, ich = m.image_checks || [], irej = m.image_rejected || [];
+  const figRow = (f, where) => `<div class="fig-row"><img src="${esc(f.src)}" alt="" loading="lazy">
+      <div><b>${where}</b> <span class="tag ${f.kind === "diagram" ? "nv-update" : ""}">${f.kind === "diagram" ? "示意图" : "原图"}</span>
+        <p class="small">${esc(renum(f.caption || ""))}</p>
+        <p class="small muted">为什么放这里：${esc(f.why || "")}</p>
+        ${f.kind === "photo" && f.w ? `<p class="small muted">${f.w}×${f.h} · 清晰度 ${f.sharpness ?? "—"}${(f.warn || []).length ? ` · <span class="gap">${f.warn.map(esc).join("；")}</span>` : ""}
+          ${f.url ? ` · <a href="${esc(f.url)}" target="_blank" rel="noopener">原图链接</a>` : ""}</p>` : ""}</div></div>`;
+  panes.imgs = `${ich.length ? `<div class="img-checks">${ich.map((c) => `<span class="tag ${c.ok ? "" : "rel-lo"}">${c.ok ? "✓" : "✗"} ${esc(c.name)}：${esc(c.detail)}</span>`).join("")}</div>` : ""}
+    ${cover ? figRow(cover, "封面") : ""}
+    ${figs.map((f) => figRow(f, `「${esc(secName(f.section))}」第 ${f.para + 1} 段后`)).join("") || '<p class="small muted">这篇文章写于配图功能上线之前，重新写一次即可配图。</p>'}
+    ${irej.length ? `<details class="small"><summary>没用上的图（${irej.length}）</summary>${irej.map((r) => `<div class="chk">${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc((r.doc || "").slice(0, 30))}</a>` : esc(r.doc || "")}：${esc(r.why)}</div>`).join("")}</details>` : ""}
+    <p class="small muted">质检：清晰度（边缘锐度）、尺寸、压缩、是否缩略图/裁切、与已选图是否重复；位置按图注和图片前后的正文与段落的相似度决定。示意图只用文中已核对过的数据。</p>`;
+  const TABS = [["check", "核对", bad.length], ["imgs", "配图", figs.length + (cover ? 1 : 0)], ["fixes", "改动", fixes.length], ["gaps", "补检", gaps.length], ["docs", "素材", docs.length]];
   el.innerHTML = `
     <div class="detail-head art-head"><div><p class="kicker">文章 · ${esc(m.skill?.name || a.skill)} v${esc(m.skill?.version || "")}</p><h1>${esc(a.title || "")}</h1>
       <p class="meta">第 ${v.version} 版（${esc(v.note || "")}，${fmtTime(v.created_at)}）

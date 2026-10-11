@@ -49,7 +49,7 @@ class FakeWriter:
         return {"content": f"社区开发者的复现结果与官方宣称存在差距[{b}]。", "_cost": 0}
 
 
-class WriteTest(CollectBase):
+class WriteBase(CollectBase):
     run_research = _tm.MemoryTest.run_research
 
     def setUp(self):
@@ -72,6 +72,8 @@ class WriteTest(CollectBase):
                          (art["article_id"], art["version"]))
         return task, v
 
+
+class WriteTest(WriteBase):
     def test_skills_load_and_validate(self):
         all_ = skills.load_all()
         self.assertEqual(sorted(all_), ["brief", "compare", "explainer"])
@@ -206,3 +208,61 @@ class WriteTest(CollectBase):
         for f in with_refs:
             self.assertTrue(set(n_ids[n] for n in f["refs"]) & set(f["docs"]))
 
+
+
+class IllustrateTest(WriteBase):
+    def test_article_has_cover_and_body_images(self):
+        task, v = self.write("brief", no_llm=True)
+        meta = v["meta"]
+        self.assertGreaterEqual(len(meta["figures"]), 2)
+        self.assertTrue(meta["cover"])
+        self.assertTrue(all(c["ok"] for c in meta["image_checks"]), meta["image_checks"])
+        md = v["markdown"]
+        body_imgs = [l for l in md.split("\n") if l.startswith("![")]
+        self.assertEqual(len(body_imgs), len(meta["figures"]) + 1)          # 正文图 + 封面
+        self.assertEqual(len(set(body_imgs)), len(body_imgs))               # 不重复
+        for f in meta["figures"]:
+            self.assertIn("图源", f["caption"]) if f["kind"] == "photo" else self.assertIn("示意图", f["caption"])
+        from app import mdrender
+        html = mdrender.render(md)
+        self.assertEqual(html.count("<figure>"), len(body_imgs))
+        self.assertIn("<figcaption>", html)
+
+    def test_quality_detects_blur_and_thumbnails(self):
+        from PIL import Image, ImageFilter
+        from app import config, illustrate as ill
+        sharp = Image.open(__import__("io").BytesIO(fixtures_png(900, 500)))
+        p1 = config.IMAGE_DIR / "sharp.png"
+        sharp.save(p1)
+        p2 = config.IMAGE_DIR / "blur.png"
+        sharp.filter(ImageFilter.GaussianBlur(8)).save(p2)
+        ok = ill.quality("images/sharp.png", 900, 500, "https://x.com/a.png")
+        self.assertTrue(ok["ok"], ok)
+        bad = ill.quality("images/blur.png", 900, 500, "https://x.com/a.png")
+        self.assertFalse(bad["ok"])
+        self.assertIn("模糊", "".join(bad["issues"]))
+        th = ill.quality("images/sharp.png", 900, 500, "https://x.com/a_thumb_120x80.png")
+        self.assertIn("缩略图", "".join(th["issues"]))
+
+    def test_chart_values_must_be_in_sources(self):
+        from app import illustrate as ill
+        docs = [{"n": 1, "text": "量化成交占比从高峰期的 30% 左右降至 20% 左右，小微盘中占比超过 50%。"}]
+        good = {"kind": "bar", "unit": "%", "refs": [1],
+                "items": [{"label": "高峰期", "value": 30}, {"label": "目前", "value": 20}, {"label": "小微盘", "value": 50}]}
+        self.assertIsNone(ill.verify_chart(good, docs))
+        bad = {**good, "items": good["items"][:2] + [{"label": "编的", "value": 65}]}
+        self.assertIn("65", ill.verify_chart(bad, docs))
+        svg = ill.bar_svg("占比", "%", [{"label": "a", "value": 30.0}, {"label": "b", "value": 20.0}], "来源")
+        self.assertIn("示意图", svg)
+
+    def test_final_check_finds_placeholders(self):
+        from app import illustrate as ill
+        res = {c["name"]: c for c in ill.final_check("正文 {{img:cover}} 还有【此处插入图片】", [], None, 2)}
+        self.assertFalse(res["占位符残留"]["ok"])
+        self.assertFalse(res["正文配图数量"]["ok"])
+        self.assertFalse(res["封面"]["ok"])
+
+
+def fixtures_png(w, h):
+    from tests import fixtures
+    return fixtures.png(w, h)

@@ -540,3 +540,9 @@ button.linkish { background: none; color: var(--info); padding: 0; font-size: 12
   .rail { position: sticky; top: 0; align-self: start; height: 100vh; overflow-y: auto; overscroll-behavior: contain;
     box-sizing: border-box; scrollbar-width: thin; }
 }
+.fig-row { display: grid; grid-template-columns: 96px 1fr; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.fig-row img { width: 96px; height: 64px; object-fit: cover; border-radius: 4px; border: 1px solid var(--line); background: #fff; }
+.fig-row p { margin: 3px 0; overflow-wrap: anywhere; }
+.img-checks { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+.side-tabs button { padding: 10px 2px; }
+.art-body figure img[src$=".svg"] { background: #fbfaf7; border: 1px solid var(--line); }

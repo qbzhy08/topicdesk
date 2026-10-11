@@ -19,6 +19,12 @@ def png(w, h, color=(30, 120, 200)):
     d = ImageDraw.Draw(im)
     for i in range(0, w, 7):                       # 加纹理，避免压缩后过小
         d.line([(i, 0), (w - i, h)], fill=((i * 3) % 255, (i * 7) % 255, 90), width=2)
+    # 不同颜色的图画不同的明暗块，感知哈希不同（否则几张测试图会被判成同一张图）
+    seed = sum(color)
+    for k in range(6):
+        x0 = (seed * (k + 3) * 37) % max(1, w - w // 4)
+        y0 = (seed * (k + 5) * 53) % max(1, h - h // 4)
+        d.rectangle([x0, y0, x0 + w // 4, y0 + h // 4], fill=(255, 255, 255) if k % 2 else (0, 0, 0))
     b = io.BytesIO()
     im.save(b, "PNG")
     return b.getvalue()
