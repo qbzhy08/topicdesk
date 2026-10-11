@@ -39,7 +39,10 @@ def _public_state(state: dict) -> dict:
 
 @app.get("/")
 def index():
-    return send_from_directory(app.static_folder, "index.html")
+    # 首页不允许浏览器缓存：否则更新后仍引用旧版 app.js（脚本本身带版本号，可以长期缓存）
+    r = send_from_directory(app.static_folder, "index.html", max_age=0)
+    r.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return r
 
 
 @app.get("/api/graphs")

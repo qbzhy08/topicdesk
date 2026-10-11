@@ -341,9 +341,19 @@ function renderTask(t) {
   if (g && !sel.options.length) sel.innerHTML = g.nodes.map((n) => `<option>${esc(n)}</option>`).join("");
   $("[data-f=state]", d).textContent = JSON.stringify(t.state, null, 2);
   renderHitl(t.hitl.filter((h) => h.status === "open"));
-  renderReport(t.state.report, t.state);
-  if (t.graph === "research" && t.status === "done") { loadRanking(); loadWritePanel(t); }
+  // 写作入口先渲染：报告或榜单渲染出错时不能连带它也不显示
+  if (t.graph === "research" && t.status === "done") loadWritePanel(t).catch((err) => showPanelError("write", "写作入口", err));
   if (t.graph === "write") renderWriteTask(t);
+  try { renderReport(t.state.report, t.state); } catch (err) { showPanelError("report", "采集报告", err); }
+  if (t.graph === "research" && t.status === "done") loadRanking().catch((err) => showPanelError("ranking", "价值排序", err));
+}
+
+function showPanelError(f, name, err) {
+  console.error(err);
+  const box = $(`[data-f=${f}]`);
+  if (box) box.innerHTML = `<div class="card"><p class="gap">${name}显示出错：${esc(err?.message || String(err))}</p>
+    <p class="small muted">请截图发给开发者。其他部分不受影响。</p></div>`;
+  if (current && f === "write") current.writeLoaded = null;
 }
 
 // ---------------------------------------------------------------- Lv3：写作入口
