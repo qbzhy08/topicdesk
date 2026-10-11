@@ -1612,7 +1612,8 @@ async function showExperiments() {
         `<label><input type="checkbox" name="sk" value="${x.id}" ${["brief", "timeline", "compare", "explainer"].includes(x.id) ? "checked" : ""}> <b>${esc(x.name)}</b> <small class="muted">${esc(x.summary)}</small></label>`).join("")}</div></fieldset></div>
       <div class="sk-grid2">
         <label>AIGC 检测器<select name="detector"><option value="auto">本地检测器（${ai.local_ready ? "已安装" : "未安装，跑完后可手动录入外部检测器分数"}）</option><option value="manual">外部检测器（手动录入分数）</option></select></label>
-        <label>同时写几篇<input name="parallel" type="number" min="1" max="4" value="2"></label></div>
+        <label>同时写几篇<input name="parallel" type="number" min="1" max="4" value="2"></label>
+        <label>本地检测模型下载镜像（国内网络可填 https://hf-mirror.com，可空）<input name="hf" value="${esc(ai.hf_endpoint || "")}" placeholder="https://hf-mirror.com"></label></div>
       <p class="small muted">每篇都会调用大模型写作（初稿 vs 优化稿 4 个变体 × 3 组 ≈ 12 篇，约 15-30 分钟）。实验写的文章不会出现在普通文章列表里。</p>
       <div class="row"><button>开始实验</button><small class="muted" id="ex-msg"></small></div>
     </form>
@@ -1626,6 +1627,7 @@ async function showExperiments() {
     const body = { kind: f.kind.value, research_tasks: $$("[name=rt]:checked", f).map((x) => x.value), skill: f.skill.value,
       variants: $$("[name=var]:checked", f).map((x) => x.value), skills: $$("[name=sk]:checked", f).map((x) => x.value),
       detector: f.detector.value, parallel: +f.parallel.value || 2 };
+    if (f.hf.value.trim() !== (ai.hf_endpoint || "")) await api("/api/aigc", { method: "POST", body: { hf_endpoint: f.hf.value.trim() } });
     try { const r = await api("/api/experiments", { method: "POST", body }); location.hash = `#/experiments/${r.id}`; }
     catch (err) { $("#ex-msg").textContent = err.message; }
   };
