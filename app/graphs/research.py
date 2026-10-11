@@ -49,6 +49,19 @@ DEFAULT_ASPECTS = [
 MAX_FOLLOW_PER_DOC = 2
 API_SOURCES = ("arxiv", "hn", "github", "juejin", "wallstcn", "openalex", "pubmed")
 ACADEMIC_SOURCES = ("arxiv", "openalex", "pubmed", "github")
+# 来自搜索 API / 搜索引擎的结果：命中常常是页面里碰巧出现了关键词（如股票行情页），先按标题和摘要过滤再决定是否抓全文
+SEARCH_RESULT_SOURCES = ("web_search", "wechat", "sogou_wechat", "zhihu", "tieba", "xiaohongshu", "douyin")
+COMMUNITY_SOURCES = ("bilibili", "sogou_wechat", "wechat", "zhihu", "tieba", "xiaohongshu", "douyin")
+# 社区 / 小众话题的默认子问题：替换面向科技主题的“一手来源（论文/仓库）”“评测与数据”
+COMMUNITY_ASPECTS = [
+    {"id": "official", "name": "当事人 / 官方公开说法", "kind": "keywords", "need": 1,
+     "keywords": ["官方", "声明", "回应", "本人", "采访", "访谈", "自述", "公告", "官宣", "澄清", "辟谣", "说明",
+                  "直播中说", "亲口"]},
+    {"id": "discussion", "name": "社区与粉丝讨论（B站、公众号、知乎、贴吧、小红书、抖音）", "kind": "platform", "need": 2,
+     "sources": list(COMMUNITY_SOURCES)},
+    {"id": "works", "name": "相关作品与内容", "kind": "keywords", "need": 1,
+     "keywords": ["作品", "视频", "动画", "漫画", "游戏", "专辑", "发布", "上线", "更新", "新作", "企划", "cos", "角色"]},
+]
 
 
 # ---------------------------------------------------------------- 工具函数
@@ -60,6 +73,8 @@ def _doc_hits(doc: dict, aspect: dict) -> bool:
         return True
     if k == "primary":
         return bool(meta.get("primary")) or is_primary(doc.get("url") or "")
+    if k == "platform":
+        return doc.get("source_id") in (aspect.get("sources") or [])
     if k == "recent":
         d = parse_date(doc.get("published_at"))
         return bool(d and datetime.now(timezone.utc) - d <= timedelta(days=14))
@@ -348,6 +363,12 @@ def plan(ctx):
     # ---- 按领域选来源：用户明确指定 > 用户选择的领域 > 大模型判断 > 关键词规则
     domains = list(p.get("domains") or llm_domains or guess_domains(" ".join([ctx.topic] + terms_zh + queries_en)))
     st["domains"] = domains
+    if "community" in domains and not set(domains) & {"tech", "science"}:
+        drop = {"primary", "eval"}
+        base = [a for a in st["aspects"] if a["id"] not in drop]
+        st["aspects"] = base[:1] + [dict(a) for a in COMMUNITY_ASPECTS] + base[1:]
+        ctx.think("社区 / 小众话题：子问题改为“当事人/官方说法”“社区与粉丝讨论”“相关作品与内容”，"
+                  "不再要求论文/仓库类一手来源和评测数据")
     enabled = [s for s in list_sources() if s["id"] != "web"]
     if p.get("sources"):
         srcs = [s for s in enabled if s["id"] in set(p["sources"])]
@@ -829,7 +850,7 @@ def _after_search(ctx, a, status, res):
     skipped = max(0, len(items) - room)
     items = items[:room]
     st["per_source"][a["source"]] = used + len(items)
-    counts = {}
+    counts, skipped_fetch = {}, []
     gap_words = [w for w in re.split(r"[^\w一-鿿]+", a.get("query") or "") if len(w) > 1] \
         if a.get("gap") else []
     for it in items:
@@ -848,17 +869,22 @@ def _after_search(ctx, a, status, res):
                 _push(st, _fetch_action(it["url"], f"聚合站只有标题（{meta.get('points')} 分），追踪原文",
                                         prio=35 + min((meta.get("points") or 0) // 50, 20),
                                         base=it, doc_id=r["doc_id"]))
+        elif a["source"] in SEARCH_RESULT_SOURCES and (it.get("relevance") or 0) < _min_rel(st) * 0.75:
+            skipped_fetch.append(it.get("title") or it["url"])
         elif it["content_kind"] != "full" and a["source"] not in ("arxiv", "github", "openalex", "pubmed") \
                 and _fetchable(st, a["source"]):
             mode = "browser" if meta.get("detail") == "browser" else "auto"
-            _push(st, _fetch_action(it["url"], ("RSS" if a["source"] not in API_SOURCES and a["source"] not in
-                                                ("web_search", "wechat", "sogou_wechat") else "搜索结果") + "只有摘要，抓取全文" +
+            _push(st, _fetch_action(it["url"], ("搜索结果" if a["source"] in SEARCH_RESULT_SOURCES else "RSS")
+                                    + "只有摘要，抓取全文" +
                                     ("（前端渲染页面，用浏览器）" if mode == "browser" else ""),
                                     prio=30 + int((it.get("relevance") or 0) * 10), mode=mode,
                                     base=it, doc_id=r["doc_id"]))
         if r["action"] == "new" and meta.get("out_links"):
             _follow_primary(ctx, r["doc_id"], meta["out_links"], from_primary=it.get("primary"))
+    if skipped_fetch:
+        st["stats"]["skip_fetch_irrelevant"] = st["stats"].get("skip_fetch_irrelevant", 0) + len(skipped_fetch)
     ctx.observe(f"{a['source']}「{a['query']}」入库 {len(items)} 条 → {counts}" +
+                (f"；{len(skipped_fetch)} 条标题和摘要与主题不相关（如「{skipped_fetch[0][:30]}」），不抓全文" if skipped_fetch else "") +
                 (f"；另有 {skipped} 条超出单来源配额 {quota}，未入库" if skipped else ""))
 
 

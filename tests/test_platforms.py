@@ -83,6 +83,15 @@ class PlatformTest(CollectBase):
         self.assertIn("https://www.zhihu.com/question/789", docs)
         self.assertIn("https://fans.example.com/jichuang", docs)          # 全网搜索
         self.assertTrue(any("只有搜索摘要" in o for o in st["report"]["omissions"]))
+        # 全网搜索里碰巧带关键词的无关页面（股票行情）：不抓全文
+        self.assertNotIn("https://stock.example.com/300857", self.web.calls)
+        self.assertGreaterEqual(st["stats"].get("skip_fetch_irrelevant", 0), 1)
+        # 社区话题：子问题换成当事人说法 / 社区讨论 / 相关作品，不再要求论文类一手来源
+        ids = [a["id"] for a in st["aspects"]]
+        self.assertIn("official", ids)
+        self.assertIn("discussion", ids)
+        self.assertNotIn("primary", ids)
+        self.assertGreaterEqual(st["report"]["coverage"]["discussion"]["have"], 2)
         # 不同公众号账号算不同的独立来源
         self.assertNotEqual(ranking.source_key(a["url"], a["author"]),
                             ranking.source_key("https://mp.weixin.qq.com/s/bbb", "二次元观察"))

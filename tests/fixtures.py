@@ -211,7 +211,8 @@ def _bocha_rows(site):
         "zhihu.com": [
             {"name": "如何评价极创工作室的男娘角色？", "url": "https://www.zhihu.com/question/789", "summary": "知乎用户讨论极创工作室男娘角色设定", "siteName": "知乎", "datePublished": ts}],
         "tieba.baidu.com": [],
-        None: [{"name": "极创工作室男娘话题汇总", "url": "https://fans.example.com/jichuang", "summary": "整理了极创工作室男娘话题的来龙去脉", "siteName": "粉丝站", "datePublished": ts}],
+        None: [{"name": "极创工作室男娘话题汇总", "url": "https://fans.example.com/jichuang", "summary": "整理了极创工作室男娘话题的来龙去脉", "siteName": "粉丝站", "datePublished": ts},
+               {"name": "某某科技(300857)实时行情", "url": "https://stock.example.com/300857", "summary": "股价、成交量、资金流向；相关话题：工作室", "siteName": "行情网", "datePublished": ts}],
     }
     return rows.get(site, [])
 
