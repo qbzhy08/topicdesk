@@ -327,6 +327,7 @@ async function poll() {
     if (current?.id !== id) return;
     renderTask(task);
     renderSteps(steps);
+    renderDurations();
     const open = steps.find((s) => s.status === "running");
     if (open) current.lastStepId = open.id - 1;
     else if (steps.length) current.lastStepId = steps[steps.length - 1].id;
@@ -664,9 +665,11 @@ function renderSteps(steps) {
     if (!li) { li = document.createElement("li"); li.dataset.sid = s.id; ol.append(li); }
     const sys = s.node === "__harness__";
     li.className = `${s.status} ${sys ? "sys" : ""}`;
-    const dur = s.ended_at ? `${((s.ended_at - s.started_at) * 1000).toFixed(0)}ms` : "…";
+    const secs = s.ended_at ? s.ended_at - s.started_at : null;
+    const dur = secs == null ? "…" : secs < 1 ? `${(secs * 1000).toFixed(0)}ms` : `${secs.toFixed(1)}s`;
+    if (current && !sys && secs != null) (current.durs ||= {})[s.id] = { node: s.node, secs };
     li.innerHTML = `
-      <div class="step-head"><b>#${s.seq} ${esc(sys ? "Harness" : s.node)}</b>
+      <div class="step-head"><b>#${s.seq} ${esc(sys ? "Harness" : (NODE_NAME[s.node] ? `${NODE_NAME[s.node]}（${s.node}）` : s.node))}</b>
         <span>${esc(s.status)} · ${dur}${s.next_node && s.next_node !== "__end__" ? ` → ${esc(s.next_node)}` : ""}</span></div>
       ${s.thought ? `<p class="thought">${esc(s.thought)}</p>` : ""}
       ${s.summary ? `<p class="obs">${esc(s.summary)}</p>` : ""}
@@ -677,6 +680,19 @@ function renderSteps(steps) {
         </details>`).join("")}
       ${s.error ? `<details class="tc"><summary class="st-error">错误</summary><pre>${esc(s.error)}</pre></details>` : ""}`;
   }
+}
+
+// 耗时分布：按节点汇总（同一节点多次执行合计），从多到少排
+function renderDurations() {
+  const box = $("[data-f=durs]");
+  if (!box || !current?.durs) return;
+  const by = {};
+  Object.values(current.durs).forEach((d) => { by[d.node] = (by[d.node] || 0) + d.secs; });
+  const total = Object.values(by).reduce((a, b) => a + b, 0);
+  if (total < 1) { box.innerHTML = ""; return; }
+  const items = Object.entries(by).sort((a, b) => b[1] - a[1]).filter(([, v]) => v >= 0.5);
+  box.innerHTML = `<b>耗时 ${total.toFixed(0)}s：</b>` + items.map(([n, v]) =>
+    `<span class="dur-chip" style="--w:${Math.max(4, Math.round(v / total * 100))}%">${esc(NODE_NAME[n] || n)} ${v.toFixed(1)}s</span>`).join("");
 }
 
 function toolHint(c) {

@@ -317,28 +317,49 @@ def _section_materials(sec, docs) -> str:
     return "\n\n".join(f"[{d['n']}] {d['label']}｜{d['title'][:60]}\n{writing.excerpt(d, focus, budget)}" for d in use)
 
 
-def _write_section(ctx, sec, docs, fix_items=None) -> str:
+def _section_input(ctx, sec, docs, fix_items=None) -> dict:
     st = ctx.state
     sk = st["skill"]
-    if _use_llm(ctx):
-        fix = FIX_NOTE.format(items="\n".join(f"- 「{i['sentence'][:80]}」：{i.get('note') or i['status']}"
-                                              + (f"（出处原文：{i['quote'][:80]}）" if i.get("quote") else "")
-                                              for i in fix_items)) if fix_items else ""
-        prev = f"\n上一稿：\n{sec['md']}" if fix_items else ""
-        r = ctx.tool("llm", json_mode=False, max_tokens=1600, messages=[{"role": "user", "content": SECTION_PROMPT.format(
-            name=sk["name"], title=st["title"], reader=sk["reader"], style="；".join(sk["style"]),
-            body=sk["body"], prefs=_prefs_text(st), heading=sec["heading"], goal=sec["goal"],
-            points="；".join(sec["points"]) or "（按目标自行组织）", words=sec["words"],
-            materials=_section_materials(sec, docs),
-            facts="记忆中的事实：\n" + _facts_text(st["facts"]), fix=fix + prev)}])
-        text = r["content"].strip()
-        text = re.sub(r"^#+\s*" + re.escape(sec["heading"]) + r"\s*\n", "", text)
-        text, removed = writing.strip_meta(text)
-        if removed:
-            st["fixes"].append({"section": sec["id"], "why": "删掉混进正文的写作说明",
-                                "before": "；".join(removed)[:300], "after": "（已删除）"})
-        return text
-    return _rule_section(sec, docs, st, fix_items)
+    fix = FIX_NOTE.format(items="\n".join(f"- 「{i['sentence'][:80]}」：{i.get('note') or i['status']}"
+                                          + (f"（出处原文：{i['quote'][:80]}）" if i.get("quote") else "")
+                                          for i in fix_items)) if fix_items else ""
+    prev = f"\n上一稿：\n{sec['md']}" if fix_items else ""
+    return {"json_mode": False, "max_tokens": 1600, "messages": [{"role": "user", "content": SECTION_PROMPT.format(
+        name=sk["name"], title=st["title"], reader=sk["reader"], style="；".join(sk["style"]),
+        body=sk["body"], prefs=_prefs_text(st), heading=sec["heading"], goal=sec["goal"],
+        points="；".join(sec["points"]) or "（按目标自行组织）", words=sec["words"],
+        materials=_section_materials(sec, docs),
+        facts="记忆中的事实：\n" + _facts_text(st["facts"]), fix=fix + prev)}]}
+
+
+def _finish_section(st, sec, content: str) -> str:
+    text = (content or "").strip()
+    text = re.sub(r"^#+\s*" + re.escape(sec["heading"]) + r"\s*\n", "", text)
+    text, removed = writing.strip_meta(text)
+    if removed:
+        st["fixes"].append({"section": sec["id"], "why": "删掉混进正文的写作说明",
+                            "before": "；".join(removed)[:300], "after": "（已删除）"})
+    return text
+
+
+def _write_sections(ctx, jobs, docs) -> dict:
+    """同时写多节（各节互不依赖，提纲定了就可以并行）。jobs: [(sec, fix_items)]。返回 {节 id: 正文}。
+    个别节失败（超时等）单独重试一次。"""
+    st = ctx.state
+    if not _use_llm(ctx):
+        return {sec["id"]: _rule_section(sec, docs, st, fx) for sec, fx in jobs}
+    inputs = [_section_input(ctx, sec, docs, fx) for sec, fx in jobs]
+    res = ctx.tool_parallel([("llm", inp) for inp in inputs], max_workers=6)
+    out = {}
+    for (sec, fx), inp, (stt, r) in zip(jobs, inputs, res):
+        if stt != "ok":
+            r = ctx.tool("llm", **inp)          # 单独重试一次；再失败就让节点失败（可从这一步重新执行）
+        out[sec["id"]] = _finish_section(st, sec, r["content"])
+    return out
+
+
+def _write_section(ctx, sec, docs, fix_items=None) -> str:
+    return _write_sections(ctx, [(sec, fix_items)], docs)[sec["id"]]
 
 
 def _rule_section(sec, docs, st, fix_items=None) -> str:
@@ -382,8 +403,11 @@ def draft(ctx):
     st = ctx.state
     docs = _docs(st)
     st["_rule_used"] = []
+    t0 = time.time()
+    texts = _write_sections(ctx, [(sec, None) for sec in st["sections"]], docs)
     for sec in st["sections"]:
-        sec["md"] = _write_section(ctx, sec, docs)
+        sec["md"] = texts[sec["id"]]
+    st.setdefault("timing", {})["逐节写作（并行）"] = round(time.time() - t0, 1)
     st["draft_by"] = "llm" if _use_llm(ctx) else "rule"
     ctx.observe(f"逐节写作完成（{'大模型' if st['draft_by'] == 'llm' else '规则摘编：未配置大模型'}），共 "
                 f"{sum(len(s['md']) for s in st['sections'])} 字")
@@ -398,15 +422,17 @@ def _check(ctx, docs):
     rep = writing.check(st["sections"], docs, st["verdicts"])
     pending = [i for i in rep["items"] if i["status"] == "weak" and i["sentence"] not in st["verdicts"]]
     if pending and _use_llm(ctx):
-        for k in range(0, len(pending), 15):
-            chunk = pending[k:k + 15]
-            try:
-                d = ctx.tool("llm", messages=[{"role": "system", "content": "你只输出 JSON。"},
-                                              {"role": "user", "content": writing.semantic_batch(chunk, docs)}],
-                             max_tokens=1500)["data"]
-            except Exception as e:  # noqa: BLE001
-                ctx.think(f"语义核对失败（{str(e)[:60]}），这些句子按字面核对结果处理")
-                break
+        chunks = [pending[k:k + 12] for k in range(0, len(pending), 12)]
+        t0 = time.time()
+        res = ctx.tool_parallel([("llm", {"messages": [{"role": "system", "content": "你只输出 JSON。"},
+                                                       {"role": "user", "content": writing.semantic_batch(c, docs)}],
+                                          "max_tokens": 1500}) for c in chunks])
+        st.setdefault("timing", {})[f"语义核对（{len(chunks)} 批并行）"] = round(time.time() - t0, 1)
+        for chunk, (stt, out) in zip(chunks, res):
+            d = out.get("data") if stt == "ok" and isinstance(out, dict) else None
+            if not isinstance(d, dict):
+                ctx.think(f"一批语义核对失败（{str(out)[:60]}），这批句子按字面核对结果处理")
+                continue
             for r in d.get("results") or []:
                 try:
                     it = chunk[int(r.get("i")) - 1]
@@ -467,16 +493,21 @@ def fix(ctx):
     by_sec = {}
     for i in _serious(ctx, rep):
         by_sec.setdefault(i["section"], []).append(i)
+    befores = {sec["id"]: sec["md"] for sec in st["sections"]}
+    if _use_llm(ctx) and by_sec:
+        for sec in st["sections"]:
+            if sec["id"] in by_sec and st["extra_docs"]:    # 改写时把补检到的新资料也给它（编号续在后面）
+                sec["sources"] = sorted(set(sec["sources"]) | {d["n"] for d in docs if d["id"] in st["extra_docs"]})
+        t0 = time.time()
+        texts = _write_sections(ctx, [(sec, by_sec[sec["id"]]) for sec in st["sections"] if sec["id"] in by_sec], docs)
+        st.setdefault("timing", {})["按核对结果改写（并行）"] = round(time.time() - t0, 1)
     for sec in st["sections"]:
         items = by_sec.get(sec["id"])
         if not items:
             continue
-        before = sec["md"]
+        before = befores[sec["id"]]
         if _use_llm(ctx):
-            # 改写时把补检到的新资料也给它（编号续在后面）
-            if st["extra_docs"]:
-                sec["sources"] = sorted(set(sec["sources"]) | {d["n"] for d in docs if d["id"] in st["extra_docs"]})
-            sec["md"] = _write_section(ctx, sec, docs, items)
+            sec["md"] = texts[sec["id"]]
         else:
             for i in items:          # 规则模式：标注待核实，而不是悄悄删掉
                 if i["sentence"] in sec["md"] and "（待核实）" not in i["sentence"]:
