@@ -971,7 +971,8 @@ async function showSources() {
       <label class="opt"><input type="checkbox" name="full_text"> RSS 内含全文</label>
       <label class="opt"><input type="checkbox" name="browser"> 文章页需要浏览器渲染</label>
       <input name="search_feed" placeholder="可选：站内搜索 RSS 模板，用 {q} 表示关键词，如 https://example.com/?s={q}&feed=rss2" style="width:100%;padding:6px;margin:4px 0">
-      <div class="row"><small>领域：</small>${Object.entries(DOMAIN_NAME).map(([k, v]) => `<label class="opt"><input type="checkbox" name="domains" value="${k}" ${k === "general" ? "checked" : ""}> ${v}</label>`).join("")}</div>
+      <div class="row"><small>领域（至少选一个，检索这些领域的主题时才会用到它）：</small>${Object.entries(DOMAIN_NAME).map(([k, v]) => `<label class="opt"><input type="checkbox" name="domains" value="${k}"> ${v}</label>`).join("")}</div>
+      <p class="small gap" id="add-src-msg"></p>
       <select name="lang"><option value="zh">中文</option><option value="en">英文</option></select>
       <button>添加</button></form>`;
   $$("[data-test]").forEach((b) => b.onclick = async () => {
@@ -990,6 +991,7 @@ async function showSources() {
   $("#add-src").onsubmit = async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
+    if (!f.getAll("domains").length) { $("#add-src-msg").textContent = "请至少选一个领域"; return; }
     try {
       await api("/api/sources", { method: "POST", body: { name: f.get("name"), feed: f.get("feed"),
         full_text: !!f.get("full_text"), browser: !!f.get("browser"), lang: f.get("lang"),

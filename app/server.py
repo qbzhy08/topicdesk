@@ -298,6 +298,8 @@ def add_source():
     name = (b.get("name") or "").strip()
     if not feed.startswith("http") or not name:
         return jsonify(error="需要名称和 RSS 地址"), 400
+    if not b.get("domains"):
+        return jsonify(error="请至少选一个领域"), 400
     sid = "rss_" + canonical_url(feed).split("//")[1].replace("/", "_").replace(".", "_")[:40]
     if db.query_one("SELECT id FROM sources WHERE id=?", (sid,)):
         return jsonify(error="该 RSS 已存在"), 400
