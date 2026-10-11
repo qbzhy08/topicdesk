@@ -166,6 +166,10 @@ function route() {
   const h = location.hash || "#/";
   const firstLoad = !routedOnce;
   routedOnce = true;
+  if (firstLoad && h.startsWith("#/task/")) {     // 打开或刷新网页：一律从新主题开始（上次任务在左栏“最近任务”里）
+    location.replace("#/new");
+    return;
+  }
   // 新打开网页：显示新主题输入框；在应用内从其他页面点回“任务”：恢复上次的任务
   if (h === "#/" && !firstLoad && store.get("lastTask")) {
     location.replace(`#/task/${store.get("lastTask")}`);
