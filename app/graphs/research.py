@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 import re
+import time
+from urllib.parse import urlsplit
 from datetime import datetime, timedelta, timezone
 
 from .. import db, llm
@@ -209,7 +211,8 @@ def plan(ctx):
             ctx.think(f"自动翻译失败（{str(e)[:60]}），按原关键词检索")
 
     def _vals(v):
-        return [x.strip() for x in (re.split(r"[,，、;；]", v) if isinstance(v, str) else v or []) if str(x).strip()]
+        xs = [str(x).strip() for x in (re.split(r"[,，、;；]", v) if isinstance(v, str) else v or [])]
+        return [x for x in xs if len(x) >= 2 and not x.isdigit()]     # 过滤“5”“q”这类无意义输入
     plan_src = "rules"
     if llm.available() and not p.get("no_llm"):
         try:
@@ -270,6 +273,18 @@ def plan(ctx):
                   f"（{'用户指定' if p.get('domains') else '大模型判断' if llm_domains else '关键词规则'}）。"
                   f"选用 {len(srcs)} 个来源：{'、'.join(s['name'] for s in srcs)}"
                   + (f"；领域不匹配未用：{'、'.join(skipped)}" if skipped else ""))
+    # 近期连续失败的来源先跳过（省掉每次十几秒的超时等待）；用户明确指定的来源不跳过
+    if not p.get("sources") and not p.get("include_unhealthy"):
+        bad = []
+        for s in list(srcs):
+            h = s.get("health") or {}
+            recent = h.get("last_fail") and db.now() - h["last_fail"] < 12 * 3600
+            if h.get("consecutive_fail", 0) >= 3 and recent and (h.get("last_ok") or 0) < h["last_fail"]:
+                srcs.remove(s)
+                bad.append(f"{s['name']}（{(h.get('last_error') or {}).get('kind', '失败')} 连续 {h['consecutive_fail']} 次）")
+        if bad:
+            st["skipped_unhealthy"] = bad
+            ctx.think(f"跳过近期持续失败的来源：{'、'.join(bad)}。可在“信息源”页点“测试”恢复")
     st["source_ids"] = [s["id"] for s in srcs]
     for s in srcs:
         lang = (s["config"] or {}).get("lang", "zh")
@@ -352,10 +367,26 @@ def decide(ctx):
 
     if queue:
         queue.sort(key=lambda a: -a["prio"])
-        a = queue.pop(0)
-        st["current"] = a
-        ctx.think(f"覆盖：{cov_txt}。下一步 → {a['type']} "
-                  f"{a.get('source', '') or a.get('url', '')} {a.get('query', '')}：{a['why']}")
+        # 一次取一批同类型、不同站点的行动并行执行（同一站点仍串行，遵守限速）
+        first = queue[0]
+        width = p.get("parallel", 6)
+        if first["type"] == "fetch":
+            width = min(width, max(1, p.get("max_fetch", 15) - st["fetches"]))
+        batch, hosts = [], set()
+        for a in list(queue):
+            if len(batch) >= width:
+                break
+            if a["type"] != first["type"]:
+                continue
+            host = a.get("source") or urlsplit(a.get("url", "")).netloc
+            if host in hosts:
+                continue
+            hosts.add(host)
+            batch.append(a)
+            queue.remove(a)
+        st["current_batch"] = batch
+        lines = [f"{a['type']} {a.get('source', '') or a.get('url', '')} {a.get('query', '')}：{a['why']}" for a in batch]
+        ctx.think(f"覆盖：{cov_txt}。下一步并行执行 {len(batch)} 个行动 →\n" + "\n".join(lines))
         return "act"
 
     # 队列空：根据缺口调整关键词
@@ -524,66 +555,62 @@ def _handle_failure(ctx, a: dict, e: FetchError):
     ctx.observe(f"失败：{e.kind} {e.reason} → {rec['fallback']}")
 
 
-def act(ctx):
+def _after_search(ctx, a, status, res):
     st, p = ctx.state, ctx.params
-    a = st.pop("current")
-    st["done"].append(a["key"])
-    if a["type"] == "search":
-        try:
-            res = ctx.tool("source_search", source_id=a["source"], query=a["query"],
-                           limit=p.get("per_search", 15), terms=a.get("terms"))
-        except FetchError as e:
-            _handle_failure(ctx, a, e)
-            return "decide"
-        items = res["items"]
-        if not items:
-            st["zero"].append(a["key"])
-            ctx.observe(f"{a['source']}「{a['query']}」无相关结果")
-            return "decide"
-        if st.get("exclude"):
-            before = len(items)
-            items = [it for it in items if not any(x.lower() in f"{it.get('title')} {it.get('summary')}".lower()
-                                                   for x in st["exclude"])]
-            if before - len(items):
-                ctx.observe(f"按偏好排除 {before - len(items)} 条（包含 {st['exclude']}）")
-        # 单来源配额：避免某个来源（如站内搜索一次返回很多条）占满资料上限、挤掉其他来源
-        quota = p.get("per_source", max(6, p.get("max_docs", 40) // 4))
-        used = st.setdefault("per_source", {}).get(a["source"], 0)
-        skipped = max(0, len(items) - max(0, quota - used))
-        items = items[:max(0, quota - used)]
-        st["per_source"][a["source"]] = used + len(items)
-        counts = {}
-        for it in items:
-            if it.get("relevance") is None:
-                it["relevance"] = _rel(st, it.get("title") or "", it.get("summary") or "")
-            r = _save(ctx, it, "api" if a["source"] in API_SOURCES else "rss")
-            counts[r["action"] + ("/" + r["novelty"] if r["action"] == "new" else "")] = \
-                counts.get(r["action"] + ("/" + r["novelty"] if r["action"] == "new" else ""), 0) + 1
-            meta = it.get("meta") or {}
-            if meta.get("aggregator"):
-                if not it["url"].startswith("https://news.ycombinator.com"):
-                    _push(st, _fetch_action(it["url"], f"聚合站只有标题（{meta.get('points')} 分），追踪原文",
-                                            prio=35 + min((meta.get("points") or 0) // 50, 20),
-                                            base=it, doc_id=r["doc_id"]))
-            elif it["content_kind"] != "full" and a["source"] not in ("arxiv", "github", "openalex"):
-                mode = "browser" if meta.get("detail") == "browser" else "auto"
-                _push(st, _fetch_action(it["url"], "RSS 只有摘要，抓取全文" +
-                                        ("（前端渲染页面，用浏览器）" if mode == "browser" else ""),
-                                        prio=30 + int((it.get("relevance") or 0) * 10), mode=mode,
+    if status == "error":
+        if isinstance(res, FetchError):
+            _handle_failure(ctx, a, res)
+            return
+        raise res
+    items = res["items"]
+    if not items:
+        st["zero"].append(a["key"])
+        ctx.observe(f"{a['source']}「{a['query']}」无相关结果")
+        return
+    if st.get("exclude"):
+        before = len(items)
+        items = [it for it in items if not any(x.lower() in f"{it.get('title')} {it.get('summary')}".lower()
+                                               for x in st["exclude"])]
+        if before - len(items):
+            ctx.observe(f"按偏好排除 {before - len(items)} 条（包含 {st['exclude']}）")
+    # 单来源配额：避免某个来源（如站内搜索一次返回很多条）占满资料上限、挤掉其他来源
+    quota = p.get("per_source", max(6, p.get("max_docs", 40) // 4))
+    used = st.setdefault("per_source", {}).get(a["source"], 0)
+    skipped = max(0, len(items) - max(0, quota - used))
+    items = items[:max(0, quota - used)]
+    st["per_source"][a["source"]] = used + len(items)
+    counts = {}
+    for it in items:
+        if it.get("relevance") is None:
+            it["relevance"] = _rel(st, it.get("title") or "", it.get("summary") or "")
+        r = _save(ctx, it, "api" if a["source"] in API_SOURCES else "rss")
+        k = r["action"] + ("/" + r["novelty"] if r["action"] == "new" else "")
+        counts[k] = counts.get(k, 0) + 1
+        meta = it.get("meta") or {}
+        if meta.get("aggregator"):
+            if not it["url"].startswith("https://news.ycombinator.com"):
+                _push(st, _fetch_action(it["url"], f"聚合站只有标题（{meta.get('points')} 分），追踪原文",
+                                        prio=35 + min((meta.get("points") or 0) // 50, 20),
                                         base=it, doc_id=r["doc_id"]))
-            if r["action"] == "new" and meta.get("out_links"):
-                _follow_primary(ctx, r["doc_id"], meta["out_links"], from_primary=it.get("primary"))
-        ctx.observe(f"{a['source']}「{a['query']}」入库 {len(items)} 条 → {counts}" +
-                    (f"；另有 {skipped} 条超出单来源配额 {quota}，未入库" if skipped else ""))
-        return "decide"
+        elif it["content_kind"] != "full" and a["source"] not in ("arxiv", "github", "openalex"):
+            mode = "browser" if meta.get("detail") == "browser" else "auto"
+            _push(st, _fetch_action(it["url"], "RSS 只有摘要，抓取全文" +
+                                    ("（前端渲染页面，用浏览器）" if mode == "browser" else ""),
+                                    prio=30 + int((it.get("relevance") or 0) * 10), mode=mode,
+                                    base=it, doc_id=r["doc_id"]))
+        if r["action"] == "new" and meta.get("out_links"):
+            _follow_primary(ctx, r["doc_id"], meta["out_links"], from_primary=it.get("primary"))
+    ctx.observe(f"{a['source']}「{a['query']}」入库 {len(items)} 条 → {counts}" +
+                (f"；另有 {skipped} 条超出单来源配额 {quota}，未入库" if skipped else ""))
 
-    # fetch
-    st["fetches"] += 1
-    try:
-        art = ctx.tool("page_fetch", url=a["url"], mode=a.get("mode", "auto"))
-    except FetchError as e:
-        _handle_failure(ctx, a, e)
-        return "decide"
+
+def _after_fetch(ctx, a, status, art):
+    st = ctx.state
+    if status == "error":
+        if isinstance(art, FetchError):
+            _handle_failure(ctx, a, art)
+            return
+        raise art
     item = article_to_item(art, a["url"], base=a.get("base"))
     rel = _rel(st, item.get("title") or "", item.get("text") or "")
     item["relevance"] = max(rel, (a.get("base") or {}).get("relevance") or 0)   # 全文到手后重新判断相关度
@@ -594,6 +621,27 @@ def act(ctx):
     ctx.observe(f"抓取 {art.get('final_url', a['url'])}：{art['content_kind']}，{len(art['text'])} 字，"
                 f"{'浏览器渲染' if art.get('via_browser') else '静态 HTML'}，候选图片 {len(art.get('images', []))} 张"
                 f" → {r['action']}" + (f"（{r['relation']}）" if r.get("relation") else ""))
+
+
+def act(ctx):
+    """执行一批行动：网络请求并行，结果按顺序处理（入库、追加后续行动、失败降级）。"""
+    st, p = ctx.state, ctx.params
+    batch = st.pop("current_batch", None) or [st.pop("current")]
+    calls = []
+    for a in batch:
+        st["done"].append(a["key"])
+        if a["type"] == "search":
+            calls.append(("source_search", dict(source_id=a["source"], query=a["query"],
+                                                limit=p.get("per_search", 15), terms=a.get("terms"))))
+        else:
+            st["fetches"] += 1
+            calls.append(("page_fetch", dict(url=a["url"], mode=a.get("mode", "auto"))))
+    t0 = time.time()
+    results = ctx.tool_parallel(calls, max_workers=p.get("parallel", 6))
+    for a, (status, out) in zip(batch, results):
+        (_after_search if a["type"] == "search" else _after_fetch)(ctx, a, status, out)
+    if len(batch) > 1:
+        ctx.observe(f"并行 {len(batch)} 个请求，共耗时 {time.time() - t0:.1f}s")
     return "decide"
 
 
@@ -726,6 +774,8 @@ def report(ctx):
             omissions.append("英文来源未检索：" + f["reason"])
     for sid in st["disabled"]:
         omissions.append(f"{srcs.get(sid, {}).get('name', sid)} 本次不可用，相关内容可能遗漏")
+    for b in st.get("skipped_unhealthy", []):
+        omissions.append(f"{b} 近期持续失败，本次未检索")
     if any(s["method"] == "rss" for s in srcs.values()):
         omissions.append("RSS 只包含各站最新几十篇，更早的中文报道需要站内搜索或链接导入")
     gaps = [v["name"] for v in cov.values() if v["have"] < v["need"]]

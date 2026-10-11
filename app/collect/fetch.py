@@ -100,7 +100,7 @@ def set_transport(t: Transport | None):
 
 
 class Fetcher:
-    def __init__(self, min_interval: float = 1.0, timeout: float = 15, retries: int = 2,
+    def __init__(self, min_interval: float = 1.0, timeout: float = 10, retries: int = 2,
                  cache_ttl: float = 6 * 3600):
         self.min_interval = min_interval
         self.timeout = timeout
@@ -195,7 +195,7 @@ class Fetcher:
                                                             method=_method, json_body=_json)
             except FetchError as e:
                 last_err = e
-                if e.kind in ("timeout", "network") and attempt < self.retries:
+                if e.kind in ("timeout", "network") and attempt < min(1, self.retries):
                     time.sleep(0.5 * (2 ** attempt))
                     continue
                 raise

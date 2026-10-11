@@ -249,9 +249,46 @@ PREF_TYPES = {
 }
 
 
+class PreferenceError(ValueError):
+    pass
+
+
+def validate_preference(ptype: str, value):
+    """拦住无意义的输入（如“q”“5”当关注重点），返回规范化后的值。"""
+    if ptype not in PREF_TYPES:
+        raise PreferenceError("未知的偏好类型")
+    if ptype == "reading_minutes":
+        try:
+            v = int(str(value).strip().rstrip("分钟min "))
+        except ValueError as e:
+            raise PreferenceError("阅读时间请填分钟数，例如 5") from e
+        if not 1 <= v <= 240:
+            raise PreferenceError("阅读时间应在 1 到 240 分钟之间")
+        return v
+    items = value if isinstance(value, (list, tuple)) else re.split(r"[,，、;；]", str(value))
+    items = [str(x).strip() for x in items if str(x).strip()]
+    if ptype in ("focus", "exclude"):
+        bad = [x for x in items if len(x) < 2 or x.isdigit()]
+        if bad or not items:
+            raise PreferenceError(f"关键词至少 2 个字且不能是纯数字：{bad or '为空'}")
+        return items
+    if ptype == "source_prefer":
+        ids = {r["id"]: r["id"] for r in db.query("SELECT id FROM sources")}
+        ids.update({r["name"]: r["id"] for r in db.query("SELECT id, name FROM sources")})
+        unknown = [x for x in items if x not in ids]
+        if unknown or not items:
+            raise PreferenceError(f"未知的来源：{unknown or '为空'}（可填来源名称或 ID，见“信息源”页）")
+        return [ids[x] for x in items]
+    text = "，".join(items)
+    if len(text) < 2 or text.isdigit():
+        raise PreferenceError("内容太短或是纯数字，请写清楚，例如：程序员，熟悉机器学习")
+    return text
+
+
 def set_preference(user_id: str, ptype: str, value, *, applies_to: str = "all", actor: str = "user",
                    task_id=None) -> str:
     """长期偏好：只在用户明确确认“长期保存”时调用。同类型同范围的旧偏好被更正取代。"""
+    value = validate_preference(ptype, value)
     if isinstance(value, (list, tuple)):
         text = "、".join(map(str, value))
     else:

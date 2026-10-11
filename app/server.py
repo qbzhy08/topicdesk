@@ -372,7 +372,10 @@ def add_pref():
     t = b.get("type")
     if t not in mem.PREF_TYPES or b.get("value") in (None, "", []):
         return jsonify(error="偏好类型或内容无效"), 400
-    mid = mem.set_preference(b.get("user_id", "default"), t, b["value"], applies_to=b.get("applies_to") or "all")
+    try:
+        mid = mem.set_preference(b.get("user_id", "default"), t, b["value"], applies_to=b.get("applies_to") or "all")
+    except mem.PreferenceError as e:
+        return jsonify(error=str(e)), 400
     return jsonify(id=mid), 201
 
 

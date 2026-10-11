@@ -165,3 +165,16 @@ class PreferenceApiTest(CollectBase):
         self.assertEqual([p["content"] for p in alive], ["阅读时间（分钟）：10 分钟"])
         dead = mem.list_memories(scope="user", kind="preference", status="superseded")
         self.assertEqual(dead[0]["content"], "阅读时间（分钟）：5 分钟")
+
+
+class PreferenceValidationTest(CollectBase):
+    def test_reject_meaningless(self):
+        from app.server import create_app
+        c = create_app().test_client()
+        for t, v in (("focus", ["5"]), ("style", "q"), ("background", "5"), ("source_prefer", ["q"]),
+                     ("reading_minutes", "abc")):
+            r = c.post("/api/preferences", json={"type": t, "value": v})
+            self.assertEqual(r.status_code, 400, (t, v))
+        self.assertEqual(c.post("/api/preferences", json={"type": "source_prefer", "value": ["arXiv"]}).status_code, 201)
+        p = mem.list_memories(scope="user", kind="preference", status="alive")[0]
+        self.assertEqual(p["meta"]["value"], ["arxiv"])      # 名称自动转成来源 ID

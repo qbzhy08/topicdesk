@@ -178,6 +178,64 @@ class Ctx:
                                      created_at=db.now()))
         return out
 
+    def tool_parallel(self, calls: list[tuple[str, dict]], max_workers: int = 6) -> list[tuple[str, object]]:
+        """并行执行多个工具调用（不同站点互不等待）。返回与 calls 等长的 [("ok", 输出) | ("error", 异常)]。
+        缓存命中、预算、取消检查与逐条留痕都与 tool() 一致；只是真正的网络请求并发进行。"""
+        from concurrent.futures import ThreadPoolExecutor
+        results: list = [None] * len(calls)
+        todo = []
+        for i, (name, inp) in enumerate(calls):
+            spec = TOOLS.get(name)
+            if spec is None:
+                results[i] = ("error", KeyError(f"unknown tool: {name}"))
+                continue
+            h = _hash(inp)
+            hit = db.query_one(
+                "SELECT output FROM tool_calls WHERE task_id=? AND tool=? AND input_hash=? "
+                "AND status='ok' ORDER BY id DESC LIMIT 1", (self.task_id, name, h)) if spec.cacheable else None
+            if hit is not None:
+                db.insert("tool_calls", dict(task_id=self.task_id, step_id=self.step_id, tool=name,
+                                             input=inp, input_hash=h, output=hit["output"],
+                                             status="cached", latency_ms=0, cost=0, created_at=db.now()))
+                results[i] = ("ok", hit["output"])
+            else:
+                todo.append((i, name, inp, h, spec))
+        if todo:
+            self.check_budget()
+            _check_cancel(self.task_id)
+
+            def run(item):
+                i, name, inp, h, spec = item
+                t0 = time.time()
+                try:
+                    return i, "ok", spec.fn(**inp), int((time.time() - t0) * 1000)
+                except Exception as e:
+                    return i, "error", e, int((time.time() - t0) * 1000)
+                finally:
+                    db.reset()          # 工作线程的数据库连接用完即关
+            with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(todo)))) as ex:
+                done = list(ex.map(run, todo))
+            meta = {i: (name, inp, h, spec) for i, name, inp, h, spec in todo}
+            for i, status, out, ms in done:
+                name, inp, h, spec = meta[i]
+                self.usage["tool_calls"] = self.usage.get("tool_calls", 0) + 1
+                if status == "error":
+                    db.insert("tool_calls", dict(task_id=self.task_id, step_id=self.step_id, tool=name,
+                                                 input=inp, input_hash=h, status="error",
+                                                 error=f"{type(out).__name__}: {out}"[:2000], latency_ms=ms,
+                                                 cost=0, created_at=db.now()))
+                    results[i] = ("error", out)
+                    continue
+                cost = spec.cost
+                if isinstance(out, dict) and "_cost" in out:
+                    cost = out.pop("_cost")
+                self.charge(cost)
+                db.insert("tool_calls", dict(task_id=self.task_id, step_id=self.step_id, tool=name,
+                                             input=inp, input_hash=h, output=out, status="ok",
+                                             latency_ms=ms, cost=cost, created_at=db.now()))
+                results[i] = ("ok", out)
+        return results
+
     # ---- 人工介入
     def human(self, key: str, kind: str, prompt: str, payload: dict | None = None):
         answers = self.state.setdefault("_human", {})
