@@ -31,7 +31,7 @@ def _launch(p):
     raise FetchError("network", "没有可用的浏览器：" + " | ".join(errors))
 
 
-def render(url: str, wait_selector: str | None = None, timeout: float = 25) -> dict:
+def render(url: str, wait_selector: str | None = None, timeout: float = 15) -> dict:
     """返回 {html, final_url, title, browser, elapsed_ms}。"""
     try:
         from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout

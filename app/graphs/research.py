@@ -32,6 +32,7 @@ from ..collect.dedup import canonical_url, parse_date, title_sim
 from ..collect.fetch import FetchError
 from ..collect.images import store_images
 from ..keywords import is_english
+from ..collect.sources import skip_fetch_reason
 from ..collect.sources import (DOMAINS, WEB_PLATFORMS, guess_domains, in_window, is_primary, list_sources,
                                 source_domains, topic_terms, window_start)
 from ..collect.store import EVENT_TITLE_SIM, article_to_item, topic_last_run, upsert_document
@@ -196,6 +197,13 @@ def _push(state, action: dict) -> bool:
     key = action["key"]
     if key in state["done"] or any(a["key"] == key for a in state["queue"]):
         return False
+    if action["type"] == "fetch":
+        why = skip_fetch_reason(action["url"])
+        if why:                    # 在线演示应用等没有正文的页面：不占抓取名额、不白等
+            sk = state.setdefault("skipped_fetch", [])
+            if len(sk) < 30:
+                sk.append({"url": action["url"], "reason": why})
+            return False
     state["queue"].append(action)
     return True
 

@@ -6,6 +6,7 @@ from pathlib import Path
 from app import config, db
 from app.collect import browser, dedup, fetch, sources, store
 from app.collect.extract import extract_article
+from app.collect.fetch import FetchError
 from app.harness import create_task, resolve_hitl, run_task
 import app.graphs  # noqa: F401
 from tests import fixtures
@@ -27,6 +28,7 @@ class CollectBase(DBTestCase):
         fetch.fetcher.host_interval.clear()
         fetch.fetcher._robots.clear()
         fetch.fetcher._last.clear()
+        fetch.fetcher._host_fail.clear()
         self._render, self._raw = browser.render, browser.fetch_raw
         browser.render, browser.fetch_raw = fixtures.fake_render, fixtures.fake_fetch_raw
         sources.seed_sources()
@@ -443,12 +445,155 @@ class FetchCostTest(CollectBase):
         self.assertIn("dropped beyond 32K", items[0]["text"])
         self.assertFalse(any("pubmed.ncbi.nlm.nih.gov/42211289" in c for c in self.web.calls))
 
-    def test_gradio_space_skips_browser(self):
+    def test_demo_apps_not_fetched(self):
+        """在线演示应用（HF Spaces、IP 地址、demo 子域）没有正文：不联网、不开浏览器，直接跳过。"""
         called = []
         browser.render = lambda *a, **k: called.append(a) or fixtures.fake_render(*a, **k)
-        art = sources.fetch_page("https://huggingface.co/spaces/snap-stanford/stark-leaderboard")
+        for u in ("https://huggingface.co/spaces/snap-stanford/stark-leaderboard",
+                  "http://173.203.58.79:8501/", "https://demo.uptrain.ai/evals"):
+            with self.assertRaises(FetchError) as cm:
+                sources.fetch_page(u)
+            self.assertEqual(cm.exception.kind, "bad_content")
         self.assertEqual(called, [])
+        self.assertFalse(any("huggingface.co/spaces" in c or "173.203" in c or "uptrain" in c
+                             for c in self.web.calls))
+        self.assertIsNone(sources.skip_fetch_reason("https://huggingface.co/papers/2501.00001"))
+        self.assertIsNone(sources.skip_fetch_reason("https://www.example.com/app-review"))
+
+
+class SlowSiteTest(CollectBase):
+    """慢站点优化：超时熔断、WAF 不反复开浏览器、有接口的站点走接口、GitHub 徽章不下载。"""
+
+    def _wrap(self, handler):
+        inner = self.web
+
+        def t(url, headers, timeout, method="GET", json_body=None):
+            got = handler(url)
+            if got is not None:
+                inner.calls.append(url)
+                return got
+            return inner(url, headers, timeout, method=method, json_body=json_body)
+        fetch.set_transport(t)
+
+    def test_circuit_breaker_skips_timed_out_host(self):
+        def h(url):
+            if "slow.example.com" in url and not url.endswith("robots.txt"):
+                raise FetchError("timeout", "请求超时 8s", url)
+        self._wrap(h)
+        with self.assertRaises(FetchError):
+            fetch.fetcher.get("https://slow.example.com/a")
+        n = sum("slow.example.com/a" in c for c in self.web.calls)
+        self.assertLessEqual(n, 2)
+        with self.assertRaises(FetchError) as cm:
+            fetch.fetcher.get("https://slow.example.com/b")
+        self.assertIn("暂时跳过", cm.exception.reason)
+        self.assertFalse(any("slow.example.com/b" in c for c in self.web.calls))   # 熔断：没再联网
+        # 别的站点不受影响
+        self.assertEqual(fetch.fetcher.get("https://www.ithome.com/rss/").status, 200)
+
+    def test_breaker_resets_after_success(self):
+        state = {"down": True}
+
+        def h(url):
+            if "flaky.example.com" in url and not url.endswith("robots.txt"):
+                if state["down"]:
+                    raise FetchError("timeout", "请求超时 8s", url)
+                return 200, {"content-type": "text/html"}, b"<html><body>ok</body></html>", url
+        self._wrap(h)
+        fetch.fetcher.breaker_threshold = 3
+        try:
+            with self.assertRaises(FetchError):
+                fetch.fetcher.get("https://flaky.example.com/a", cache_ttl=0)
+            state["down"] = False
+            self.assertEqual(fetch.fetcher.get("https://flaky.example.com/a", cache_ttl=0).status, 200)
+            self.assertNotIn("flaky.example.com", fetch.fetcher._host_fail)
+        finally:
+            fetch.fetcher.breaker_threshold = 2
+
+    def test_waf_stuck_skips_browser_retry(self):
+        sources._WAF_STUCK.clear()
+        self.web.state["waf_36kr"] = True
+        tries = []
+
+        def bad_raw(url, *a, **k):
+            tries.append(url)
+            raise FetchError("blocked", "验证页过不去", url)
+        browser.fetch_raw = bad_raw
+        for _ in range(2):
+            with self.assertRaises(FetchError):
+                sources._get_feed("https://36kr.com/feed")
+            fetch.fetcher._cache_clear() if hasattr(fetch.fetcher, "_cache_clear") else None
+        self.assertEqual(len(tries), 1)                     # 第二次不再开浏览器白等
+        sources._WAF_STUCK.clear()
+
+    def test_pubmed_page_via_efetch(self):
+        art = sources.fetch_page("https://pubmed.ncbi.nlm.nih.gov/42211289/")
+        self.assertEqual(art["attempts"][0]["mode"], "api")
+        self.assertIn("dropped beyond 32K", art["text"])
         self.assertFalse(art["via_browser"])
+        self.assertFalse(any(c.startswith("https://pubmed.ncbi.nlm.nih.gov/42211289") for c in self.web.calls))
+
+    def test_wallstreetcn_via_content_api(self):
+        body = "<p>" + "某公司三季度营收同比增长 32%，净利润 18 亿元，超出市场预期。" * 6 + "</p>"
+
+        def h(url):
+            if url.startswith("https://api-one.wallstcn.com/apiv1/content/articles/3712345"):
+                return 200, {"content-type": "application/json"}, json.dumps(
+                    {"code": 20000, "data": {"title": "三季度财报", "display_time": 1760000000,
+                                             "content": body}}, ensure_ascii=False).encode(), url
+        self._wrap(h)
+        called = []
+        browser.render = lambda *a, **k: called.append(a) or fixtures.fake_render(*a, **k)
+        art = sources.fetch_page("https://wallstreetcn.com/articles/3712345")
+        self.assertEqual(art["attempts"][0]["mode"], "api")
+        self.assertIn("净利润 18 亿元", art["text"])
+        self.assertEqual(called, [])
+        self.assertFalse(any(c.startswith("https://wallstreetcn.com/articles") for c in self.web.calls))
+
+    def test_hf_routes(self):
+        readme = ("---\nlicense: mit\n---\n# Model\n\n" + "This model supports a 128K context window and was "
+                  "trained on 2T tokens of multilingual data. " * 4 + "\n\n## Usage\n\nLoad it with transformers.")
+
+        def h(url):
+            if url == "https://huggingface.co/acme/long-llm/raw/main/README.md":
+                return 200, {"content-type": "text/plain"}, readme.encode(), url
+            if url == "https://arxiv.org/abs/2501.00001":
+                return 200, {"content-type": "text/html"}, (
+                    "<html><head><title>Long Context Paper</title></head><body><article><h1>Long Context Paper</h1><p>"
+                    + "We evaluate long context models on many benchmarks and find large drops. " * 5
+                    + "</p></article></body></html>").encode(), url
+        self._wrap(h)
+        art = sources.fetch_page("https://huggingface.co/acme/long-llm")
+        self.assertEqual(art["attempts"][0]["note"], "HuggingFace 模型卡 README")
+        self.assertIn("128K context", art["text"])
+        self.assertNotIn("license: mit", art["text"])
+        art = sources.fetch_page("https://huggingface.co/papers/2501.00001")
+        self.assertIn("large drops", art["text"])
+
+    def test_api_failure_falls_back_to_page(self):
+        def h(url):
+            if url.startswith("https://api-one.wallstcn.com/apiv1/content/"):
+                return 404, {"content-type": "application/json"}, b"{}", url
+            if url == "https://wallstreetcn.com/articles/999":
+                return 200, {"content-type": "text/html"}, (
+                    "<html><head><title>T</title></head><body><article><p>"
+                    + "网页正文内容足够长，用来验证接口失败时回到普通抓取。" * 8
+                    + "</p></article></body></html>").encode(), url
+        self._wrap(h)
+        art = sources.fetch_page("https://wallstreetcn.com/articles/999", mode="html")
+        self.assertFalse(art["attempts"][0]["ok"])
+        self.assertIn("回到普通抓取", art["text"])
+
+    def test_camo_badge_rejected(self):
+        from app.collect.extract import camo_original, extract_article
+        badge = "https://img.shields.io/badge/license-MIT-blue.svg"
+        camo = "https://camo.githubusercontent.com/abc123/" + badge.encode().hex()
+        self.assertEqual(camo_original(camo), badge)
+        html_ = (f"<html><body><article><h1>Repo</h1><p>{'项目说明文字。' * 40}</p>"
+                 f"<img src='{camo}' width='800' height='400'></article></body></html>")
+        art = extract_article(html_, "https://github.com/acme/repo")
+        img = [i for i in art["images"] if "camo.githubusercontent" in i["url"]][0]
+        self.assertIn("徽章", img["reject_reason"])                 # 标记为不下载
 
 
 class QualityTest(CollectBase):

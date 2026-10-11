@@ -18,6 +18,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import os
 import re
+import time
 from urllib.parse import quote, urljoin, urlsplit
 
 from bs4 import BeautifulSoup
@@ -252,17 +253,24 @@ def parse_feed(xml: str, base_url: str = "") -> list[dict]:
     return [o for o in out if o["url"]]
 
 
+_WAF_STUCK: dict[str, float] = {}      # 浏览器也过不了验证的站点 → 6 小时内不再用浏览器硬试（每次白等十几秒）
+
+
 def _get_feed(url: str) -> tuple[str, str]:
     """取 RSS 原文。被 WAF/JS 验证拦截时，改用浏览器通过验证后再取（备用入口）。"""
+    host = urlsplit(url).netloc
     try:
-        return fetcher.get(url, cache_ttl=20 * 60).text, "http"
+        return fetcher.get(url, cache_ttl=20 * 60, timeout=8).text, "http"
     except FetchError as e:
         if e.kind != "blocked":
             raise
+        if time.time() - _WAF_STUCK.get(host, 0) < 6 * 3600:
+            raise FetchError("blocked", f"{e.reason}；该站点的验证页浏览器也过不去（6 小时内不再尝试浏览器）", url) from e
         from .browser import fetch_raw
         try:
             r = fetch_raw(url)
         except FetchError as e2:
+            _WAF_STUCK[host] = time.time()
             raise FetchError("blocked", f"{e.reason}；浏览器备用入口也失败：{e2.reason}", url) from e2
         return r["content"].decode("utf-8", "replace"), "browser"
 
@@ -782,11 +790,92 @@ def arxiv_status(ids: list[str]) -> dict:
     return out
 
 
+# 应用/演示页面：内容是交互程序，没有可抽取的正文，打开只会等到超时
+SKIP_FETCH = [
+    (re.compile(r"^https?://\d{1,3}(\.\d{1,3}){3}(:\d+)?(/|$)"), "IP 地址直连的演示服务"),
+    (re.compile(r"huggingface\.co/spaces/"), "HuggingFace Spaces 在线演示应用"),
+    (re.compile(r"^https?://(demo|playground|app)\.[\w.-]+"), "在线演示/应用页面"),
+    (re.compile(r"\.streamlit\.app|\.gradio\.(live|app)|colab\.research\.google\.com|replicate\.com/[\w-]+/[\w-]+$"),
+     "在线演示/笔记本应用"),
+]
+
+
+def skip_fetch_reason(url: str) -> str | None:
+    for pat, why in SKIP_FETCH:
+        if pat.search(url):
+            return why
+    return None
+
+
+def _html_doc(title: str, paras: list[str]) -> str:
+    import html as _h
+    return ("<html><head><title>" + _h.escape(title or "") + "</title></head><body><article><h1>" + _h.escape(title or "")
+            + "</h1>" + "".join(f"<p>{_h.escape(p)}</p>" for p in paras if p.strip()) + "</article></body></html>")
+
+
+def _api_route(url: str) -> tuple[str, str] | None:
+    """有公开接口的站点：用接口取正文，不开网页、不用浏览器。返回 (html, 说明)；不适用返回 None。"""
+    m = re.match(r"https?://(?:www\.)?wallstreetcn\.com/(?:articles|news)/(\d+)", url)
+    if m:
+        r = fetcher.get(f"https://api-one.wallstcn.com/apiv1/content/articles/{m.group(1)}?extract=1",
+                        cache_ttl=6 * 3600, timeout=8, headers={"Referer": "https://wallstreetcn.com/"})
+        d = (r.json() or {}).get("data") or {}
+        if not d.get("content"):
+            return None
+        title = html_to_text(d.get("title") or "")
+        when = d.get("display_time")
+        meta = f'<meta property="article:published_time" content="{iso(when)}">' if when else ""
+        return (f"<html><head><title>{title}</title>{meta}</head><body><article><h1>{title}</h1>"
+                f"{d['content']}</article></body></html>", "华尔街见闻内容接口")
+    m = re.match(r"https?://pubmed\.ncbi\.nlm\.nih\.gov/(\d+)", url)
+    if m:
+        r = fetcher.get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&retmode=xml&rettype=abstract&id="
+                        + m.group(1), respect_robots=False, cache_ttl=24 * 3600, timeout=10)
+        soup = BeautifulSoup(r.content, "xml")
+        title = (soup.find("ArticleTitle") or soup.new_tag("x")).get_text(" ", strip=True)
+        parts = [(t.get("Label") + "：" if t.get("Label") else "") + t.get_text(" ", strip=True)
+                 for t in soup.find_all("AbstractText")]
+        if not parts:
+            return None
+        return _html_doc(title, parts), "PubMed E-utilities 接口"
+    m = re.match(r"https?://huggingface\.co/papers/(\d{4}\.\d{4,5})", url)
+    if m:
+        r = fetcher.get(f"https://arxiv.org/abs/{m.group(1)}", timeout=10)
+        return r.text, "HuggingFace 论文页 → arXiv 原文页"
+    m = re.match(r"https?://huggingface\.co/((?:datasets/)?[\w.-]+/[\w.-]+)/?$", url)
+    if m and not re.match(r"(docs|blog|spaces|papers|models|learn|tasks|pricing|join|login)/", m.group(1)):
+        r = fetcher.get(f"https://huggingface.co/{m.group(1)}/raw/main/README.md", respect_robots=False,
+                        cache_ttl=24 * 3600, timeout=10)
+        body = re.sub(r"^---.*?---", "", r.text, flags=re.S)            # 去掉 YAML 头
+        paras = [re.sub(r"[#*`>|]", "", p).strip() for p in re.split(r"\n\s*\n", body)]
+        return _html_doc(m.group(1), [p for p in paras if len(p) > 20][:60]), "HuggingFace 模型卡 README"
+    return None
+
+
 def fetch_page(url: str, mode: str = "auto", fresh: bool = False) -> dict:
     """抓取单个网页。mode: html / browser / auto（静态正文太少时自动改用浏览器渲染）。
     返回 extract_article 的结果 + {final_url, via_browser, attempts}。"""
     attempts = []
     art = None
+    why = skip_fetch_reason(url)
+    if why:
+        raise FetchError("bad_content", f"{why}，没有可抽取的正文，不抓取", url)
+    if not fresh:
+        t0 = time.time()
+        try:
+            routed = _api_route(url)
+        except (FetchError, ValueError, KeyError, AttributeError) as e:
+            routed = None
+            attempts.append({"mode": "api", "ok": False, "reason": f"接口失败，改用网页：{str(e)[:80]}"})
+        if routed:
+            html_, how = routed
+            art = extract_article(html_, url)
+            attempts.append({"mode": "api", "ok": True, "chars": len(art["text"]), "note": how,
+                             "elapsed_ms": int((time.time() - t0) * 1000)})
+            if len(art["text"]) >= 60:          # 接口给的就是正文（摘要可能较短），不必再开网页
+                art.update(final_url=url, via_browser=False, attempts=attempts)
+                return art
+            art = None
     if mode == "auto" and any(p.search(url) for p in NO_BROWSER):
         mode = "html"         # 这类页面浏览器渲染也拿不到正文，只会白等 20 多秒
     if mode in ("html", "auto"):

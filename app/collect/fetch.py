@@ -119,6 +119,10 @@ class Fetcher:
         self._robots: dict[str, urllib.robotparser.RobotFileParser | None] = {}
         self._lock = threading.Lock()
         self.host_interval: dict[str, float] = {}   # 个别站点更慢，如 arxiv 3 秒
+        # 熔断：同一站点短时间内多次超时/连不上，后续请求直接失败，不再白等超时（站点恢复后自动解除）
+        self._host_fail: dict[str, list[float]] = {}
+        self.breaker_window = 15 * 60
+        self.breaker_threshold = 2
 
     # ---------------------------------------------------------------- 缓存
     def _cache_path(self, url: str):
@@ -191,6 +195,13 @@ class Fetcher:
             raise FetchError("robots", "robots.txt 不允许抓取该路径", url)
 
         host = urlsplit(url).netloc
+        now = time.time()
+        fails = [t for t in self._host_fail.get(host, []) if now - t < self.breaker_window]
+        self._host_fail[host] = fails
+        if len(fails) >= self.breaker_threshold:
+            mins = int((self.breaker_window - (now - fails[-1])) / 60) + 1
+            raise FetchError("timeout", f"{host} 最近 {self.breaker_window // 60} 分钟内已超时/连不上 {len(fails)} 次，"
+                                        f"暂时跳过（约 {mins} 分钟后再试）", url)
         h = {"User-Agent": UA, "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8", **(headers or {})}
         last_err: FetchError | None = None
         for attempt in range(self.retries + 1):
@@ -204,11 +215,15 @@ class Fetcher:
                                                             method=_method, json_body=_json)
             except FetchError as e:
                 last_err = e
-                if e.kind in ("timeout", "network") and attempt < min(1, self.retries):
-                    time.sleep(0.5 * (2 ** attempt))
-                    continue
+                if e.kind in ("timeout", "network"):
+                    self._host_fail.setdefault(host, []).append(time.time())
+                    # 这个站点之前已经超时过：不再重试，直接失败
+                    if attempt < min(1, self.retries) and len(self._host_fail[host]) < self.breaker_threshold:
+                        time.sleep(0.5 * (2 ** attempt))
+                        continue
                 raise
             r = Response(url, final, status, rh, content, elapsed_ms=int((time.time() - t0) * 1000))
+            self._host_fail.pop(host, None)          # 站点能连上了：解除熔断计数
             if status == 429 or status >= 500:
                 kind = "rate_limit" if status == 429 else "server"
                 last_err = FetchError(kind, f"HTTP {status}", url, status)

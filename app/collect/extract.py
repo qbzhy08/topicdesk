@@ -268,7 +268,25 @@ def _neighbors(img: Tag, blocks: list[Tag]):
     return before, after
 
 
+def camo_original(url: str) -> str | None:
+    """GitHub 图片代理 camo.githubusercontent.com/<签名>/<原地址的十六进制>：还原出原地址（多为 README 徽章）。"""
+    m = re.match(r"https?://camo\.githubusercontent\.com/[0-9a-f]+/([0-9a-f]+)", url)
+    if not m:
+        return None
+    try:
+        return bytes.fromhex(m.group(1)).decode("utf-8", "replace")
+    except ValueError:
+        return None
+
+
+BADGE_URL = re.compile(r"shields\.io|badge|travis-ci|codecov|circleci|badgen|/workflows/.+/badge|\.svg($|\?)|star-history|"
+                       r"img\.shields|forthebadge|contrib\.rocks", re.I)
+
+
 def _reject_reason(img: Tag, url: str, w, h) -> str | None:
+    orig = camo_original(url)
+    if orig and (BADGE_URL.search(orig) or IMG_REJECT_URL.search(orig)):
+        return f"GitHub 徽章/图标（原地址 {orig[:60]}）"
     hint = " ".join([img.get("id", "") or ""] + (img.get("class") or []) + [img.get("alt", "")])
     parent_hint = ""
     for p in list(img.parents)[:3]:
