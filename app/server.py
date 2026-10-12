@@ -1115,6 +1115,32 @@ def experiment_retry(eid):
     return jsonify(retry=len(redo))
 
 
+@app.post("/api/experiments/<eid>/remeasure")
+def experiment_remeasure(eid):
+    """指标定义更新后，用已写好的文章重新计算确定性指标（不重写文章、不调用大模型）。"""
+    from . import evaluate as ev
+    from .harness import patch_state
+    from .graphs.experiment import _docs_with_text
+    t = _exp_or_404(eid)
+    if runner.is_running(eid):
+        return jsonify(error="实验还在运行"), 409
+    runs = (t["state"] or {}).get("runs") or []
+    n = 0
+    for r in runs:
+        if r.get("status") != "done":
+            continue
+        v = db.query_one("SELECT markdown, meta FROM article_versions WHERE article_id=? AND version=?", (r["article_id"], r["version"]))
+        if not v:
+            continue
+        m = ev.evaluate_version(v["markdown"], v["meta"] or {}, _docs_with_text(v["meta"] or {}))
+        r["text"] = m.pop("text")
+        m.pop("_items", None)
+        r["metrics"] = m
+        n += 1
+    patch_state(eid, {"runs": runs}, note="按新的指标定义重新计算")
+    return jsonify(remeasured=n)
+
+
 @app.get("/api/experiments/<eid>/text/<path:key>")
 def experiment_text(eid, key):
     t = _exp_or_404(eid)
@@ -1210,6 +1236,18 @@ def experiment_rate_clear(eid):
 def aigc_status():
     from . import aigc
     return jsonify(aigc.status())
+
+
+@app.get("/api/aigc/selfcheck")
+def aigc_selfcheck():
+    """检测器自检：用一段人写、一段 AI 腔的参考文字看检测器能不能区分。"""
+    from . import aigc
+    if not aigc.status()["deps"]:
+        return jsonify(error="本地检测器没有安装"), 400
+    try:
+        return jsonify(aigc.selfcheck())
+    except Exception as e:  # noqa: BLE001
+        return jsonify(error=f"自检失败（{type(e).__name__}）：{str(e)[:300]}"), 500
 
 
 @app.post("/api/aigc")

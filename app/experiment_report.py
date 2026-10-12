@@ -13,9 +13,9 @@ def _row(r: dict, scores: dict) -> dict:
     cj = r.get("claim_judge") or {}
     det = {}
     if r.get("aigc"):
-        det[r["aigc"]["detector"]] = r["aigc"]["ai_prob"]
+        det[_det_name(r["aigc"]["detector"])] = r["aigc"]["ai_prob"]
     for s in scores.get(r["key"], []):
-        det[s["detector"]] = s["score"]
+        det[_det_name(s["detector"])] = s["score"]
     return {"key": r["key"], "topic": r["topic"], "research_task": r["research_task"], "variant": r["variant"],
             "name": VARIANTS.get(r["variant"], {}).get("name", r["variant"]), "article_id": r.get("article_id"),
             "version": r.get("version"), "status": r["status"], "error": r.get("error"), "seconds": r.get("seconds"),
@@ -25,11 +25,19 @@ def _row(r: dict, scores: dict) -> dict:
             "facts_per_1k": d.get("facts_per_1k"), "sources_cited": d.get("sources_cited"), "redundancy": d.get("redundancy"),
             "filler_ratio": d.get("filler_ratio"), "tropes_per_1k": n.get("tropes_per_1k"), "tropes": n.get("tropes"),
             "sentence_len_cv": n.get("sentence_len_cv"), "connective_start": n.get("connective_start"),
+            "dash_per_1k": n.get("dash_per_1k"), "triplets_per_1k": n.get("triplets_per_1k"),
             "avg_sentence_len": c.get("avg_sentence_len"), "long_sentence_ratio": c.get("long_sentence_ratio"),
             "unexplained_terms": c.get("unexplained_terms"), "read_minutes": c.get("read_minutes"),
             "aigc": det, "gain": g, "logs": r.get("logs") or {}, "structure": r.get("structure"),
             "doc_ids": r.get("doc_ids") or [], "cited_doc_ids": r.get("cited_doc_ids") or [],
             "skill_name": _skill_name(r.get("skill")), "excerpt": _excerpt(r.get("text") or "")}
+
+
+def _det_name(d: str) -> str:
+    """同一个本地检测器以前记成“hc3:模型名”，现在叫“本地 HC3 检测器（…）”：合并成一行。"""
+    if d.startswith("hc3:"):
+        return f"本地 HC3 检测器（{d.split('/')[-1]}）"
+    return d
 
 
 def _skill_name(sid):
@@ -52,6 +60,7 @@ METRIC_COLS = [("chars", "字数", None), ("support_rate", "出处支持率", "u
                ("facts_per_1k", "每千字可核对事实", "up"), ("sources_cited", "引用来源数", "up"),
                ("redundancy", "重复率", "down"), ("filler_ratio", "空话率", "down"), ("tropes_per_1k", "套话/千字", "down"),
                ("sentence_len_cv", "句长变化", "up"), ("connective_start", "连接词起句", "down"),
+               ("dash_per_1k", "破折号/千字", "down"), ("triplets_per_1k", "三连排比/千字", "down"),
                ("avg_sentence_len", "平均句长", "down"), ("long_sentence_ratio", "长句比例", "down"),
                ("unexplained_terms", "未解释术语", "down"), ("read_minutes", "阅读分钟", None)]
 

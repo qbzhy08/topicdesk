@@ -18,8 +18,12 @@ from . import writing
 AI_TROPES = ["首先", "其次", "最后", "综上所述", "总而言之", "值得注意的是", "值得一提的是", "不难看出", "由此可见",
              "总的来说", "此外", "与此同时", "随着", "毋庸置疑", "至关重要", "显著", "进一步", "赋能", "助力", "全方位",
              "深度融合", "具有重要意义", "扮演着", "关键角色", "日益", "不可或缺", "不仅", "更是", "无疑", "引发了广泛关注",
-             "备受关注", "在这一背景下", "从某种意义上说", "需要指出的是", "可以说"]
-CONNECTIVE_START = re.compile(r"^(首先|其次|此外|另外|同时|与此同时|然而|因此|总之|综上|最后|而且|并且|但是|不过)")
+             "备受关注", "在这一背景下", "从某种意义上说", "需要指出的是", "可以说",
+             # 新一代大模型常见的说法（老的套话被提示词禁掉后，换成了这些）
+             "这意味着", "意味着", "值得关注", "一方面", "另一方面", "从长远来看", "总体来看", "总体而言", "整体来看",
+             "换句话说", "简单来说", "归根结底", "本质上", "核心在于", "关键在于", "不再是", "格局", "拐点", "窗口期"]
+CONNECTIVE_START = re.compile(r"^(首先|其次|此外|另外|同时|与此同时|然而|因此|总之|综上|最后|而且|并且|但是|不过|"
+                              r"换句话说|简单来说|总体来看|整体来看|这意味着|也就是说|事实上|值得注意的是|可以看到|由此|所以|而)")
 LATIN_TERM = re.compile(r"\b[A-Za-z][A-Za-z0-9.+-]{1,}\b")
 READ_SPEED = 400          # 中文阅读速度：字/分钟（一般读者 300-500）
 
@@ -106,7 +110,10 @@ def naturalness(text: str) -> dict:
     lens = [_hanzi_len(s) for s in sents]
     cv = statistics.pstdev(lens) / statistics.mean(lens) if len(lens) > 1 and statistics.mean(lens) else 0.0
     conn = sum(1 for s in sents if CONNECTIVE_START.match(s.lstrip("【分析】")))
+    dash = text.count("——") + text.count("—")
+    paral = len(re.findall(r"[^，。；]{2,8}、[^，。；]{2,8}、[^，。；]{2,8}(?:等|和)", text))   # “A、B、C 等”三连排比
     return {"tropes_per_1k": round(sum(hits.values()) * 1000 / n, 2), "tropes": dict(sorted(hits.items(), key=lambda x: -x[1])[:8]),
+            "dash_per_1k": round(dash * 1000 / n, 2), "triplets_per_1k": round(paral * 1000 / n, 2),
             "connective_start": round(conn / max(1, len(sents)), 3), "sentence_len_cv": round(cv, 3),
             "sentences": len(sents)}
 

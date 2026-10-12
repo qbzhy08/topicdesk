@@ -1607,6 +1607,7 @@ const VAR_OPTS = [["draft", "初稿", "列提纲后直接成稿"], ["checked", "
   ["optimized", "优化稿", "+自然化改写（降 AI 腔）+复核"], ["natural_only", "只自然化", "消融：不核对直接降 AI 腔"],
   ["no_recheck", "自然化不复核", "消融：自然化后不复核"]];
 const num = (x) => x == null ? "—" : (Math.round(x * 100) / 100).toString();
+const pctAi = (x) => x == null ? "—" : x > 0 && x < 0.001 ? "<0.1%" : `${(x * 100).toFixed(1)}%`;   // AIGC 概率常常很小，多保留一位
 
 function renderExList(list) {
   return list.map((x) => {
@@ -1703,7 +1704,12 @@ async function showExperiment(id) {
       return `<td class="${v.id !== base ? better(c, b0, x) : ""}">${fmtCell(c.key, x)}</td>`; }).join("")}</tr>`).join("")}
     ${r.detectors.map((d) => `<tr><td>AIGC：${esc(d)}<small class="muted"> ↓好</small></td>${r.variants.map((v) => {
       const x = r.avg[v.id]?.aigc?.[d], b0 = base && r.avg[base]?.aigc?.[d];
-      return `<td class="${v.id !== base ? better({ better: "down" }, b0, x) : ""}">${pct(x)}</td>`; }).join("")}</tr>`).join("")}</table></div>`;
+      return `<td class="${v.id !== base ? better({ better: "down" }, b0, x) : ""}">${pctAi(x)}</td>`; }).join("")}</tr>`).join("")}</table></div>
+    ${!busy ? `<div class="row"><button type="button" class="ghost sm" id="ex-remeasure">按最新指标重新计算</button><small class="muted">指标定义更新后用这个刷新（不重写文章、不花大模型费用）</small></div>` : ""}
+    ${(() => {                 // 所有版本都一样（比如都是 0）的指标：说明它在这次实验里区分不出差别
+      const flat = r.metric_cols.filter((c) => c.better && r.variants.length > 1 && r.variants.every((v) => r.avg[v.id]?.[c.key] === r.avg[r.variants[0].id]?.[c.key]));
+      return flat.length ? `<p class="small muted">各版本完全相同的指标：${flat.map((c) => c.name).join("、")}。这些指标在这次实验里区分不出差别（例如写法 Skill 已经禁止了套话和连接词开头，各版本都是 0），不能用来说明哪一步有效。</p>` : "";
+    })()}`;
   const runRows = (tid) => rows.filter((x) => x.research_task === tid);
   const detail = () => topics.map(([tid, topic]) => { const nb = runRows(tid).filter((x) => x.status === "failed").length;
     return `<details class="card ex-topic ${nb ? "ex-bad" : ""}" ${nb ? "open" : ""}><summary><b>${esc(topic)}</b> <small class="muted">${runRows(tid).length} 篇</small>${nb ? ` <span class="tag rel-lo">${nb} 篇失败</span>` : ""}</summary>
@@ -1712,7 +1718,7 @@ async function showExperiment(id) {
     ${runRows(tid).map((x) => `<tr class="${x.status === "failed" ? "ex-row-bad" : ""}"><td>${esc(vname(x.variant))}${x.status === "failed" ? ` <span class="tag rel-lo">失败</span><br><small class="gap">${esc((x.error || "写作任务失败").slice(0, 80))}</small>` : x.status !== "done" ? ` <small class="muted">${esc(STATUS[x.status] || x.status)}</small>` : ""}</td>
       <td>${num(x.chars)}</td><td>${pct(x.support_rate)}</td><td>${num(x.number_errors)}</td><td>${num(x.problems)}</td><td>${pct(x.judge_fidelity)}</td>
       <td>${num(x.facts_per_1k)}</td><td>${num(x.tropes_per_1k)}</td><td>${num(x.sentence_len_cv)}</td><td>${num(x.read_minutes)}</td>
-      ${r.detectors.map((d) => `<td>${pct(x.aigc[d])}</td>`).join("")}
+      ${r.detectors.map((d) => `<td>${pctAi(x.aigc[d])}</td>`).join("")}
       <td>${x.article_id ? `<a href="#/article/${x.article_id}">打开</a>` : ""}</td></tr>`).join("")}</table></div></details>`; }).join("");
   const aigcBox = () => `<div class="card"><h3>AIGC 检测（同一检测器、同一份完整正文）</h3>
     <p class="small">“完整正文”= 文章去掉配图、图注、阅读说明和参考资料列表后的全部文字（标题、小标题、出处编号保留），每篇用同样的处理。
@@ -1810,6 +1816,18 @@ async function showExperiment(id) {
   api("/api/aigc").then((a) => {           // 本地检测器的当前状态（不是实验运行那一刻的）
     const box = $("#ex-ai-status", el);
     if (!box) return;
+    if (a.deps && a.model_ready) {
+      box.insertAdjacentHTML("afterend", `<div class="row"><button type="button" class="ghost" id="ex-selfcheck">检测器自检</button>
+        <small class="muted" id="ex-sc-msg">用一段人写、一段 AI 腔的参考文字，看这个检测器能不能区分</small></div>`);
+      $("#ex-selfcheck", el).onclick = async (e) => {
+        e.target.disabled = true; $("#ex-sc-msg").textContent = "自检中…";
+        try {
+          const c = await api("/api/aigc/selfcheck");
+          $("#ex-sc-msg").innerHTML = `人写参考 <b>${pctAi(c.human_ref)}</b> · AI 腔参考 <b>${pctAi(c.ai_ref)}</b> → <span class="${c.discriminates ? "ok" : "gap"}">${esc(c.note)}</span>`;
+        } catch (err) { $("#ex-sc-msg").textContent = err.message; }
+        e.target.disabled = false;
+      };
+    }
     box.innerHTML = !a.deps ? `<span class="gap">本地检测器还没安装</span>：双击 topicdesk 文件夹里的“安装AIGC检测器.command”，装好后重启主题编辑台。`
       : a.model_ready ? `<span class="ok">✓ 本地检测器已就绪</span>（${esc(a.model)}）。点下面的按钮检测这次实验的全部文章。`
       : `已安装依赖，<b>模型还没下载</b>：点下面的按钮会先下载模型（约 400MB，国内网络会自动改用镜像），再检测。也可以先双击“安装AIGC检测器.command”下载。`;
@@ -1819,6 +1837,12 @@ async function showExperiment(id) {
     await api(`/api/experiments/${id}/blind?rater=${encodeURIComponent(b.dataset.clearRater)}`, { method: "DELETE" });
     showExperiment(id);
   });
+  const rm = $("#ex-remeasure", el);
+  if (rm) rm.onclick = async () => {
+    rm.disabled = true;
+    try { await api(`/api/experiments/${id}/remeasure`, { method: "POST", body: {} }); showExperiment(id); }
+    catch (err) { rm.disabled = false; rm.textContent = err.message; }
+  };
   const rt = $("#ex-retry", el);
   if (rt) rt.onclick = async () => {
     rt.disabled = true;

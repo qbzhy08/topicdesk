@@ -161,3 +161,22 @@ def detect(text: str) -> dict:
         acc += p_ai * len(part)
     return {"detector": f"本地 HC3 检测器（{(settings().get('model') or HC3_MODEL).split('/')[-1]}）", "ai_prob": round(acc / tot, 4) if tot else None,
             "chunks": rows}
+
+
+# 检测器自检：一段确定是人写的（鲁迅《故乡》，1921 年，公有领域）和一段典型的大模型腔调文字。
+# 如果两段的分数都很低，说明这个检测器对这类文本区分不开，它给文章的低分不能当成“不像 AI”。
+REF_HUMAN = ("我冒了严寒，回到相隔二千余里，别了二十余年的故乡去。时候既然是深冬；渐近故乡时，天气又阴晦了，"
+             "冷风吹进船舱中，呜呜的响，从篷隙向外一望，苍黄的天底下，远近横着几个萧索的荒村，没有一些活气。"
+             "我的心禁不住悲凉起来了。")
+REF_AI = ("随着人工智能技术的快速发展，大语言模型在各行各业的应用日益广泛。首先，它显著提升了信息处理的效率；"
+          "其次，它为内容创作提供了全新的可能性。然而，值得注意的是，大模型也面临着幻觉、偏见等挑战。"
+          "总而言之，我们需要在推动技术创新的同时，加强监管与伦理建设，从而实现人工智能的健康可持续发展。")
+
+
+def selfcheck() -> dict:
+    h = detect(REF_HUMAN)["ai_prob"]
+    a = detect(REF_AI)["ai_prob"]
+    ok = a is not None and h is not None and a - h >= 0.5
+    return {"human_ref": h, "ai_ref": a, "discriminates": ok,
+            "note": "能区分：人写参考文字分数低、AI 腔参考文字分数高" if ok else
+                    "区分不开：两段参考文字分数接近，这个检测器在这里不可靠，文章的分数只能作参考"}

@@ -914,3 +914,10 @@ class ExperimentFailTest(ExperimentTest):
         self.assertTrue(all(x["status"] == "done" for x in rep["rows"]))
         self.assertIsNone(rep["fatal"])
         self.assertEqual(rep["blind_pairs"], 1)
+
+    def test_remeasure(self):
+        eid, rep = self.run_exp(research_tasks=[self.t1], skill="brief", detector="manual")
+        r = self.c.post(f"/api/experiments/{eid}/remeasure", json={}).get_json()
+        self.assertEqual(r["remeasured"], 4)
+        rep = self.c.get(f"/api/experiments/{eid}").get_json()
+        self.assertIsNotNone(rep["rows"][0]["dash_per_1k"])
