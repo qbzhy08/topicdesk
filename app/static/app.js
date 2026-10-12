@@ -1278,10 +1278,10 @@ async function showArticle(id, ver) {
         : `<p class="small ok">✓ 没有数字对不上、缺出处或找不到依据的句子</p>`}
       <details class="small all-chk"><summary>全部 ${items.length} 句的核对结果</summary>${items.map((i) => `<div class="chk"><span class="tag ${CHECK_BAD.has(i.status) ? "rel-lo" : ""}">${CHECK_NAME[i.status]}</span>
         ${esc(renum(i.sentence))}${i.quote && i.status !== "supported" ? `<br><small class="muted">出处原文：${esc(i.quote)}</small>` : ""}</div>`).join("")}</details>`,
-    fixes: fixes.length ? fixes.map((f) => `<div class="chk small">${f.rewrite
+    fixes: `<p class="small muted">这里列的是<b>系统在写作过程中自动做的修正</b>：出处编号引错了改成数字真正所在的资料、没出处的数字补上出处、核对没通过的节按核对结果重写、删掉混进正文的写作说明。你自己在审阅时做的修改记在「版本」里。</p>` + (fixes.length ? fixes.map((f) => `<div class="chk small">${f.rewrite
         ? `<b>按核对结果改写「${esc(secName(f.section))}」</b>${(f.items || []).map((i) => `<br><small class="muted">${CHECK_NAME[i.status] || esc(i.status)}：${esc(renum(i.sentence))}</small>`).join("")}`
         : `<b>${esc(f.why)}</b><br><s>${esc(renum(f.before))}</s><br>→ ${esc(renum(f.after))}`}</div>`).join("")
-      : `<p class="small muted">写作中没有需要改正的地方。</p>`,
+      : `<p class="small muted">写作时逐句核对没有发现需要修正的地方，所以这里是空的。</p>`),
     gaps: gaps.length ? gaps.map((g) => `<div class="chk small"><b>「${esc(g.query)}」</b> ${esc(g.why || "")}<br>
         ${g.skipped ? `<small class="muted">${esc(g.skipped)}</small>` : `<small class="muted">${esc((g.sources || []).join("；"))}</small><br>${g.found?.length ? "找到：" + g.found.map(esc).join("；") : "没有找到新资料"}`}</div>`).join("")
       : `<p class="small muted">素材够用，写作时没有补充检索。</p>`,
@@ -1304,7 +1304,7 @@ async function showArticle(id, ver) {
     ${irej.length ? `<details class="small"><summary>没用上的图（${irej.length}）</summary>${irej.map((r) => `<div class="chk">${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc((r.doc || "").slice(0, 30))}</a>` : esc(r.doc || "")}：${esc(r.why)}</div>`).join("")}</details>` : ""}
     <p class="small muted">质检：清晰度（边缘锐度）、尺寸、压缩、是否缩略图/裁切、与已选图是否重复；位置按图注和图片前后的正文与段落的相似度决定。示意图只用文中已核对过的数据。</p>`;
   panes.vers = versionsPane(d, v);
-  const TABS = [["check", "核对", bad.length], ["imgs", "配图", figs.length + (cover ? 1 : 0)], ["vers", "版本", d.versions.length], ["fixes", "改动", fixes.length], ["gaps", "补检", gaps.length], ["docs", "素材", docs.length]];
+  const TABS = [["check", "核对", bad.length], ["imgs", "配图", figs.length + (cover ? 1 : 0)], ["vers", "版本", d.versions.length], ["fixes", "自动修正", fixes.length], ["gaps", "补检", gaps.length], ["docs", "素材", docs.length]];
   el.innerHTML = `
     <div data-f="flow"></div>
     <div class="detail-head art-head"><div><p class="kicker">文章 · ${esc(m.skill?.name || a.skill)} v${esc(m.skill?.version || "")}</p><h1 class="art-title">${esc(a.title || "")}<button class="rv-btn rv-title" type="button" title="改标题">✎ 改标题</button></h1>
@@ -2086,28 +2086,63 @@ async function showDiff(id, a, b) {
   const box = document.createElement("div");
   box.className = "rv-modal";
   const md = (t) => esc(t).replace(/\[(\d+)\]/g, "<sup>$1</sup>");
-  let same = 0;
-  const rows = [];
-  const flush = () => { if (same) rows.push(`<p class="df-same">… ${same} 段没有改动 …</p>`); same = 0; };
-  for (const x of d.items) {
-    if (x.t === "same") { same++; continue; }
+  let mode = store.get("diffMode") || "side";
+  let showSame = store.get("diffAll") ?? (mode === "side");     // 并排时默认两篇全文都显示，改动处高亮
+  // 逐段视图（原来的）：改动按顺序排，没改的段落折叠
+  const inline = () => {
+    let same = 0;
+    const rows = [];
+    const flush = () => { if (same) rows.push(`<p class="df-same">… ${same} 段没有改动 …</p>`); same = 0; };
+    for (const x of d.items) {
+      if (x.t === "same") { if (showSame) rows.push(`<div class="df same">${md(x.text)}</div>`); else same++; continue; }
+      flush();
+      if (x.t === "add") rows.push(`<div class="df add"><i>新增</i>${md(x.text)}</div>`);
+      else if (x.t === "del") rows.push(`<div class="df del"><i>删除</i>${md(x.text)}</div>`);
+      else if (x.t === "rewrite") rows.push(`<div class="df mod"><i>改写</i><del>${md(x.old)}</del><br><ins>${md(x.new)}</ins></div>`);
+      else rows.push(`<div class="df mod"><i>修改</i>${x.parts.map(([t, o, n]) => t === "equal" ? md(o)
+        : `${o ? `<del>${md(o)}</del>` : ""}${n ? `<ins>${md(n)}</ins>` : ""}`).join("")}</div>`);
+    }
     flush();
-    if (x.t === "add") rows.push(`<div class="df add"><i>新增</i>${md(x.text)}</div>`);
-    else if (x.t === "del") rows.push(`<div class="df del"><i>删除</i>${md(x.text)}</div>`);
-    else if (x.t === "rewrite") rows.push(`<div class="df mod"><i>改写</i><del>${md(x.old)}</del><br><ins>${md(x.new)}</ins></div>`);
-    else rows.push(`<div class="df mod"><i>修改</i>${x.parts.map(([t, o, n]) => t === "equal" ? md(o)
-      : `${o ? `<del>${md(o)}</del>` : ""}${n ? `<ins>${md(n)}</ins>` : ""}`).join("")}</div>`);
-  }
-  flush();
-  box.innerHTML = `<div class="card rv-modal-in wide"><div class="rv-ed-head"><b>第 ${a} 版 → 第 ${b} 版</b>
-      <span class="small muted">修改 ${d.stats.mod + d.stats.rewrite} 段 · 新增 ${d.stats.add} 段 · 删除 ${d.stats.del} 段</span><button type="button" class="ghost rv-x">×</button></div>
-    <div class="df-list">${rows.join("") || `<p class="small muted">两个版本正文相同。</p>`}</div></div>`;
-  document.body.append(box);
+    return `<div class="df-list">${rows.join("") || `<p class="small muted">两个版本正文相同。</p>`}</div>`;
+  };
+  // 并排视图：左旧右新，同一段对齐在同一行；左边标出删掉的字，右边标出新加的字
+  const side = () => {
+    const rows = [];
+    let same = 0;
+    const flush = () => { if (same) rows.push(`<div class="sx-gap">… ${same} 段没有改动 …</div>`); same = 0; };
+    for (const x of d.items) {
+      if (x.t === "same") {
+        if (showSame) rows.push(`<div class="sx-row same"><div>${md(x.text)}</div><div>${md(x.text)}</div></div>`);
+        else same++;
+        continue;
+      }
+      flush();
+      if (x.t === "add") rows.push(`<div class="sx-row"><div class="sx-empty"></div><div class="sx-add">${md(x.text)}</div></div>`);
+      else if (x.t === "del") rows.push(`<div class="sx-row"><div class="sx-del">${md(x.text)}</div><div class="sx-empty"></div></div>`);
+      else if (x.t === "rewrite") rows.push(`<div class="sx-row"><div class="sx-del">${md(x.old)}</div><div class="sx-add">${md(x.new)}</div></div>`);
+      else rows.push(`<div class="sx-row"><div class="sx-mod">${x.parts.map(([t, o]) => t === "equal" ? md(o) : o ? `<del>${md(o)}</del>` : "").join("")}</div>
+        <div class="sx-mod">${x.parts.map(([t, o, n]) => t === "equal" ? md(n) : n ? `<ins>${md(n)}</ins>` : "").join("")}</div></div>`);
+    }
+    flush();
+    return `<div class="sx"><div class="sx-row sx-head"><div>第 ${a} 版（旧）</div><div>第 ${b} 版（新）</div></div>${rows.join("") || `<p class="small muted">两个版本正文相同。</p>`}</div>`;
+  };
+  const draw = () => {
+    box.innerHTML = `<div class="card rv-modal-in ${mode === "side" ? "xwide" : "wide"}"><div class="rv-ed-head"><b>第 ${a} 版 → 第 ${b} 版</b>
+        <span class="small muted">修改 ${d.stats.mod + (d.stats.rewrite || 0)} 段 · 新增 ${d.stats.add} 段 · 删除 ${d.stats.del} 段</span>
+        <span class="rv-tabs"><button type="button" data-m="side" class="${mode === "side" ? "on" : ""}">左右并排</button><button type="button" data-m="inline" class="${mode === "inline" ? "on" : ""}">逐段对比</button></span>
+        <label class="small df-all"><input type="checkbox" ${showSame ? "checked" : ""}> 显示没改动的段落</label>
+        <button type="button" class="ghost rv-x">×</button></div>
+      ${mode === "side" ? side() : inline()}</div>`;
+    $(".rv-x", box).onclick = close;
+    $$(".rv-tabs button", box).forEach((t) => t.onclick = () => { mode = t.dataset.m; store.set("diffMode", mode); draw(); });
+    $(".df-all input", box).onchange = (e) => { showSame = e.target.checked; store.set("diffAll", showSame); draw(); };
+  };
   const close = () => { box.remove(); document.removeEventListener("keydown", onKey); };
   const onKey = (e) => { if (e.key === "Escape") close(); };
   document.addEventListener("keydown", onKey);
   box.onclick = (e) => { if (e.target === box) close(); };
-  $(".rv-x", box).onclick = close;
+  draw();
+  document.body.append(box);
 }
 
 function flash(node) {

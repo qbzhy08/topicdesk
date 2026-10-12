@@ -784,3 +784,23 @@ button.linkish { background: none; color: var(--info); padding: 0; font-size: 12
 .rv-up-pv img { max-width: 100%; max-height: 300px; display: block; margin: 0 auto; background: #fff; }
 .rv-pick-cap { margin-bottom: 4px; }
 .rv-drop input[type=file] { display: none !important; }
+
+/* 版本对比：左右并排 */
+.rv-modal-in.xwide { width: min(1400px, 100%); }
+.df-all { display: flex !important; align-items: center; gap: 6px; margin: 0; color: var(--muted); }
+.df-all input { display: inline-block; width: auto; margin: 0; }
+.df.same { border-color: var(--line); color: var(--muted); }
+.sx { font: 14.5px/1.75 var(--sans); }
+.sx-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 6px 0; }
+.sx-row > div { padding: 8px 12px; border-radius: 6px; min-width: 0; }
+.sx-head > div { font: 600 13px var(--sans); color: var(--muted); padding: 4px 12px; border-bottom: 1px solid var(--line); border-radius: 0; }
+.sx-head { position: sticky; top: -16px; background: var(--card); z-index: 1; margin-top: 0; }
+.sx-row.same > div { color: var(--muted); background: transparent; }
+.sx-del { background: #f8e9e6; border-left: 3px solid var(--accent); }
+.sx-add { background: #eaf4ee; border-left: 3px solid var(--ok); }
+.sx-mod { background: var(--paper); border-left: 3px solid var(--warn); }
+.sx-empty { background: repeating-linear-gradient(45deg, transparent 0 8px, color-mix(in srgb, var(--line) 50%, transparent) 8px 9px); }
+.sx del { background: #f3d6d0; color: #8a2c1d; }
+.sx ins { background: #cfe8d7; color: #1d5a37; text-decoration: none; }
+.sx-gap { text-align: center; color: var(--muted); font-size: 12px; margin: 4px 0; }
+@media (max-width: 800px) { .sx-row { grid-template-columns: 1fr; } .sx-empty { display: none; } }
