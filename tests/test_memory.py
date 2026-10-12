@@ -262,9 +262,20 @@ class CompareAndDemoTest(MemoryTest):
             tid2 = memory_demo.start_run(2)
             self.assertEqual(run_task(tid2), "done")
             st = cl.get("/api/demo/memory").json
-            self.assertTrue(all(k["ok"] for k in st["compare"]["checks"]))
+            self.assertTrue(all(k["ok"] for k in st["compare"]["checks"]), st["compare"]["invalidated"])
             self.assertTrue(st["recall_now"]["dead"])
             self.assertFalse(any(x["recalled"] for x in st["recall_now"]["dead"]))
+            self.assertIn("更正", [e["op"] for e in st["edits"]])                    # 两次任务之间：删除 + 更正
+            # 两次任务之后再改：删一条、更正一条，立刻召回核对
+            r = cl.post("/api/demo/memory/post_sample").json
+            self.assertEqual(len(r["done"]), 2, r)
+            st = cl.get("/api/demo/memory").json
+            post = [x for x in st["recall_now"]["dead"] if x["after_run2"]]
+            self.assertGreaterEqual(len(post), 2)                                     # 删除还会连带让依赖它的交付失效
+            self.assertFalse(any(x["recalled"] for x in post))                        # 失效的不再被召回
+            self.assertTrue(all(x["successor_recalled"] for x in post if x.get("successor")))   # 更正后的新内容接上
+            self.assertTrue(any(x.get("successor") for x in post))
+            self.assertEqual(sorted(e["op"] for e in st["post_edits"]), ["删除", "更正"])
             r = cl.post("/api/demo/memory/reset").json
             self.assertEqual(r["tasks"], 2)
             self.assertIsNone(cl.get("/api/demo/memory").json["run1"])

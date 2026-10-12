@@ -66,11 +66,17 @@ def status() -> dict:
         out["compare"] = (full.get("report") or {}).get("compare")
         # 现在再召回一次（不计使用次数），逐条确认失效的记忆不出现
         rec = mem.recall(topic=TOPIC, record_use=False, budget_tokens=4000)
-        dead = db.query("SELECT id, kind, content, status FROM memories WHERE (topic=? OR scope='user') "
-                        "AND status IN ('deleted','superseded','invalid','archived')", (TOPIC,))
+        dead = db.query("SELECT id, kind, content, status, superseded_by, updated_at FROM memories WHERE (topic=? OR scope='user') "
+                        "AND status IN ('deleted','superseded','invalid','archived') ORDER BY updated_at", (TOPIC,))
+        succ = {d["superseded_by"]: mem.get(d["superseded_by"]) for d in dead if d.get("superseded_by")}
         out["recall_now"] = {"lines": rec["text"].splitlines(),
                              "dead": [{"id": d["id"], "kind": d["kind"], "content": d["content"][:100],
-                                       "status": d["status"], "recalled": d["id"] in rec["used"]} for d in dead]}
+                                       "status": d["status"], "recalled": d["id"] in rec["used"],
+                                       "after_run2": d["updated_at"] > t2['updated_at'],
+                                       **({"successor": (succ.get(d["superseded_by"]) or {}).get("content", "")[:100],
+                                           "successor_recalled": d["superseded_by"] in rec["used"]}
+                                          if d.get("superseded_by") else {})} for d in dead]}
+        out["post_edits"] = _edits(t2['updated_at'], None)
     return out
 
 
@@ -91,17 +97,43 @@ def start_run(step: int) -> str:
 
 
 def apply_sample() -> dict:
-    """示例改动：删除“64K 以上检索准确率下降”这条事实，设置关注重点 / 排除内容 / 阅读时间三条长期偏好。"""
+    """示例改动：删除“64K 以上检索准确率下降”这条事实、更正另一条事实，设置关注重点 / 排除内容 / 阅读时间三条长期偏好。"""
     _need_replay()
     done = []
-    f = next((x for x in mem.list_memories(scope="topic", topic=TOPIC, kind="fact", status="alive")
-              if SAMPLE_DELETE in x["content"]), None)
+    facts = mem.list_memories(scope="topic", topic=TOPIC, kind="fact", status="alive")
+    f = next((x for x in facts if SAMPLE_DELETE in x["content"]), None)
     if f:
         r = mem.delete(f["id"], reason="演示：认为这条复现结论不可靠")
         done.append(f"删除事实「{f['content'][:30]}…」，连带失效 {len(r['invalidated'])} 条派生记忆")
+    g = next((x for x in facts if (not f or x["id"] != f["id"]) and "宣称支持" not in x["content"]), None)
+    if g:
+        new = g["content"].rstrip("。") + "（用户核对：这是社区复现的结果，不是官方数据）"
+        r = mem.correct(g["id"], new, reason="演示：用户核对后补充限定条件")
+        done.append(f"更正事实「{g['content'][:24]}…」→ 加上“社区复现、非官方数据”的限定")
     for k, v in SAMPLE_PREFS:
         mem.set_preference("default", k, v)
         done.append(f"设置长期偏好 {mem.PREF_TYPES[k]}：{v if not isinstance(v, list) else '、'.join(v)}")
+    return {"done": done}
+
+
+def post_sample() -> dict:
+    """两次任务之后再改：删除一条第二天才出现的新事实，更正一条事实；改完立刻再召回一次核对。"""
+    _need_replay()
+    t = _tasks()
+    if not (t.get(2) or {}).get("status") == "done":
+        raise ValueError("先完成第二次任务")
+    facts = mem.list_memories(scope="topic", topic=TOPIC, kind="fact", status="alive")
+    done = []
+    d = next((x for x in facts if "256K" in x["content"]), None) or (facts[-1] if facts else None)
+    if d:
+        mem.delete(d["id"], reason="演示：两次任务之后，用户认为这条新进展说法不可靠")
+        done.append(f"删除「{d['content'][:30]}…」")
+    c = next((x for x in facts if (not d or x["id"] != d["id"]) and "64K" in x["content"]), None) or \
+        next((x for x in facts if not d or x["id"] != d["id"]), None)
+    if c:
+        mem.correct(c["id"], c["content"].rstrip("。") + "（用户再次核对：以官方更正公告为准）",
+                    reason="演示：两次任务之后，用户再更正一次")
+        done.append(f"更正「{c['content'][:30]}…」")
     return {"done": done}
 
 

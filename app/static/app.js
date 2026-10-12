@@ -2568,11 +2568,17 @@ async function showMemoryDemo() {
       ${s1 ? `<div class="demo-facts">${d.facts.map((f) => `<div class="demo-fact"><span>${esc(f.content)} <span class="tag v-${f.verify}">${VERIFY[f.verify] || esc(f.verify || "")}</span></span>
         ${s2 ? "" : `<span class="nowrap"><button class="ghost sm" data-del="${f.id}">删除</button> <button class="ghost sm" data-fix="${f.id}">更正</button></span>`}</div>`).join("") || '<p class="small">没有事实</p>'}</div>
         <p class="small">长期偏好：${d.prefs.map((p) => esc(p.content)).join("；") || "无"}（在 <a href="#/memory">记忆页</a> 可以添加）</p>
-        ${s2 ? "" : `<button class="ghost" id="demo-sample">一键套用示例改动</button><small class="muted"> 删除“64K 以上准确率下降”这条事实；偏好：关注“大海捞针”、排除“踩坑”、阅读时间 10 分钟</small>`}
+        ${s2 ? "" : `<button class="ghost" id="demo-sample">一键套用示例改动</button><small class="muted"> 删除“64K 以上准确率下降”这条事实、更正另一条；偏好：关注“大海捞针”、排除“踩坑”、阅读时间 10 分钟</small>`}
         ${d.edits.length ? `<ul class="small demo-edits">${d.edits.map((e) => `<li><span class="tag">${esc(e.op)}</span> ${esc(e.content)}</li>`).join("")}</ul>` : ""}` : ""}`)}
     ${step(3, "第二次任务（第 2 天）", s1, `<p class="small">同一主题再跑一次。任务开始时会召回长期记忆，结束时和第一次对比。</p>
       <div class="row">${s2 ? "" : `<button id="demo-run2" ${running || !s1 ? "disabled" : ""}>开始第二次任务</button>`} ${run(d.run2)}</div>`)}
-    ${step(4, "核对结果", s2, s2 && d.compare ? compareCard(d.compare) + recallNow(d.recall_now) : `<p class="small">第二次任务完成后，这里显示“与上次相比”，并重新召回一次，逐条确认删除和更正过的记忆不再出现。</p>`)}`;
+    ${step(4, "核对结果", s2, s2 && d.compare ? compareCard(d.compare) + recallNow(d.recall_now) : `<p class="small">第二次任务完成后，这里显示“与上次相比”，并重新召回一次，逐条确认删除和更正过的记忆不再出现。</p>`)}
+    ${step(5, "两次任务之后，再更正或删除一条", s2, s2 ? `<p class="small">不用再跑任务：改完立刻重新召回一次（相当于下一次任务开始时），看失效的内容还会不会出现、更正后的新内容有没有接上。</p>
+      <div class="demo-facts">${d.facts.map((f) => `<div class="demo-fact"><span>${esc(f.content)} <span class="tag v-${f.verify}">${VERIFY[f.verify] || esc(f.verify || "")}</span></span>
+        <span class="nowrap"><button class="ghost sm" data-del="${f.id}">删除</button> <button class="ghost sm" data-fix="${f.id}">更正</button></span></div>`).join("") || '<p class="small">没有事实</p>'}</div>
+      ${(d.post_edits || []).length ? `<ul class="small demo-edits">${d.post_edits.map((e) => `<li><span class="tag">${esc(e.op)}</span> ${esc(e.content)}</li>`).join("")}</ul>`
+        : `<button class="ghost" id="demo-post">一键示例：删除“256K 新进展”、更正“64K”这条</button>`}
+      ${postCheck(d.recall_now)}` : `<p class="small">第二次任务完成后可用。</p>`)}`;
   const go = (path, body) => async (e) => {
     e.target.disabled = true;
     try { await api(`/api/demo/memory/${path}`, { method: "POST", body: body || {} }); } catch (err) { alertInline(e.target, err.message); }
@@ -2581,6 +2587,7 @@ async function showMemoryDemo() {
   $("#demo-run1") && ($("#demo-run1").onclick = go("run1"));
   $("#demo-run2") && ($("#demo-run2").onclick = go("run2"));
   $("#demo-sample") && ($("#demo-sample").onclick = go("sample"));
+  $("#demo-post") && ($("#demo-post").onclick = go("post_sample"));
   $("#demo-reset") && ($("#demo-reset").onclick = async (e) => {
     if (e.target.dataset.sure !== "1") { e.target.dataset.sure = "1"; e.target.textContent = "确认清空演示数据？"; e.target.classList.add("danger"); return; }
     await go("reset")(e);
@@ -2601,6 +2608,16 @@ async function showMemoryDemo() {
     };
   });
   if (running) me.timer = setTimeout(() => { if (current === me) showMemoryDemo(); }, 2000);
+}
+
+function postCheck(r) {
+  const rows = (r?.dead || []).filter((x) => x.after_run2);
+  if (!rows.length) return "";
+  const bad = rows.filter((x) => x.recalled || (x.successor && !x.successor_recalled));
+  return `<div class="card"><h3>改完立刻再召回：${bad.length ? `<span class="gap">✗ ${bad.length} 条不对</span>` : `<span class="ok">✓ 全部正确</span>`}</h3>
+    <table class="tbl"><tr><th>刚改的记忆</th><th>旧内容还被召回吗</th><th>更正后的新内容</th></tr>${rows.map((x) => `<tr><td class="small"><s>${esc(x.content)}</s> <span class="tag st-${x.status}">${MSTATUS[x.status] || esc(x.status)}</span></td>
+      <td>${x.recalled ? '<span class="gap">还在</span>' : '<span class="ok">不再出现</span>'}</td>
+      <td class="small">${x.successor ? `${esc(x.successor)} ${x.successor_recalled ? '<span class="ok">✓ 已被召回</span>' : '<span class="gap">✗ 没被召回</span>'}` : "—（删除，没有新内容）"}</td></tr>`).join("")}</table></div>`;
 }
 
 function alertInline(btn, msg) { btn.insertAdjacentHTML("afterend", ` <small class="gap">${esc(msg)}</small>`); }

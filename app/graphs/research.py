@@ -1501,7 +1501,10 @@ def _compare(ctx, docs: list[dict], mrep: dict) -> dict:
             except ValueError:
                 det = {}
         det = det if isinstance(det, dict) else {}
-        leaked = m["id"] in recalled_ids or (len(m["content"]) >= 8 and m["content"] in recalled_text)
+        text = recalled_text
+        if m.get("superseded_by"):        # 更正后的新内容可能包含旧内容（例如只加了限定条件）：先去掉新内容再查
+            text = text.replace((mem.get(m["superseded_by"]) or {}).get("content", "") or "\0", "")
+        leaked = m["id"] in recalled_ids or (len(m["content"]) >= 8 and m["content"] in text)
         invalidated.append({"id": m["id"], "kind": m["kind"], "content": m["content"][:120],
                             "event": INVALID_EVENTS.get(e["event"], e["event"]), "actor": e["actor"],
                             "reason": det.get("reason") or m.get("note"), "status": m["status"],

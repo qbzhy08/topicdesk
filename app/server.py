@@ -1420,6 +1420,8 @@ def memory_demo_action(action):
             return jsonify(id=tid)
         if action == "sample":
             return jsonify(memory_demo.apply_sample())
+        if action == "post_sample":
+            return jsonify(memory_demo.post_sample())
         if action == "reset":
             return jsonify(memory_demo.reset())
     except (RuntimeError, ValueError) as e:
