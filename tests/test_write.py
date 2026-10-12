@@ -800,3 +800,44 @@ class ExportTest(WriteBase):
         self.assertNotIn('src="/media/', h)
         self.assertIn('class="cite"', h)
         self.assertIn("attachment", r.headers["Content-Disposition"])
+
+
+class ReviewUploadTest(ReviewTest):
+    """改整节也能自己改；上传自己的图片：换图、在某段后加图、换封面。"""
+
+    def test_whole_section_text_and_uploads(self):
+        import io
+        from tests.fixtures import png
+        task, v1 = self.write("brief", no_llm=True)
+        aid = task["state"]["result"]["article_id"]
+        sec = next(s for s in self.art(aid)["version"]["review"]["sections"] if len(s["paras"]) >= 1)
+        new = "整节由用户重写的第一段。\n\n【分析】用户自己写的判断，不含数字。"
+        st, t = self.revise(aid, op="text", section=sec["id"], para="all", text=new)
+        self.assertEqual(st, "done", t["error"])
+        paras = next(s for s in self.art(aid)["version"]["review"]["sections"] if s["id"] == sec["id"])["paras"]
+        self.assertEqual(paras, ["整节由用户重写的第一段。", "【分析】用户自己写的判断，不含数字。"])
+        # 上传：不是图片 → 拒绝；是图片 → 保存
+        r = self.c.post("/api/uploads/image", data={"file": (io.BytesIO(b"not an image"), "a.txt")},
+                        content_type="multipart/form-data")
+        self.assertEqual(r.status_code, 400)
+        r = self.c.post("/api/uploads/image", data={"file": (io.BytesIO(png(1200, 700, (10, 120, 200))), "my.png")},
+                        content_type="multipart/form-data")
+        self.assertEqual(r.status_code, 201, r.get_json())
+        up = r.get_json()
+        self.assertTrue(up["local_path"].startswith("images/uploads/"))
+        # 在这一节第 1 段后加图（带图注）
+        n = len(self.art(aid)["version"]["review"]["figures"])
+        st, t = self.revise(aid, op="figure_add", section=sec["id"], para=0, upload=up["local_path"], caption="我自己做的对比图")
+        self.assertEqual(st, "done", t["error"])
+        d = self.art(aid)
+        self.assertEqual(len(d["version"]["review"]["figures"]), n + 1)
+        self.assertIn("*我自己做的对比图（图源：用户上传）*", d["version"]["markdown"])
+        # 用上传的图换掉第一张图、换封面
+        st, t = self.revise(aid, op="figure_swap", figure=0, upload=up["local_path"])
+        self.assertEqual(st, "done", t["error"])
+        st, t = self.revise(aid, op="cover_swap", upload=up["local_path"], caption="封面")
+        self.assertEqual(st, "done", t["error"])
+        self.assertIn(up["src"], self.art(aid)["version"]["markdown"].split("## ")[0])
+        # 伪造路径不接受
+        st, t = self.revise(aid, op="cover_swap", upload="../../etc/passwd")
+        self.assertEqual(st, "failed")

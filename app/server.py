@@ -885,6 +885,41 @@ def export_article(aid):
     return Response(data, mimetype=mime, headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(fname)}"})
 
 
+@app.post("/api/uploads/image")
+def upload_image():
+    """审阅时上传自己的图片：校验是图片、限制大小，统一保存在 data/images/uploads/（文件名是内容哈希）。
+    返回 local_path，换图/加图/换封面时作为 upload 参数传入。"""
+    import hashlib
+    import io
+    from PIL import Image, UnidentifiedImageError
+    from . import illustrate as ill
+    f = request.files.get("file")
+    if not f:
+        return jsonify(error="没有收到文件"), 400
+    data = f.read(15 * 1024 * 1024 + 1)
+    if len(data) > 15 * 1024 * 1024:
+        return jsonify(error="图片不能超过 15MB"), 400
+    try:
+        im = Image.open(io.BytesIO(data))
+        im.load()
+    except (UnidentifiedImageError, OSError) as e:
+        return jsonify(error=f"不是可识别的图片：{str(e)[:80]}"), 400
+    fmt = (im.format or "").upper()
+    ext = {"PNG": "png", "JPEG": "jpg", "WEBP": "webp", "GIF": "gif"}.get(fmt)
+    if not ext:                                     # HEIC/BMP/TIFF 等转成 PNG，浏览器和导出都能用
+        buf = io.BytesIO()
+        (im.convert("RGBA") if im.mode in ("P", "LA") else im.convert("RGB")).save(buf, "PNG")
+        data, ext = buf.getvalue(), "png"
+    name = hashlib.sha256(data).hexdigest()[:16] + "." + ext
+    d = config.IMAGE_DIR / "uploads"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_bytes(data)
+    local = f"images/uploads/{name}"
+    q = ill.quality(local, im.size[0], im.size[1], "")
+    return jsonify(local_path=local, src="/media/" + local, w=im.size[0], h=im.size[1],
+                   warn=(q.get("issues") or []) + (q.get("warn") or [])), 201
+
+
 @app.post("/api/articles/<aid>/revise")
 def revise_article(aid):
     """审阅修改：改标题 / 改写或直接改某段 / 删段 / 配图删除、替换、改图注 / 换封面。异步执行，返回任务 id。"""
@@ -896,7 +931,7 @@ def revise_article(aid):
     if b.get("op") not in OPS:
         return jsonify(error="不支持的修改"), 400
     keep = ("op", "base_version", "title", "section", "para", "instruction", "text", "figure", "caption", "image_id",
-            "remember", "remember_scope", "feedback")
+            "upload", "remember", "remember_scope", "feedback")
     params = {k: b[k] for k in keep if k in b}
     params["article_id"] = aid
     tid = create_task("revise", a["topic"], params=params, parent_task_id=a["task_id"],

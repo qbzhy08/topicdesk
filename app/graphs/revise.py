@@ -36,7 +36,7 @@ REWRITE_PROMPT = """你在修改文章《{title}》（按 Skill「{name}」写�
 3. 素材里没有的信息不要写，不要编造；用户要求补充的内容如果素材里没有，就如实写“目前公开资料未能确认……”。
 4. 只输出改好后的{what}本身（Markdown），不要解释改了什么，不要重复小标题。"""
 
-OPS = ("title", "rewrite", "text", "delete_para", "figure_remove", "figure_caption", "figure_swap", "cover_swap")
+OPS = ("title", "rewrite", "text", "delete_para", "figure_remove", "figure_caption", "figure_swap", "cover_swap", "figure_add")
 
 
 def _inv_refmap(meta) -> dict:
@@ -212,12 +212,21 @@ def edit(ctx):
             f["warn"] = [w for w in f["warn"] if "图注" not in w]
             after, summary = cap, f"修改图注：{cap[:30]}"
         else:
-            nf = _fig_from_image(int(p["image_id"]), f.get("section"), f.get("para", 0))
+            nf = _new_fig(p, st, f.get("section"), f.get("para", 0))
             nf["why"] = "用户在审阅时换上的图"
             figs[k] = nf
             after, summary = nf["caption"], f"替换配图为：{nf['caption'][:30]}"
+    elif op == "figure_add":
+        sec = _sec(st, p["section"])
+        idx = int(p.get("para") or 0)
+        if not 0 <= idx < len(ill.paragraphs(sec.get("md"))):
+            raise ValueError("没有这一段")
+        nf = _new_fig(p, st, sec["id"], idx)
+        nf["why"] = "用户在审阅时加的图"
+        st["figures"].append(nf)
+        after, summary = nf["caption"], f"在「{sec['heading']}」第 {idx + 1} 段后加图：{nf['caption'][:30]}"
     elif op == "cover_swap":
-        nf = _fig_from_image(int(p["image_id"]), None, 0)
+        nf = _new_fig(p, st, None, 0)
         before = (st.get("cover") or {}).get("caption", "")
         nf["why"] = "用户在审阅时换上的封面"
         st["cover"] = nf
@@ -226,6 +235,34 @@ def edit(ctx):
                   "instruction": (p.get("instruction") or "").strip()}
     ctx.observe(summary)
     return "recheck"
+
+
+def _new_fig(p, st, section, para) -> dict:
+    """换图/加图的新图：素材里的候选图（image_id）或用户上传的图（upload）。可以同时给图注。"""
+    if p.get("upload"):
+        nf = _fig_from_upload(p["upload"], section, para)
+    else:
+        nf = _fig_from_image(int(p["image_id"]), section, para)
+    cap = (p.get("caption") or "").strip()
+    if cap:
+        src_note = "（图源：用户上传）" if p.get("upload") and "图源" not in cap else ""
+        nf["caption"] = to_material_numbers(cap, {"refmap": st["base_meta_refmap"]}) + src_note
+        nf["alt"] = re.sub(r"[（(].*$", "", cap)[:30] or nf["alt"]
+        nf["warn"] = [w for w in nf.get("warn") or [] if "图注" not in w]
+    return nf
+
+
+def _fig_from_upload(local_path: str, section, para) -> dict:
+    """用户上传的图片（已由上传接口校验并保存在 images/uploads/ 下）。"""
+    if not re.match(r"^images/uploads/[0-9a-f]{16}\.(png|jpg|webp|gif)$", local_path or ""):
+        raise ValueError("上传的图片路径不对，请重新上传")
+    q = ill.quality(local_path, None, None, "")
+    if q.get("sharpness") is None and q.get("issues"):
+        raise ValueError("上传的图片打不开：" + "；".join(q["issues"]))
+    return {"kind": "upload", "src": "/media/" + local_path, "section": section, "para": para,
+            "w": q.get("w"), "h": q.get("h"), "sharpness": q.get("sharpness"),
+            "warn": (q.get("warn") or []) + [f"质检提示：{x}" for x in q.get("issues") or []] + ["原文没有图注，请确认图片内容与这段一致"],
+            "info": True, "caption": "用户上传的图片（图源：用户上传）", "alt": "用户上传的图片"}
 
 
 def _fig_from_image(image_id: int, section, para) -> dict:

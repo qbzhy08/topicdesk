@@ -1319,7 +1319,7 @@ async function showArticle(id, ver) {
       <button type="button" class="ghost" data-rv-diff="${v.version}:${a.current_version}">和最新版对比</button>
       <a href="#/article/${id}">回到最新版</a></div>` : ""}
     <div class="rv-bar">
-      <span><b>审阅修改</b> 鼠标移到正文任意一段，点 <i>✎ 改这段</i>；移到配图上可换图、改图注、删除。每次修改都会重新核对出处并存成新版本。</span>
+      <span><b>审阅修改</b> 鼠标移到正文任意一段，点 <i>✎ 改这段</i>（也能在段后加图）；小标题上可 <i>✎ 改整节</i>；移到配图上可换图（素材里选或上传自己的图）、改图注、删除。每次修改都会重新核对出处并存成新版本。</span>
       <span class="rv-bar-act"><a class="btn ghost" href="/api/articles/${id}/export?format=html&v=${v.version}">导出手机 HTML</a>
         <a class="btn ghost" href="/api/articles/${id}/export?format=md&v=${v.version}">导出 Markdown</a>
         <button type="button" class="ghost" id="rv-angle">换选题角度重写</button>
@@ -1791,7 +1791,7 @@ const QUICK_ASKS = ["更口语一点", "更简短，只留要点", "补上具体
 
 function versionsPane(d, v) {
   const OPN = { title: "改标题", rewrite: "按要求改写", text: "直接改文字", delete_para: "删段", figure_remove: "删图",
-    figure_caption: "改图注", figure_swap: "换图", cover_swap: "换封面", restore: "恢复旧版" };
+    figure_caption: "改图注", figure_swap: "换图", cover_swap: "换封面", figure_add: "加图", restore: "恢复旧版" };
   const revs = v.review?.revisions || [];
   const pct = (x) => x == null ? "—" : Math.round(x * 100) + "%";
   return `<p class="small muted">每次修改（包括换角度重写、恢复旧版）都存成新版本，旧版本不会丢。勾两个版本可以对比。</p>
@@ -1902,7 +1902,7 @@ function setupReview(el, d, id, me) {
     const box = document.createElement("div");
     box.className = "rv-editor card";
     box.innerHTML = `<div class="rv-ed-head"><b>${idx == null ? `改整节「${esc(sec.heading)}」` : `改「${esc(sec.heading)}」第 ${idx + 1} 段`}</b>
-        <span class="rv-tabs"><button type="button" class="on" data-m="ai">让 AI 按要求改</button>${idx == null ? "" : `<button type="button" data-m="me">自己改</button>`}</span>
+        <span class="rv-tabs"><button type="button" class="on" data-m="ai">让 AI 按要求改</button><button type="button" data-m="me">自己改</button></span>
         <button type="button" class="ghost rv-x" title="关闭">×</button></div>
       <div data-pane="ai">
         <textarea rows="2" placeholder="想怎么改？例如：更口语一点；补上和去年的对比；第二句太绝对了"></textarea>
@@ -1911,10 +1911,10 @@ function setupReview(el, d, id, me) {
           <select><option value="skill">只用于「${esc(v.meta?.skill?.name || "这种写法")}」</option><option value="all">所有写作</option></select></label>
         <p class="small muted">只用这篇文章的素材改写；改完会重新核对，如果改出了素材里没有的数字，会自动再改一轮。</p>
       </div>
-      ${idx == null ? "" : `<div data-pane="me" hidden><textarea rows="5">${esc(cur)}</textarea>
-        <p class="small muted">句末的 [n] 是出处编号（对应文末参考资料），改完会重新核对。</p></div>`}
+      <div data-pane="me" hidden><textarea rows="${idx == null ? 14 : 5}">${esc(cur)}</textarea>
+        <p class="small muted">句末的 [n] 是出处编号（对应文末参考资料），改完会重新核对。${idx == null ? "段落之间空一行；以“【分析】”开头的段落是判断。" : ""}</p></div>
       <div class="row rv-ed-act"><button type="button" class="rv-go">提交修改</button>
-        ${idx == null ? "" : `<button type="button" class="ghost danger rv-del">删除这段</button>`}</div>`;
+        ${idx == null ? "" : `<button type="button" class="ghost rv-addimg">在这段后加图</button><button type="button" class="ghost danger rv-del">删除这段</button>`}</div>`;
     anchor.after(box);
     let mode = "ai";
     $$(".rv-tabs button", box).forEach((t) => t.onclick = () => {
@@ -1934,9 +1934,11 @@ function setupReview(el, d, id, me) {
       } else {
         const t = $('[data-pane="me"] textarea', box).value.trim();
         if (!t || t === cur) return;
-        run({ op: "text", section: sid, para: idx, text: t }, "保存修改");
+        run({ op: "text", section: sid, para: idx ?? "all", text: t }, "保存修改");
       }
     };
+    const addImg = $(".rv-addimg", box);
+    if (addImg) addImg.onclick = () => pickImage("在这段后加图", (pick) => run({ op: "figure_add", section: sid, para: idx, ...pick }, "加图"), true);
     const del = $(".rv-del", box);
     if (del) del.onclick = () => {
       if (del.dataset.sure) return run({ op: "delete_para", section: sid, para: idx }, "删除段落");
@@ -1973,27 +1975,62 @@ function setupReview(el, d, id, me) {
         fm.onclick = (ev) => ev.stopPropagation();
         fm.onsubmit = (ev) => { ev.preventDefault(); run({ op: "figure_caption", figure: f.k, caption: $("input", fm).value.trim() }, "改图注"); };
       } else if (a === "swap" || a === "cover") {
-        pickImage(a === "cover" ? "换封面" : "换一张图", (imgId) => run(a === "cover"
-          ? { op: "cover_swap", image_id: imgId } : { op: "figure_swap", figure: f.k, image_id: imgId }, a === "cover" ? "换封面" : "换图"));
+        pickImage(a === "cover" ? "换封面" : "换一张图", (pick) => run(a === "cover"
+          ? { op: "cover_swap", ...pick } : { op: "figure_swap", figure: f.k, ...pick }, a === "cover" ? "换封面" : "换图"));
       }
     };
   });
 
-  async function pickImage(title, done) {
+  async function pickImage(title, done, needCaption = false) {
     const box = document.createElement("div");
     box.className = "rv-modal";
-    box.innerHTML = `<div class="card rv-modal-in"><div class="rv-ed-head"><b>${title}</b><button type="button" class="ghost rv-x">×</button></div>
-      <p class="small muted">候选：这篇文章素材里质检合格、还没用上的原图（信息图排前面）。</p><div class="rv-grid"><p class="small">加载中…</p></div></div>`;
+    box.innerHTML = `<div class="card rv-modal-in"><div class="rv-ed-head"><b>${title}</b>
+        <span class="rv-tabs"><button type="button" class="on" data-m="cand">从素材里选</button><button type="button" data-m="up">上传图片</button></span>
+        <button type="button" class="ghost rv-x">×</button></div>
+      <label class="small">图注（可空；${needCaption ? "建议写清图里是什么、数据出自哪里" : "空着就用原图注"}）<input class="rv-pick-cap" placeholder="例如：2025 年各家模型的上下文长度对比（来源：……）"></label>
+      <div data-pane="cand"><p class="small muted">候选：这篇文章素材里质检合格、还没用上的原图（信息图排前面）。</p><div class="rv-grid"><p class="small">加载中…</p></div></div>
+      <div data-pane="up" hidden>
+        <label class="rv-drop"><input type="file" accept="image/*" hidden><span>点这里选图片，或把图片拖进来<br><small class="muted">PNG / JPG / WebP / GIF，其他格式自动转成 PNG；不超过 15MB</small></span></label>
+        <div class="rv-up-pv"></div>
+        <div class="row"><button type="button" class="rv-up-go" disabled>用这张图</button><small class="muted rv-up-msg"></small></div>
+      </div></div>`;
     document.body.append(box);
     const close = () => box.remove();
+    const cap = () => $(".rv-pick-cap", box).value.trim();
     box.onclick = (e) => { if (e.target === box) close(); };
     $(".rv-x", box).onclick = close;
+    $$(".rv-tabs button", box).forEach((t) => t.onclick = () => {
+      $$(".rv-tabs button", box).forEach((x) => x.classList.toggle("on", x === t));
+      $$("[data-pane]", box).forEach((x) => x.hidden = x.dataset.pane !== t.dataset.m);
+    });
+    // 上传：选文件或拖进来 → 先上传、看预览和质检提示 → 确认后使用
+    let uploaded = null;
+    const fileIn = $("input[type=file]", box), drop = $(".rv-drop", box), msg = $(".rv-up-msg", box), go = $(".rv-up-go", box);
+    const send = async (file) => {
+      if (!file) return;
+      msg.textContent = "上传中…"; go.disabled = true;
+      const fd = new FormData();
+      fd.append("file", file);
+      try {
+        const r = await fetch("/api/uploads/image", { method: "POST", body: fd });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || r.statusText);
+        uploaded = d;
+        $(".rv-up-pv", box).innerHTML = `<img src="${esc(d.src)}" alt=""><p class="small">${d.w}×${d.h}${d.warn.length ? ` · <span class="gap">${d.warn.map(esc).join("；")}</span>` : " · 质检通过"}</p>`;
+        msg.textContent = ""; go.disabled = false;
+      } catch (err) { msg.textContent = err.message; }
+    };
+    fileIn.onchange = () => send(fileIn.files[0]);
+    drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
+    drop.ondragleave = () => drop.classList.remove("over");
+    drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); send(e.dataTransfer.files[0]); };
+    go.onclick = () => { if (uploaded) { close(); done({ upload: uploaded.local_path, caption: cap() }); } };
     const list = await api(`/api/articles/${id}/images?v=${v.version}`).catch(() => []);
     $(".rv-grid", box).innerHTML = list.length ? list.map((c) => `<button type="button" class="rv-cand" data-id="${c.image_id}">
         <img src="${esc(c.src)}" alt="" loading="lazy"><span class="tag ${c.info ? "nv-new" : "rel-lo"}">${c.info ? "信息图" : "照片"}</span>
         <small>${esc(c.caption || "（无图注）")}<br><span class="muted">${c.w}×${c.h} · ${esc(c.doc_title.slice(0, 30))}</span></small></button>`).join("")
-      : `<p class="small muted">素材里没有其他合格的图片可换。可以删除这张，或在检索任务里补充资料后重写。</p>`;
-    $$(".rv-cand", box).forEach((b) => b.onclick = () => { close(); done(+b.dataset.id); });
+      : `<p class="small muted">素材里没有其他合格的图片。可以切到“上传图片”用自己的图。</p>`;
+    $$(".rv-cand", box).forEach((b) => b.onclick = () => { close(); done({ image_id: +b.dataset.id, caption: cap() }); });
   }
 
   // 换选题角度：重列提纲、重写全文（写作任务），存为同一篇文章的新版本

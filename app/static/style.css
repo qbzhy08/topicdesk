@@ -778,3 +778,9 @@ button.linkish { background: none; color: var(--info); padding: 0; font-size: 12
 @media (max-width: 900px) { .bl-pair { grid-template-columns: 1fr; } }
 .ex-open { border-left: 3px solid var(--line); padding-left: 10px; margin: 6px 0; }
 .ex-tbl td.small { white-space: normal; text-align: left; min-width: 220px; }
+.rv-drop { display: block !important; border: 2px dashed var(--line); border-radius: 8px; padding: 26px 12px; text-align: center; cursor: pointer;
+  font: 14px var(--sans); color: var(--ink); margin: 8px 0; }
+.rv-drop.over, .rv-drop:hover { border-color: var(--accent); }
+.rv-up-pv img { max-width: 100%; max-height: 300px; display: block; margin: 0 auto; background: #fff; }
+.rv-pick-cap { margin-bottom: 4px; }
+.rv-drop input[type=file] { display: none !important; }
