@@ -1146,8 +1146,8 @@ def experiment_detect(eid):
     """用本地检测器（重新）测这次实验的全部完整正文，结果写入分数表。"""
     from . import aigc
     t = _exp_or_404(eid)
-    if not aigc.status()["local_ready"]:
-        return jsonify(error="本地检测器没有安装：在终端运行 pip install torch transformers 后重启"), 400
+    if not aigc.status()["deps"]:
+        return jsonify(error="本地检测器没有安装：双击 topicdesk 文件夹里的“安装AIGC检测器.command”，装好后重启主题编辑台"), 400
     n = 0
     try:
         for r in (t["state"] or {}).get("runs") or []:
@@ -1157,8 +1157,21 @@ def experiment_detect(eid):
                                               note="本地检测", created_at=db.now()))
                 n += 1
     except Exception as e:  # noqa: BLE001
-        return jsonify(error=f"检测失败：{str(e)[:200]}"), 500
+        import traceback
+        traceback.print_exc()
+        return jsonify(error=f"检测失败（{type(e).__name__}）：{str(e)[:300]}"), 500
     return jsonify(detected=n)
+
+
+@app.delete("/api/experiments/<eid>/blind")
+def experiment_rate_clear(eid):
+    """清除某位读者的全部盲评（比如试填的数据）。"""
+    _exp_or_404(eid)
+    rater = (request.args.get("rater") or "").strip()
+    if not rater:
+        return jsonify(error="要指定读者"), 400
+    n = db.execute("DELETE FROM eval_ratings WHERE experiment_id=? AND rater=?", (eid, rater))
+    return jsonify(deleted=n)
 
 
 @app.get("/api/aigc")

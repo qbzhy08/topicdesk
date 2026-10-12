@@ -15,28 +15,17 @@ if ! $PY -m pip install -q torch transformers; then
 fi
 echo "== 第 2 步：下载检测模型（约 400MB）并试运行"
 $PY - <<'PYEOF'
-import os, sys, json
-from pathlib import Path
+import sys
 sys.path.insert(0, ".")
 from app import aigc
-s = aigc.settings()
-def try_load(endpoint):
-    if endpoint:
-        os.environ["HF_ENDPOINT"] = endpoint
-    aigc._PIPE.clear()
-    return aigc.detect("这是一段用来测试检测器能否正常运行的中文文字。它没有特别的意义，只是为了确认模型已经下载并且可以使用。")
-for ep in ([s.get("hf_endpoint")] if s.get("hf_endpoint") else []) + ["", "https://hf-mirror.com"]:
-    try:
-        print("尝试下载地址：", ep or "huggingface.co（官方）")
-        r = try_load(ep)
-        if ep:
-            aigc.save_settings(hf_endpoint=ep)
-        print("成功：测试文本的 AI 概率 =", r["ai_prob"])
-        sys.exit(0)
-    except Exception as e:
-        print("这个地址不行：", str(e)[:200])
-print("模型下载失败。可以换个网络再试，或者用外部检测器手动录入分数。")
-sys.exit(1)
+try:
+    print("模型保存位置：", aigc.download())
+    r = aigc.detect("这是一段用来测试检测器能否正常运行的中文文字。它没有特别的意义，只是为了确认模型已经下载并且可以使用。")
+    print("成功：测试文本的 AI 概率 =", r["ai_prob"])
+except Exception as e:
+    print("失败：", e)
+    print("可以换个网络（开/关代理、手机热点）再运行一次；仍不行请把这个窗口截图发给我。")
+    sys.exit(1)
 PYEOF
 if [ $? -eq 0 ]; then
   echo ""

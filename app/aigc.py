@@ -40,29 +40,87 @@ def save_settings(model: str | None = None, hf_endpoint: str | None = None) -> d
     return s
 
 
+MIRRORS = ["", "https://hf-mirror.com"]          # 空 = 官方 huggingface.co
+
+
+def model_dir() -> "Path":
+    from pathlib import Path
+    m = settings().get("model") or HC3_MODEL
+    if Path(m).expanduser().is_dir():                 # 也可以填本地模型文件夹
+        return Path(m).expanduser()
+    return config.DATA_DIR / "models" / m.replace("/", "__")
+
+
+def _model_ready() -> bool:
+    d = model_dir()
+    if not d.is_dir() or not (d / "config.json").exists():
+        return False
+    return any(d.glob("*.bin")) or any(d.glob("*.safetensors"))
+
+
 def status() -> dict:
-    """本地检测器是否可用（不加载模型，只检查依赖）。"""
+    """本地检测器是否可用：依赖装了没有、模型下载了没有（不加载模型）。"""
     try:
         import importlib.util
-        ok = bool(importlib.util.find_spec("torch") and importlib.util.find_spec("transformers"))
+        deps = bool(importlib.util.find_spec("torch") and importlib.util.find_spec("transformers"))
     except (ImportError, ValueError):
-        ok = False
+        deps = False
     s = settings()
-    return {"local_ready": ok, "model": s.get("model") or HC3_MODEL, "hf_endpoint": s.get("hf_endpoint") or "",
-            "loaded": bool(_PIPE), "install": "pip install torch transformers"}
+    return {"local_ready": deps, "deps": deps, "model_ready": _model_ready(), "model": s.get("model") or HC3_MODEL,
+            "model_dir": str(model_dir()), "hf_endpoint": s.get("hf_endpoint") or "", "loaded": bool(_PIPE),
+            "install": "双击 topicdesk 文件夹里的“安装AIGC检测器.command”", "last_error": s.get("last_error")}
+
+
+def download(log=print) -> str:
+    """把模型下载到 data/models/ 下。依次试：设置里填的地址、官方、国内镜像。
+    地址通过 endpoint 参数直接传给下载函数（不依赖环境变量，换地址重试也有效）。"""
+    from huggingface_hub import snapshot_download
+    m = settings().get("model") or HC3_MODEL
+    d = model_dir()
+    if _model_ready():
+        return str(d)
+    tried, last = [], None
+    for ep in dict.fromkeys([settings().get("hf_endpoint") or ""] + MIRRORS):
+        tried.append(ep or "huggingface.co")
+        try:
+            log(f"下载模型 {m}，地址：{ep or 'huggingface.co（官方）'}")
+            snapshot_download(repo_id=m, local_dir=str(d), endpoint=ep or None,
+                              allow_patterns=["*.json", "*.txt", "*.bin", "*.safetensors", "*.model"])
+            if _model_ready():
+                if ep:
+                    save_settings(hf_endpoint=ep)
+                return str(d)
+        except Exception as e:  # noqa: BLE001  网络不通、被墙等：换下一个地址
+            last = e
+            log(f"  这个地址不行：{str(e)[:160]}")
+    raise RuntimeError(f"模型下载失败（试过 {', '.join(tried)}）：{str(last)[:200]}")
 
 
 def _pipe():
-    s = settings()
-    model = s.get("model") or HC3_MODEL
-    if model in _PIPE:
-        return _PIPE[model]
-    if s.get("hf_endpoint"):
-        os.environ["HF_ENDPOINT"] = s["hf_endpoint"]
-    from transformers import pipeline      # 延迟导入：没装也不影响其他功能
+    """加载本地模型（不用 transformers.pipeline，直接用分词器 + 分类模型，兼容 transformers 4.x / 5.x）。"""
+    d = str(model_dir())
+    if d in _PIPE:
+        return _PIPE[d]
+    if not _model_ready():
+        download()
+    import torch
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(d)
+    model = AutoModelForSequenceClassification.from_pretrained(d)
+    model.eval()
+    labels = {int(k): v for k, v in (model.config.id2label or {}).items()}
+
+    def run(parts):
+        out = []
+        with torch.no_grad():
+            for i in range(0, len(parts), 8):
+                enc = tok(parts[i:i + 8], truncation=True, max_length=512, padding=True, return_tensors="pt")
+                probs = torch.softmax(model(**enc).logits, dim=-1).tolist()
+                out += [[{"label": labels.get(j, f"LABEL_{j}"), "score": p} for j, p in enumerate(row)] for row in probs]
+        return out
     _PIPE.clear()
-    _PIPE[model] = pipeline("text-classification", model=model, tokenizer=model, truncation=True, max_length=512, top_k=None)
-    return _PIPE[model]
+    _PIPE[d] = run
+    return run
 
 
 def chunks(text: str, size: int = 500) -> list[str]:
@@ -101,5 +159,5 @@ def detect(text: str) -> dict:
         rows.append({"chars": len(part), "ai_prob": round(p_ai, 4)})
         tot += len(part)
         acc += p_ai * len(part)
-    return {"detector": f"hc3:{settings().get('model') or HC3_MODEL}", "ai_prob": round(acc / tot, 4) if tot else None,
+    return {"detector": f"本地 HC3 检测器（{(settings().get('model') or HC3_MODEL).split('/')[-1]}）", "ai_prob": round(acc / tot, 4) if tot else None,
             "chunks": rows}

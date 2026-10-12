@@ -772,7 +772,7 @@ class AigcTest(WriteBase):
             aigc._pipe = old
         self.assertEqual(len(calls[0]), 2)                     # 按 ≤500 字切块
         self.assertAlmostEqual(r["ai_prob"], 0.45, places=2)   # 按字数加权
-        self.assertTrue(r["detector"].startswith("hc3:"))
+        self.assertTrue(r["detector"].startswith("本地 HC3 检测器"))
         self.assertIn("local_ready", aigc.status())
 
 
@@ -841,3 +841,31 @@ class ReviewUploadTest(ReviewTest):
         # 伪造路径不接受
         st, t = self.revise(aid, op="cover_swap", upload="../../etc/passwd")
         self.assertEqual(st, "failed")
+
+
+class AigcDownloadTest(WriteBase):
+    def test_download_falls_back_to_mirror(self):
+        """官方地址不通时换国内镜像；地址作为参数传入（不依赖环境变量）；成功的地址记住。"""
+        import sys
+        import types
+        from app import aigc
+        calls = []
+
+        def fake_snapshot(repo_id, local_dir, endpoint=None, allow_patterns=None):
+            calls.append(endpoint)
+            if endpoint is None:
+                raise OSError("connection timed out")
+            p = Path(local_dir)
+            p.mkdir(parents=True, exist_ok=True)
+            (p / "config.json").write_text("{}")
+            (p / "pytorch_model.bin").write_bytes(b"x")
+        sys.modules["huggingface_hub"] = types.SimpleNamespace(snapshot_download=fake_snapshot)
+        try:
+            self.assertFalse(aigc.status()["model_ready"])
+            d = aigc.download(log=lambda *_: None)
+        finally:
+            del sys.modules["huggingface_hub"]
+        self.assertEqual(calls, [None, "https://hf-mirror.com"])
+        self.assertTrue(aigc.status()["model_ready"])
+        self.assertEqual(aigc.settings()["hf_endpoint"], "https://hf-mirror.com")
+        self.assertIn("models", d)

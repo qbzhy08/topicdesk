@@ -1683,7 +1683,7 @@ async function showExperiment(id) {
   const aigcBox = () => `<div class="card"><h3>AIGC 检测（同一检测器、同一份完整正文）</h3>
     <p class="small">“完整正文”= 文章去掉配图、图注、阅读说明和参考资料列表后的全部文字（标题、小标题、出处编号保留），每篇用同样的处理。
       检测器只给“像不像 AI 写的”的统计判断，所以下面总和事实保真、表达自然、理解成本放在一起看。</p>
-    ${r.aigc_error ? `<p class="gap small">${esc(r.aigc_error)}</p>` : r.aigc_note ? `<p class="small muted">${esc(r.aigc_note)}</p>` : ""}
+    <p class="small" id="ex-ai-status">检查本地检测器…</p>
     <div class="row"><button type="button" class="ghost" id="ex-detect">用本地检测器检测全部</button><small class="muted" id="ex-det-msg"></small></div>
     <details class="small"><summary>录入外部检测器的分数</summary>
       <p>在同一个外部检测器里，逐篇粘贴“完整正文”（点“复制”），把它给出的 AI 生成概率（0-100）填进来。所有文章必须用同一个检测器、同一个检测模式。</p>
@@ -1700,7 +1700,8 @@ async function showExperiment(id) {
     return `<div class="card"><h3>读者盲评（初稿 vs 优化稿）</h3>
       <p class="small">读者看到的是“甲/乙”两篇完整正文（去掉出处编号），不知道哪篇是初稿；每组的甲乙随机分配。把 <a href="#/blind/${id}">盲评页</a> 给读者，在这台电脑上打开即可（每人填一个化名）。</p>
       <p class="small">已收到 <b>${h.ratings || 0}</b> 份评分，来自 <b>${h.raters || 0}</b> 位读者（共 ${r.blind_pairs} 组）。
-        ${(h.per_rater || []).map((x) => `<span class="tag ${x.done < x.total ? "rel-lo" : "nv-new"}">${esc(x.rater)} ${x.done}/${x.total}</span>`).join(" ")}
+        ${(h.per_rater || []).map((x) => `<span class="tag ${x.done < x.total ? "rel-lo" : "nv-new"}">${esc(x.rater)} ${x.done}/${x.total}
+          <button type="button" class="linkish" data-clear-rater="${esc(x.rater)}" title="删除这位读者的全部评分（例如试填的）">删除</button></span>`).join(" ")}
         ${(h.per_rater || []).some((x) => x.done < x.total) ? `<br><span class="muted">没评完的读者用<b>同一个称呼</b>再打开盲评页，就会接着评剩下的组。</span>` : ""}</p>
       ${h.ratings ? `<table class="tbl"><tr><th>维度</th><th>选优化稿</th><th>选初稿</th><th>相当</th></tr>${Object.entries(DN).map(([k, n]) =>
         `<tr><td>${n}</td><td>${h.tally[k].optimized}</td><td>${h.tally[k].draft}</td><td>${h.tally[k].tie}</td></tr>`).join("")}
@@ -1764,6 +1765,18 @@ async function showExperiment(id) {
     msg.textContent = `已保存 ${ins.length} 个分数`;
     showExperiment(id);
   };
+  api("/api/aigc").then((a) => {           // 本地检测器的当前状态（不是实验运行那一刻的）
+    const box = $("#ex-ai-status", el);
+    if (!box) return;
+    box.innerHTML = !a.deps ? `<span class="gap">本地检测器还没安装</span>：双击 topicdesk 文件夹里的“安装AIGC检测器.command”，装好后重启主题编辑台。`
+      : a.model_ready ? `<span class="ok">✓ 本地检测器已就绪</span>（${esc(a.model)}）。点下面的按钮检测这次实验的全部文章。`
+      : `已安装依赖，<b>模型还没下载</b>：点下面的按钮会先下载模型（约 400MB，国内网络会自动改用镜像），再检测。也可以先双击“安装AIGC检测器.command”下载。`;
+  }).catch(() => {});
+  $$("[data-clear-rater]", el).forEach((b) => b.onclick = async () => {
+    if (!b.dataset.sure) { b.dataset.sure = "1"; b.textContent = "确定删除？"; return; }
+    await api(`/api/experiments/${id}/blind?rater=${encodeURIComponent(b.dataset.clearRater)}`, { method: "DELETE" });
+    showExperiment(id);
+  });
   const dt = $("#ex-detect", el);
   if (dt) dt.onclick = async () => {
     dt.disabled = true; $("#ex-det-msg").textContent = "检测中（首次要下载模型，可能需要几分钟）…";
