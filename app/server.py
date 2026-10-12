@@ -70,7 +70,7 @@ def create():
 @app.get("/api/tasks")
 def list_tasks():
     rows = db.query("SELECT id, graph, topic, status, current_node, usage, error, created_at, parent_task_id, "
-                    "json_extract(params, '$.skill') AS skill, "
+                    "json_extract(params, '$.skill') AS skill, json_extract(params, '$.research_task') AS research_task, "
                     "updated_at FROM tasks WHERE graph NOT IN ('revise') AND json_extract(params, '$.experiment') IS NULL "
                     "ORDER BY created_at DESC LIMIT 100")   # 审阅修改记在文章版本里
     return jsonify(rows)

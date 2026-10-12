@@ -858,3 +858,18 @@ button.linkish { background: none; color: var(--info); padding: 0; font-size: 12
 .trust-think p { font-size: 14.5px; line-height: 1.8; margin: 8px 0; }
 .flow-trust { align-self: center; margin-left: auto; font: 13px var(--sans); color: var(--accent); white-space: nowrap; }
 @media (max-width: 900px) { .trust-grid { grid-template-columns: 1fr; } .flow-trust { margin-left: 0; } }
+
+/* 左栏收纳 */
+.rail-tools { display: flex; gap: 6px; align-items: center; margin: 0 0 6px; }
+.rail-tools input { flex: 1; min-width: 0; padding: 4px 8px; font-size: 12px; }
+.rail-tools .linkish { background: none; border: 0; padding: 2px 4px; font-size: 12px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.rail-tools .linkish:hover { color: var(--accent); }
+.task-list li.has-kids { position: relative; }
+.task-list li.has-kids a { padding-right: 46px; }
+.task-list .rail-fold { position: absolute; right: 6px; top: 8px; background: none; border: 1px solid var(--line, #ddd); border-radius: 10px;
+  padding: 0 7px; font-size: 11px; line-height: 18px; color: var(--muted); cursor: pointer; min-width: 0; }
+.task-list .rail-fold:hover, .task-list .rail-fold.on { color: var(--accent); border-color: var(--accent); }
+.task-list li.rail-sub { margin: 14px 0 4px; padding-left: 0; }
+.task-list .rail-grp { background: none; border: 0; padding: 2px 4px; font: 600 12px var(--sans); color: var(--muted); cursor: pointer; }
+.task-list .rail-grp span { font-weight: 400; }
+.task-list .rail-grp:hover { color: var(--accent); }

@@ -108,6 +108,7 @@ def run(base, out_dir, n):
     out = Path(out_dir)
     (out / "shots").mkdir(parents=True, exist_ok=True)
     plist = pages(base, n)
+    print(f"共 {len(plist)} 个页面 × {len(VIEWPORTS)} 种宽度", flush=True)
     results = []
     with sync_playwright() as p:
         b = p.chromium.launch()
@@ -125,6 +126,7 @@ def run(base, out_dir, n):
                 if not hsh:
                     results.append({"name": name, "view": vname, "issues": [name], "shot": None})
                     continue
+                print(f"  [{vname} {i + 1}/{len(plist)}] {name}", flush=True)
                 errs.clear()
                 bad_req.clear()
                 t0 = time.time()

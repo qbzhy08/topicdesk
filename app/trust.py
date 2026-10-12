@@ -28,7 +28,9 @@ def reliability(task_id: str, items: list[dict], facts: list[dict]) -> dict:
     primary = sum(1 for d in docs if (d["meta"] or {}).get("primary"))
     sources = len({d["source_id"] for d in docs})
     events = {}
-    for it in items:
+    # 只看和主题相关的资料：被判“相关度低”的不进事件统计，也不拿来举例
+    rel_items = [it for it in items if "相关度" not in (it.get("excluded") or "")]
+    for it in rel_items:
         e = it["event_id"] or it["id"]
         x = events.setdefault(e, {"docs": 0, "independent": 0, "title": it["title"], "disputed": False, "primary": False})
         x["docs"] += 1
@@ -43,6 +45,7 @@ def reliability(task_id: str, items: list[dict], facts: list[dict]) -> dict:
         vc[f.get("verify") or "unverified"] = vc.get(f.get("verify") or "unverified", 0) + 1
     return {"docs": total, "duplicates": dups, "sources": sources, "primary": primary, "primary_rate": _pct(primary, total),
             "events": len(events), "events_multi": len(multi), "events_single": len(single),
+            "relevant": len(rel_items), "off_topic": len(items) - len(rel_items),
             "top_reprint": top_reprint, "facts": vc,
             "examples_single": [e["title"][:50] for e in single[:3]]}
 
@@ -93,12 +96,13 @@ def understanding(research_task: str) -> dict:
                     "disputes_known": len(disputes), "disputes_kept": len(flagged),
                     "has_uncertain_section": any(re.search(r"不确定|争议|问号|没有答案|小心|局限|证据", h or "") for h in heads),
                     "analysis_marked": m["gain"]["analysis_paras"]})
-    exps = db.query("SELECT id, topic, status, state FROM tasks WHERE graph='experiment' ORDER BY created_at DESC")
+    exps = db.query("SELECT id, topic, status, state, created_at FROM tasks WHERE graph='experiment' ORDER BY created_at DESC")
     rel = []
     for x in exps:
         st = x["state"] or {}
         if any(r.get("research_task") == research_task for r in st.get("runs") or []):
-            rel.append({"id": x["id"], "topic": x["topic"], "status": x["status"]})
+            rel.append({"id": x["id"], "topic": x["topic"], "status": x["status"], "created_at": x["created_at"],
+                        "runs": len(st.get("runs") or [])})
     return {"articles": out, "experiments": rel[:5]}
 
 

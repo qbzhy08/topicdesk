@@ -39,6 +39,7 @@ async function init() {
   setupTranslate();
   $("#import-form").addEventListener("submit", submitImport);
   setupHistNav();
+  setupRail();
   window.addEventListener("hashchange", route);
   route();
   refreshList();
@@ -143,28 +144,96 @@ async function submitImport(e) {
 }
 
 function refreshListActive() {        // 切页时左栏的高亮立刻跟着变，不等下一次刷新列表
+  if (railRows) return renderRail();  // 重画一次：打开的任务在收起的组里时，那一组自动展开
   const h = location.hash;
   $$("#task-list a").forEach((a) => a.classList.toggle("active", h === a.getAttribute("href") || h.startsWith(a.getAttribute("href") + "?")));
 }
 
+// 左栏收纳：每个检索任务下的写作可以收起/展开，评测实验整组可以收起；状态记在本机，刷新列表不会丢
+let railQuery = "";
+let railRows = null;
+let railLastActive = null;
+const railOpen = () => store.get("railOpen") || {};
+function setRailOpen(k, v) { const o = railOpen(); o[k] = v; store.set("railOpen", o); }
+
 async function refreshList() {
-  const rows = await api("/api/tasks");
+  railRows = await api("/api/tasks");
   if (!skillsCache) skillsCache = await api("/api/skills").catch(() => null);
+  renderRail();
+}
+
+function renderRail() {
+  const rows = railRows || [];
   const h = location.hash;
   const isOn = (t) => h === `#/task/${t.id}` || h.startsWith(`#/experiments/${t.id}`) || current?.id === t.id;
   const SK = (skillsCache?.skills || []).reduce((m, x) => (m[x.id] = x.name, m), {});
   // 归类：写作任务挂在它的检索任务下面；评测实验单独一组，一个实验只占一行
   const exps = rows.filter((t) => t.graph === "experiment");
-  const kids = {};
-  rows.filter((t) => t.graph === "write" && t.parent_task_id).forEach((t) => (kids[t.parent_task_id] ||= []).push(t));
   const ids = new Set(rows.map((t) => t.id));
-  const tops = rows.filter((t) => t.graph !== "experiment" && !(t.graph === "write" && t.parent_task_id && ids.has(t.parent_task_id)));
-  const item = (t, child) => `<li class="${child ? "child" : ""}"><a href="${t.graph === "experiment" ? `#/experiments/${t.id}` : `#/task/${t.id}`}" class="${isOn(t) ? "active" : ""}">
-      <span class="t">${child ? `写作 · ${esc(SK[t.skill] || t.skill || "")}` : esc(taskTitle(t))}</span>
-      <span class="s">${esc(STATUS[t.status] || t.status)}${child ? "" : ` · ${esc(GRAPH_NAME[t.graph] || t.graph)}`} · ${fmtTime(t.created_at)}</span></a></li>`;
-  $("#task-list").innerHTML = (tops.map((t) => item(t) + (kids[t.id] || []).slice().reverse().map((k) => item(k, true)).join("")).join("")
-    || `<li class="s">暂无任务</li>`)
-    + (exps.length ? `<li class="rail-sub">评测实验</li>` + exps.map((t) => item(t)).join("") : "");
+  const par = (t) => t.graph === "write" ? [t.parent_task_id, t.research_task].find((x) => x && ids.has(x)) : null;
+  const kids = {};
+  rows.filter(par).forEach((t) => (kids[par(t)] ||= []).push(t));
+  const tops = rows.filter((t) => t.graph !== "experiment" && !par(t));
+  const q = railQuery.trim().toLowerCase();
+  const kidName = (t) => `写作 · ${SK[t.skill] || t.skill || ""}`;
+  const hit = (t, child) => !q || (child ? kidName(t) + (t.topic || "") : taskTitle(t)).toLowerCase().includes(q);
+  // 默认收起；切到某个任务时它所在的那一组自动展开一次（之后仍可手动收起）；搜索时命中的子项所在组也展开
+  const act = rows.find(isOn);
+  if (act && act.id !== railLastActive) {
+    railLastActive = act.id;
+    const g = act.graph === "experiment" ? "_exp" : par(act);
+    if (g && !railOpen()[g]) setRailOpen(g, true);
+  }
+  const open = railOpen();
+  const isOpen = (k, members) => !!open[k] || (q && members.some((m) => hit(m, true)));
+  const item = (t, child, extra = "") => `<li class="${child ? "child" : ""}${extra ? " has-kids" : ""}"><a href="${t.graph === "experiment" ? `#/experiments/${t.id}` : `#/task/${t.id}`}" class="${isOn(t) ? "active" : ""}">
+      <span class="t">${child ? esc(kidName(t)) : esc(taskTitle(t))}</span>
+      <span class="s">${esc(STATUS[t.status] || t.status)}${child ? "" : ` · ${esc(GRAPH_NAME[t.graph] || t.graph)}`} · ${fmtTime(t.created_at)}</span></a>${extra}</li>`;
+  const fold = (k, on, n, label) => `<button type="button" class="rail-fold${on ? " on" : ""}" data-fold="${k}" title="${on ? "收起" : "展开"}${label}" aria-expanded="${on}">${on ? "▾" : "▸"} ${n} 篇</button>`;
+  const parts = [];
+  for (const t of tops) {
+    const ks = (kids[t.id] || []).slice().reverse();
+    const kh = ks.filter((k) => hit(k, true));
+    if (!hit(t) && !kh.length) continue;
+    const on = ks.length && isOpen(t.id, ks);
+    parts.push(item(t, false, ks.length ? fold(t.id, on, ks.length, `这次检索写出的 ${ks.length} 篇`) : ""));
+    if (on) parts.push((q && !hit(t) ? kh : ks).map((k) => item(k, true)).join(""));
+  }
+  const ex = exps.filter((t) => hit(t));
+  let expHtml = "";
+  if (ex.length) {
+    const on = q || isOpen("_exp", ex);
+    expHtml = `<li class="rail-sub"><button type="button" class="rail-grp" data-fold="_exp" aria-expanded="${!!on}">${on ? "▾" : "▸"} 评测实验 <span>${ex.length}</span></button></li>`
+      + (on ? ex.map((t) => item(t)).join("") : "");
+  }
+  const groups = tops.filter((t) => kids[t.id]?.length).length + (exps.length ? 1 : 0);
+  $("#rail-tools").hidden = rows.length < 4 && !q;
+  $("#rail-all").hidden = !groups;
+  const anyOpen = tops.some((t) => kids[t.id]?.length && open[t.id]) || open._exp;
+  $("#rail-all").textContent = anyOpen ? "全部收起" : "全部展开";
+  $("#task-list").innerHTML = (parts.join("") || `<li class="s">${q ? "没有匹配的任务" : "暂无任务"}</li>`) + expHtml;
+}
+
+function setupRail() {
+  $("#task-list").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-fold]");
+    if (!b) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setRailOpen(b.dataset.fold, b.getAttribute("aria-expanded") !== "true");
+    renderRail();
+  });
+  $("#rail-q").addEventListener("input", (e) => { railQuery = e.target.value; renderRail(); });
+  $("#rail-all").addEventListener("click", () => {
+    const rows = railRows || [];
+    const parents = new Set(rows.filter((t) => t.graph === "write").flatMap((t) => [t.parent_task_id, t.research_task]).filter(Boolean));
+    const o = railOpen();
+    const to = !([...parents].some((p) => o[p]) || o._exp);
+    parents.forEach((p) => (o[p] = to));
+    o._exp = to;
+    store.set("railOpen", o);
+    renderRail();
+  });
 }
 
 // ---------------------------------------------------------------- 路由
@@ -1652,6 +1721,7 @@ async function showTrust(id) {
   const verdict = (ok, txt) => `<span class="tag ${ok ? "nv-new" : "rel-lo"}">${txt}</span>`;
   const a0 = U.articles[0];
   const mo = S.metrics?.ours || {}, mt = S.metrics?.time || {}, mh = S.metrics?.popularity || S.metrics?.hot || {};
+  const sameAll = ["dup@10", "primary@10", "coverage@10"].every((k) => mo[k] === mt[k] && mo[k] === mh[k]);
   el.innerHTML = `<div data-f="flow"></div>
     <div class="detail-head"><div><p class="kicker">可信度与可追溯 · <a href="#/task/${id}">${esc(d.task.topic)}</a></p>
       <h1>这次检索和写作，靠不靠得住？</h1>
@@ -1661,7 +1731,7 @@ async function showTrust(id) {
         <ul>
           <li>收集到 <b>${R.docs}</b> 篇，来自 <b>${R.sources}</b> 个来源；其中一手资料（论文、官方、代码仓库）<b>${R.primary}</b> 篇（${pc(R.primary_rate)}）。</li>
           <li>识别出 <b>${R.duplicates}</b> 篇转载/重复报道，已归并到原文，<b>不重复计数</b>。</li>
-          <li>归并成 <b>${R.events}</b> 个事件：<b>${R.events_multi}</b> 个有 2 个以上独立来源印证，<b>${R.events_single}</b> 个只有单一来源且不是一手资料。</li>
+          <li>${R.off_topic ? `去掉相关度低的 ${R.off_topic} 篇后，` : ""}相关资料归并成 <b>${R.events}</b> 个事件：<b>${R.events_multi}</b> 个有 2 个以上独立来源印证，<b>${R.events_single}</b> 个只有单一来源且不是一手资料。</li>
           ${R.top_reprint ? `<li>报道最多的事件「${esc(R.top_reprint.title.slice(0, 40))}」有 ${R.top_reprint.docs} 篇，按独立来源算是 <b>${R.top_reprint.independent}</b> 个。</li>` : ""}
           <li>写入长期记忆的事实：${facts}。</li>
           ${R.examples_single.length ? `<li>只有单一来源的例子：${R.examples_single.map(esc).join("；")}（排序时可信度降权，写作时放进“还不确定的”）。</li>` : ""}
@@ -1670,18 +1740,21 @@ async function showTrust(id) {
         <ul>
           <li>资料池 <b>${S.pool}</b> 篇 → 五分钟清单 <b>${S.list5}</b> 条（约 ${S.list5_used} 分钟）、三十分钟清单 <b>${S.list30}</b> 条。</li>
           <li>没进五分钟清单的原因：${Object.entries(S.list5_out).map(([k, n]) => `${esc(k)} ${n} 篇`).join("，") || "无"}。</li>
-          <li>和“按时间”“按热度”两种排法比（前 10 条）：重复率 <b>${pc(mo["dup@10"])}</b> vs ${pc(mt["dup@10"])} / ${pc(mh["dup@10"])}；一手资料占比 <b>${pc(mo["primary@10"])}</b> vs ${pc(mt["primary@10"])} / ${pc(mh["primary@10"])}；子问题覆盖 <b>${pc(mo["coverage@10"])}</b> vs ${pc(mt["coverage@10"])} / ${pc(mh["coverage@10"])}。</li>
+          <li>前 10 条里和主题相关的比例（自动标注，人工标注过的以人工为准）：我们 <b>${pc(mo["P@10"])}</b>，按时间 ${pc(mt["P@10"])}，按热度 ${pc(mh["P@10"])}。</li>
+          <li>${sameAll ? `和“按时间”“按热度”两种排法比（前 10 条）：重复率、一手资料占比、子问题覆盖三项<b>没有差别</b>（都是 ${pc(mo["dup@10"])} / ${pc(mo["primary@10"])} / ${pc(mo["coverage@10"])}）——这批资料几乎没有重复、也没有一手资料，三种排法拉不开；差别在下一条：单一来源降权、同一事件只留一篇。`
+            : `和“按时间”“按热度”两种排法比（前 10 条，我们 vs 按时间 / 按热度）：重复率 <b>${pc(mo["dup@10"])}</b> vs ${pc(mt["dup@10"])} / ${pc(mh["dup@10"])}；一手资料占比 <b>${pc(mo["primary@10"])}</b> vs ${pc(mt["primary@10"])} / ${pc(mh["primary@10"])}；子问题覆盖 <b>${pc(mo["coverage@10"])}</b> vs ${pc(mt["coverage@10"])} / ${pc(mh["coverage@10"])}。`}</li>
           ${S.problems.length ? `<li>系统自己标出的风险：${S.problems.map((p) => `第 ${p.rank} 条「${esc(p.title.slice(0, 30))}」${esc(p.issue)}`).join("；")}。</li>` : ""}
         </ul><p class="small"><a href="#/task/${id}">在任务页看每条资料的排序理由</a></p></section>
-      <section class="card trust-q"><h3>③ 改写帮助理解吗？ ${a0 ? verdict(a0.gain.minutes_saved > 0 && a0.caveats > 0, "省时间，限制条件还在") : verdict(false, "还没写文章")}</h3>
+      <section class="card trust-q"><h3>③ 改写帮助理解吗？ ${a0 ? verdict(a0.gain.minutes_saved > 0 && a0.caveats > 0, a0.caveats > 0 ? "省时间，限制条件还在" : "省时间，但限制条件写少了") : verdict(false, "还没写文章")}</h3>
         ${a0 ? `<ul>
           <li>以「<a href="#/article/${a0.id}">${esc(a0.title)}</a>」（${esc(a0.skill || "")}，第 ${a0.version} 版）为例：原始资料约 <b>${a0.gain.minutes_sources}</b> 分钟才读得完，文章 <b>${a0.gain.minutes_article}</b> 分钟。</li>
           <li><b>${a0.gain.cross_source_paras}</b> 段把两个以上来源放在一起交叉印证；<b>${a0.analysis_marked}</b> 段是单独标出的判断（【分析】），和来源原话分开。</li>
           <li>出处支持率 <b>${pc(a0.fidelity.support_rate)}</b>，数字错误 <b>${a0.fidelity.number_errors}</b> 处，待确认 <b>${a0.fidelity.problems}</b> 处。</li>
-          <li>限制条件和争议：文章里有 <b>${a0.caveats}</b> 句写了“可能、尚未、仅、据称、有争议”这类限制；${a0.disputes_known ? `已知争议 ${a0.disputes_known} 条，文章提到 ${a0.disputes_kept} 条；` : ""}${a0.has_uncertain_section ? "结构里有专门写“不确定 / 证据”的一节。" : "<span class='gap'>结构里没有专门写不确定性的一节。</span>"}</li>
+          <li>限制条件和争议：文章里有 <b>${a0.caveats}</b> 句写了“可能、尚未、仅、据称、有争议”这类限制；${a0.disputes_known ? `已知争议 ${a0.disputes_known} 条，文章提到 ${a0.disputes_kept} 条；` : ""}${a0.has_uncertain_section ? "结构里有专门写“不确定 / 证据”的一节。" : "<span class='gap'>结构里没有专门写不确定性的一节。</span>"}
+            ${!a0.caveats && a0.caveats_in_sources ? `<br><span class="gap">原始资料里有 ${a0.caveats_in_sources} 句这类限制，这篇一句没写——读者会以为这些说法都已确定。这是这篇要改的地方：可以在文章的审阅里对相关段落用“AI 改写”，要求写明“目前只有单一来源”。</span>` : ""}</li>
           <li>平均句长 ${a0.comprehension.avg_sentence_len} 字，长句占 ${pc(a0.comprehension.long_sentence_ratio)}，未解释的外文术语 ${a0.comprehension.unexplained_terms} 个。</li>
-        </ul>${U.articles.length > 1 ? `<p class="small">这批资料还写了：${U.articles.slice(1).map((x) => `<a href="#/article/${x.id}">${esc(x.skill || x.title)}</a>`).join("、")}</p>` : ""}` : `<p class="small muted">这次检索还没有写成文章。</p>`}
-        ${U.experiments.length ? `<p class="small">用这批资料做过对照实验：${U.experiments.map((x) => `<a href="#/experiments/${x.id}">${esc(x.topic)}</a>`).join("、")}（初稿与优化稿的保真度、信息密度、读者盲评都在里面）。</p>` : `<p class="small muted">还没有用这批资料做对照实验；可以在“评测”里做，用读者盲评回答“到底有没有更好懂”。</p>`}</section>
+        </ul>${U.articles.length > 1 ? `<p class="small">这批资料写的 ${U.articles.length} 篇里，限制/争议句数：${U.articles.map((x) => `<a href="#/article/${x.id}">${esc(x.skill || x.title.slice(0, 12))}</a> <b class="${x.caveats ? "" : "gap"}">${x.caveats}</b> 句`).join("、")}。</p>` : ""}` : `<p class="small muted">这次检索还没有写成文章。</p>`}
+        ${U.experiments.length ? `<p class="small">用这批资料做过对照实验：${U.experiments.map((x) => `<a href="#/experiments/${x.id}">${esc(x.topic.replace(/^评测实验：/, ""))}<small>（${fmtTime(x.created_at)}${x.status !== "done" ? " · " + esc(STATUS[x.status] || x.status) : ""}）</small></a>`).join("、")}（初稿与优化稿的保真度、信息密度、读者盲评都在里面）。</p>` : `<p class="small muted">还没有用这批资料做对照实验；可以在“评测”里做，用读者盲评回答“到底有没有更好懂”。</p>`}</section>
       <section class="card trust-q"><h3>④ 过程可追溯、可复现吗？ ${verdict(T.steps > 0 && T.checkpoints > 0, "每一步都有记录")}</h3>
         <ul>
           <li>检索任务共 <b>${T.steps}</b> 步、<b>${T.tool_calls}</b> 次工具调用（输入、输出、耗时都存着），<b>${T.checkpoints}</b> 个检查点：可以从任意一步重新执行，输入没变的调用直接复用结果。</li>
@@ -1702,7 +1775,7 @@ async function showTrust(id) {
       <details class="card" open><summary>改写更流畅，却丢掉了限制条件与争议，价值增加了吗？</summary>
         <p><b>没有，反而是减分。</b>所以“降 AI 腔”这一步有两道闸：改完逐句重新核对出处，改出问题的节退回原稿；
           并且<b>限制条件和争议的句子数只要变少，这一节就不采用改写</b>（“可能、尚未、仅、据称、有争议、样本”这类词被顺掉，就退回）。
-          ${a0 ? `这次的文章「${esc(a0.title)}」保留了 ${a0.caveats} 句限制/争议；` : ""}评测实验里还有“限制与争议/千字”指标，专门看改写有没有把它们丢掉。</p>
+          ${a0 ? (a0.caveats ? `这次的文章「${esc(a0.title)}」保留了 ${a0.caveats} 句限制/争议；` : `但这道闸只管“改写不能让它变少”，管不了“一开始就没写”：这次的文章「${esc(a0.title)}」一句限制/争议都没有（原始资料里有 ${a0.caveats_in_sources} 句），上面③用红字标了出来，不当作没问题。`) : ""}评测实验里还有“限制与争议/千字”指标，专门看改写有没有把它们丢掉。</p>
         <p class="small muted">我们的取舍：流畅度让位于准确的不确定性。读者宁可读一句“目前只有单一来源”，也不该读一句漂亮但过度确定的话。</p></details>
       <details class="card" open><summary>昨天交付的结论今天被更正，Agent 能否记起并说明变化？</summary>
         <p><b>能。</b>每次交付都存成一条“交付记录”，引用了哪些事实、哪些资料版本都记着。资料复查发现更正后，旧事实标为“已被更正”，
