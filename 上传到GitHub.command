@@ -14,9 +14,22 @@ git config user.email >/dev/null || git config user.email "qbzhy08@gmail.com"
 git config user.name >/dev/null || git config user.name "topicdesk"
 git add -A
 git diff --cached --quiet || git commit -qm "同步本机改动"
-if ! git remote get-url origin >/dev/null 2>&1; then
-  read -r -p "粘贴 GitHub 仓库地址（形如 https://github.com/你的用户名/topicdesk.git）：" URL
+ask_url() {
+  read -r -p "粘贴 GitHub 仓库地址（仓库页面浏览器地址栏里的就行，如 https://github.com/你的用户名/topicdesk）：" RAW
+  # 不管粘的是仓库页、某次提交页还是 .git 地址，都只取“用户名/仓库名”
+  OWNER_REPO=$(echo "$RAW" | sed -E 's#^(https?://)?(www\.)?github\.com[/:]##; s#\.git$##' | cut -d/ -f1-2 | sed -E 's#[?\#].*$##')
+  case "$OWNER_REPO" in */*) ;; *) echo "看不懂这个地址：$RAW"; ask_url; return;; esac
+  URL="https://github.com/$OWNER_REPO.git"
+  git remote remove origin 2>/dev/null
   git remote add origin "$URL"
+  echo "仓库地址：$URL"
+}
+if ! git remote get-url origin >/dev/null 2>&1; then
+  ask_url
+else
+  echo "当前仓库地址：$(git remote get-url origin)"
+  read -r -p "直接回车继续；要换地址输入 n：" CH
+  [ "$CH" = "n" ] || [ "$CH" = "N" ] && ask_url
 fi
 echo "开始上传。如果提示输入：Username 填 GitHub 用户名，Password 填 Personal Access Token（不是登录密码）。"
 if git push -u origin main; then
