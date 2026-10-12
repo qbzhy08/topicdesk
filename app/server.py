@@ -1099,10 +1099,11 @@ def experiment_blind(eid):
     st = t["state"] or {}
     text = {r["key"]: r.get("text") or "" for r in st.get("runs") or []}
     rater = request.args.get("rater") or ""
-    done = {r["pair_id"] for r in db.query("SELECT pair_id FROM eval_ratings WHERE experiment_id=? AND rater=?", (eid, rater))}
+    mine = {r["pair_id"]: r["data"] for r in db.query(
+        "SELECT pair_id, data FROM eval_ratings WHERE experiment_id=? AND rater=? ORDER BY id", (eid, rater))}
     strip = lambda s: re.sub(r"\[\d+\]", "", s)  # noqa: E731
     return jsonify(pairs=[{"pair_id": p["pair_id"], "topic": p["topic"], "甲": strip(text[p["甲"]]), "乙": strip(text[p["乙"]]),
-                           "rated": p["pair_id"] in done} for p in st.get("blind") or []])
+                           "rated": p["pair_id"] in mine, "mine": mine.get(p["pair_id"])} for p in st.get("blind") or []])
 
 
 @app.post("/api/experiments/<eid>/blind")

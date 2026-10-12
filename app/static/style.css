@@ -806,3 +806,7 @@ button.linkish { background: none; color: var(--info); padding: 0; font-size: 12
 @media (max-width: 800px) { .sx-row { grid-template-columns: 1fr; } .sx-empty { display: none; } }
 .req { color: var(--accent); }
 .sk-form .missing { border-color: var(--accent) !important; background: #fbf0ee !important; }
+.bl-groups { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 0 0 12px; }
+.bl-groups button { background: var(--card); color: var(--ink); border: 1px solid var(--line); padding: 4px 12px; font-size: 13px; }
+.bl-groups button.done { color: var(--ok); }
+.bl-groups button.on { border-color: var(--ink); background: var(--ink); color: #fff; }

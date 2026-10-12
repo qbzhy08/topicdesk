@@ -149,12 +149,15 @@ def _human(exp_id: str, st: dict) -> dict:
     variant_of = {r["key"]: r["variant"] for r in st.get("runs") or []}
     tally = {d: {"optimized": 0, "draft": 0, "tie": 0} for d in DIMS}
     guess = {"right": 0, "wrong": 0, "unsure": 0}
-    raters = set()
+    raters, per_rater, comments = set(), {}, []
     for r in rows:
         p = pair_of.get(r["pair_id"])
         if not p:
             continue
         raters.add(r["rater"])
+        per_rater.setdefault(r["rater"], set()).add(r["pair_id"])
+        if (r["data"] or {}).get("comment"):
+            comments.append({"rater": r["rater"], "topic": p["topic"], "text": r["data"]["comment"]})
         data = r["data"] or {}
         for d in DIMS:
             pick = data.get(d)
@@ -167,7 +170,8 @@ def _human(exp_id: str, st: dict) -> dict:
             guess["right" if variant_of.get(p[g]) == BLIND_PAIR[0] else "wrong"] += 1
         elif g:
             guess["unsure"] += 1
-    return {"ratings": len(rows), "raters": len(raters), "tally": tally, "ai_guess": guess,
+    return {"ratings": len(rows), "raters": len(raters), "tally": tally, "ai_guess": guess, "comments": comments,
+            "per_rater": [{"rater": k, "done": len(v), "total": len(pair_of)} for k, v in per_rater.items()],
             "note": "ai_guess：读者认为更像 AI 写的是初稿记为“right”（优化稿更不像 AI），认为是优化稿记为“wrong”"}
 
 

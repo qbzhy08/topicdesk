@@ -1690,10 +1690,13 @@ async function showExperiment(id) {
     const lp = r.llm_pairs || {};
     return `<div class="card"><h3>读者盲评（初稿 vs 优化稿）</h3>
       <p class="small">读者看到的是“甲/乙”两篇完整正文（去掉出处编号），不知道哪篇是初稿；每组的甲乙随机分配。把 <a href="#/blind/${id}">盲评页</a> 给读者，在这台电脑上打开即可（每人填一个化名）。</p>
-      <p class="small">已收到 <b>${h.ratings || 0}</b> 份评分，来自 <b>${h.raters || 0}</b> 位读者（共 ${r.blind_pairs} 组）。</p>
+      <p class="small">已收到 <b>${h.ratings || 0}</b> 份评分，来自 <b>${h.raters || 0}</b> 位读者（共 ${r.blind_pairs} 组）。
+        ${(h.per_rater || []).map((x) => `<span class="tag ${x.done < x.total ? "rel-lo" : "nv-new"}">${esc(x.rater)} ${x.done}/${x.total}</span>`).join(" ")}
+        ${(h.per_rater || []).some((x) => x.done < x.total) ? `<br><span class="muted">没评完的读者用<b>同一个称呼</b>再打开盲评页，就会接着评剩下的组。</span>` : ""}</p>
       ${h.ratings ? `<table class="tbl"><tr><th>维度</th><th>选优化稿</th><th>选初稿</th><th>相当</th></tr>${Object.entries(DN).map(([k, n]) =>
         `<tr><td>${n}</td><td>${h.tally[k].optimized}</td><td>${h.tally[k].draft}</td><td>${h.tally[k].tie}</td></tr>`).join("")}
         <tr><td>“哪篇更像 AI 写的”</td><td colspan="3">认为是初稿 ${h.ai_guess.right} 次 · 认为是优化稿 ${h.ai_guess.wrong} 次 · 说不准 ${h.ai_guess.unsure} 次</td></tr></table>` : ""}
+      ${(h.comments || []).length ? `<h4>读者评论</h4>${h.comments.map((c) => `<p class="small ex-open"><b>${esc(c.rater)}</b> · ${esc(c.topic.slice(0, 16))}：${esc(c.text)}</p>`).join("")}` : ""}
       ${Object.keys(lp).length ? `<h4>大模型盲评（代理读者，交换前后顺序各评一次，两次一致才算胜）</h4>
         <table class="tbl"><tr><th>素材</th>${Object.values(DN).map((n) => `<th>${n}</th>`).join("")}</tr>
         ${Object.entries(lp).map(([tid, x]) => `<tr><td>${esc((topics.find((t) => t[0] === tid) || [, tid])[1].slice(0, 16))}</td>${Object.keys(DN).map((k) =>
@@ -1764,33 +1767,40 @@ async function showBlind(id) {
   const el = $("#detail");
   const me = current = {};
   let rater = store.get("rater") || "";
+  let pick = null;                 // 当前在评哪一组（可以回到评过的组修改）
+  const Q = [["accuracy", "哪篇读起来更准确可信？"], ["information", "哪篇让你得到的有用信息更多？"], ["natural", "哪篇读起来更自然、更像人写的？"],
+    ["easy", "哪篇更容易读懂？"], ["overall", "整体上你更愿意读哪篇？"], ["ai_guess", "你觉得哪篇更像 AI 写的？"]];
   const draw = async () => {
     const d = await api(`/api/experiments/${id}/blind?rater=${encodeURIComponent(rater)}`);
     if (current !== me) return;
-    const left = d.pairs.filter((p) => !p.rated);
-    const p = left[0];
-    const Q = [["accuracy", "哪篇读起来更准确可信？"], ["information", "哪篇让你得到的有用信息更多？"], ["natural", "哪篇读起来更自然、更像人写的？"],
-      ["easy", "哪篇更容易读懂？"], ["overall", "整体上你更愿意读哪篇？"], ["ai_guess", "你觉得哪篇更像 AI 写的？"]];
+    const nDone = d.pairs.filter((p) => p.rated).length;
+    const p = d.pairs.find((x) => x.pair_id === pick) || d.pairs.find((x) => !x.rated);
+    const mine = p?.mine || {};
     el.innerHTML = `<div class="detail-head"><div><p class="kicker">读者盲评</p><h1>两篇文章，选你觉得更好的</h1>
         <p class="meta">每组两篇写的是同一件事，用的是同一批资料。请像平时读文章一样读完，再回答下面的问题。没有标准答案。</p></div></div>
-      <div class="card row"><label class="bl-name">你的称呼（可以是化名，只用来区分不同读者）<input id="bl-rater" value="${esc(rater)}"></label>
-        <small class="muted">已完成 ${d.pairs.length - left.length}/${d.pairs.length} 组</small></div>
-      ${!rater ? `<p class="small muted">先填称呼再开始。</p>` : !p ? `<div class="card"><h3>全部完成，谢谢！</h3><p class="small">可以把这个页面交给下一位读者（换一个称呼）。</p></div>` : `
-      <h2 class="section">第 ${d.pairs.indexOf(p) + 1} 组</h2>
+      <div class="card row"><label class="bl-name">你的称呼（可以是化名；同一个人每次用同一个称呼，才能接着评、改之前的评分）<input id="bl-rater" value="${esc(rater)}"></label>
+        <small class="muted">已完成 ${nDone}/${d.pairs.length} 组</small></div>
+      ${rater ? `<div class="bl-groups">${d.pairs.map((x, i) => `<button type="button" class="${p && x.pair_id === p.pair_id ? "on" : ""} ${x.rated ? "done" : ""}" data-pair="${x.pair_id}">
+        第 ${i + 1} 组${x.rated ? " ✓" : ""}</button>`).join("")}<small class="muted">评过的组可以点开修改，或补充评论</small></div>` : ""}
+      ${!rater ? `<p class="small muted">先填称呼再开始。</p>` : !p ? `<div class="card"><h3>全部完成，谢谢！</h3><p class="small">想改哪一组，点上面的组号。可以把这个页面交给下一位读者（换一个称呼）。</p></div>` : `
+      <h2 class="section">第 ${d.pairs.indexOf(p) + 1} 组${p.rated ? " <small class=\"muted\">（你评过，修改后重新提交会覆盖）</small>" : ""}</h2>
       <div class="bl-pair"><article class="card bl-text"><h3>甲</h3>${esc(p["甲"]).replace(/\n/g, "<br>")}</article>
         <article class="card bl-text"><h3>乙</h3>${esc(p["乙"]).replace(/\n/g, "<br>")}</article></div>
       <form class="card bl-q" id="bl-form">${Q.map(([k, q]) => `<div class="bl-row"><span>${q}</span>${(k === "ai_guess" ? ["甲", "乙", "说不准"] : ["甲", "乙", "相当"]).map((o) =>
-        `<label><input type="radio" name="${k}" value="${o}" required> ${o}</label>`).join("")}</div>`).join("")}
-        <label>想说的话（可空）<textarea name="comment" rows="2"></textarea></label>
-        <div class="row"><button>提交，下一组</button><small class="muted" id="bl-msg"></small></div></form>`}`;
-    $("#bl-rater", el).onchange = (e) => { rater = e.target.value.trim(); store.set("rater", rater); draw(); };
+        `<label><input type="radio" name="${k}" value="${o}" required ${mine[k] === o ? "checked" : ""}> ${o}</label>`).join("")}</div>`).join("")}
+        <label>评论（可空：哪里好、哪里不好、哪句读不懂……）<textarea name="comment" rows="3">${esc(mine.comment || "")}</textarea></label>
+        <div class="row"><button>${p.rated ? "保存修改" : "提交，下一组"}</button><small class="muted" id="bl-msg"></small></div></form>`}`;
+    $("#bl-rater", el).onchange = (e) => { rater = e.target.value.trim(); store.set("rater", rater); pick = null; draw(); };
+    $$("[data-pair]", el).forEach((b) => b.onclick = () => { pick = b.dataset.pair; draw(); window.scrollTo(0, 0); });
     const f = $("#bl-form", el);
     if (f) f.onsubmit = async (e) => {
       e.preventDefault();
       const answers = Object.fromEntries(Q.map(([k]) => [k, f[k].value]));
       answers.comment = f.comment.value;
-      try { await api(`/api/experiments/${id}/blind`, { method: "POST", body: { pair_id: p.pair_id, rater, answers } }); window.scrollTo(0, 0); draw(); }
-      catch (err) { $("#bl-msg").textContent = err.message; }
+      try {
+        await api(`/api/experiments/${id}/blind`, { method: "POST", body: { pair_id: p.pair_id, rater, answers } });
+        pick = null; window.scrollTo(0, 0); draw();
+      } catch (err) { $("#bl-msg").textContent = err.message; }
     };
   };
   draw();
