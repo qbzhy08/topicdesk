@@ -1000,6 +1000,39 @@ class TrustTest(WriteBase):
         self.assertEqual(art["hedge_missing"], 0)
         self.assertTrue(art["has_uncertain_section"])
 
+    def test_corroborate_single_source_claims(self):
+        """能找资料证明就去找：别的网站有能对上的报道 → 补进素材、句子补上出处、不再写“尚待证实”。"""
+        from app.collect import sources as S
+        from app import writing
+        llm.available, llm.chat = (lambda: True), NaturalWriter()
+        orig_search, orig_fetch = S.search, S.fetch_page
+        calls = []
+
+        def fake_search(source_id, query, limit=15, **kw):
+            calls.append((source_id, query))
+            if len(calls) <= 200 and "复现" in query or "社区" in query:
+                return [{"url": "https://www.example-news.cn/a/1", "title": "社区开发者复现结果与官方宣称存在差距",
+                         "summary": "社区开发者的复现结果与官方宣称存在差距，多位开发者表示长上下文表现不及预期。",
+                         "text": "社区开发者的复现结果与官方宣称存在差距，多位开发者表示长上下文表现不及预期。",
+                         "content_kind": "full", "source_id": source_id, "published_at": "2026-10-12T00:00:00+00:00"}]
+            return orig_search(source_id, query, limit=limit, **kw)
+        S.search = fake_search
+        try:
+            task, v = self.write("brief")
+        finally:
+            S.search, S.fetch_page = orig_search, orig_fetch
+        logs = v["meta"]["corroborations"]
+        self.assertTrue(logs)
+        hit = [x for x in logs if x.get("doc")]
+        self.assertTrue(hit, logs)
+        n = next(d["n"] for d in task["state"]["docs"] if d["id"] == hit[0]["doc"]["doc_id"])
+        body = "\n".join(x["md"] for x in v["meta"]["sections"] if not x.get("auto"))
+        self.assertIn(f"[{n}]", body)                         # 句子补上了新出处
+        self.assertIn("example-news.cn", v["markdown"])       # 参考资料里有这篇
+        flags = writing.doc_flags(v["meta"]["research_task"], task["state"]["docs"])
+        aud = writing.hedge_audit([x for x in v["meta"]["sections"] if not x.get("auto")], flags)
+        self.assertEqual(aud["missing"], 0)
+
     def test_naturalize_keeps_caveats(self):
         from app import trust
         self.assertEqual(trust.caveats("目前只有单一来源报道。官方尚未回应。销量增长了。"), 2)

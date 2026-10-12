@@ -95,6 +95,8 @@ def understanding(research_task: str) -> dict:
                     "disputes_known": len(disputes), "disputes_kept": len(flagged),
                     "has_uncertain_section": any(writing.UNCERTAIN_HEAD.search(h or "") for h in heads),
                     "hedge_needed": aud["needed"], "hedge_missing": aud["missing"],
+                    "corroborations": [{"claim": x.get("claim"), "result": x.get("result"), "url": (x.get("doc") or {}).get("url"),
+                                        "found": bool(x.get("doc"))} for x in meta.get("corroborations") or []][:6],
                     "hedge_examples": [writing._short_claim(x["sentence"]) for x in aud["missing_items"][:3]],
                     "analysis_marked": m["gain"]["analysis_paras"]})
     exps = db.query("SELECT id, topic, status, state, created_at FROM tasks WHERE graph='experiment' ORDER BY created_at DESC")

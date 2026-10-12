@@ -229,10 +229,18 @@ def edit(ctx):
         # 按当前的核验状态补上限制条件：只有单一来源 / 有争议的说法写明限制，缺“还不确定的”一节就补上
         flags = writing.doc_flags(st.get("research_task"), docs)
         before_aud = writing.hedge_audit(st["sections"], flags)
+        logs = []
+        try:                                       # 先找资料证明；找到的补上出处、去掉“尚待证实”
+            logs = W.corroborate_claims(ctx)
+        except Exception as e:  # noqa: BLE001
+            ctx.think(f"找印证时出错：{str(e)[:80]}")
+        docs = W._docs(st)
+        flags = writing.doc_flags(st.get("research_task"), docs)
         r = writing.ensure_hedges(st["sections"], flags)
         before = f"需要写明限制的说法 {before_aud['needed']} 句，其中没写的 {before_aud['missing']} 句"
-        after = f"补上 {r['added']} 句" + ("，新增“还不确定的”一节" if r["section"] else "")
-        summary = "补上限制条件：" + (after if r["added"] or r["section"] else "原文已经都写明了，没有改动")
+        ok = sum(1 for x in logs if x.get("doc"))
+        after = (f"找到印证 {ok} 条（补上出处）；" if logs else "") + f"写明限制 {r['added']} 句" + ("，新增“还不确定的”一节" if r["section"] else "")
+        summary = "核实单一来源的说法：" + (after if ok or r["added"] or r["section"] else "原文已经都写明了，没有改动")
     elif op == "cover_swap":
         nf = _new_fig(p, st, None, 0)
         before = (st.get("cover") or {}).get("caption", "")

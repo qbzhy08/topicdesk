@@ -85,6 +85,8 @@ def ensure_hedges(sections: list[dict], flags: dict) -> dict:
     1) 引用的出处都只有单一来源、又没写“可能、尚未、据称……”的句子，在出处编号前补一句说明；
     2) 有需要写明限制的说法、结构里却没有写不确定性的一节：在文末加“还不确定的”一节，逐条列出（带出处）。
     原地修改 sections；返回 {added: 补了几句, section: 是否加了一节}。幂等：再跑一次不会重复添加。"""
+    had_auto = any(x.get("auto") for x in sections)
+    sections[:] = [x for x in sections if not x.get("auto")]     # 自动生成的那一节每次按最新核实状态重写
     aud = hedge_audit(sections, flags)
     added = 0
     by_sec = {s["id"]: s for s in sections}
@@ -116,7 +118,7 @@ def ensure_hedges(sections: list[dict], flags: dict) -> dict:
         if lines:
             sections.append({"id": "uncertain", "heading": "还不确定的", "auto": True,
                              "md": "下面这些说法目前证据不足，读的时候请当作“待证实”：\n\n" + "\n".join(lines)})
-            made = True
+            made = not had_auto
     return {"added": added, "section": made, "needed": aud["needed"]}
 
 

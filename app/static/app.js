@@ -1771,9 +1771,11 @@ async function showTrust(id) {
           <li>出处支持率 <b>${pc(a0.fidelity.support_rate)}</b>，数字错误 <b>${a0.fidelity.number_errors}</b> 处，待确认 <b>${a0.fidelity.problems}</b> 处。</li>
           <li>限制条件和争议：只有单一来源、或有争议的说法 <b>${a0.hedge_needed}</b> 句，${a0.hedge_missing ? `<span class="gap">其中 ${a0.hedge_missing} 句没写明限制（如「${esc(a0.hedge_examples[0] || "")}」）</span>` : a0.hedge_needed ? "<b>都写明了</b>“目前只有某来源报道 / 存在争议”" : "没有需要特别说明的"}；全文共 ${a0.caveats} 句带“可能、尚未、仅、据称、有争议”这类限制。
             ${a0.hedge_needed ? (a0.has_uncertain_section ? "结构里有专门写“还不确定的”一节。" : "<span class='gap'>结构里没有专门写不确定性的一节。</span>") : ""}
-            ${hedgeOk(a0) ? "" : `<br><button type="button" class="ghost small" data-hedge="${a0.id}" data-v="${a0.version}">一键补上限制条件（存为新版本）</button>`}</li>
+            ${hedgeOk(a0) ? "" : `<br><button type="button" class="ghost small" data-hedge="${a0.id}" data-v="${a0.version}">找资料核实，找不到就写明限制（存为新版本）</button>`}</li>
+          ${a0.corroborations?.length ? `<li>给单一来源的说法找印证：查了 <b>${a0.corroborations.length}</b> 条，找到 <b>${a0.corroborations.filter((x) => x.found).length}</b> 条——
+            ${a0.corroborations.map((x) => `「${esc((x.claim || "").slice(0, 24))}」${x.found ? `✓ <a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.result.replace(/^找到/, "").slice(0, 40))}</a>` : "✗ 没找到，写明“尚待证实”"}`).join("；")}</li>` : ""}
           <li>平均句长 ${a0.comprehension.avg_sentence_len} 字，长句占 ${pc(a0.comprehension.long_sentence_ratio)}，未解释的外文术语 ${a0.comprehension.unexplained_terms} 个。</li>
-        </ul>${U.articles.length > 1 ? `<p class="small">这批资料写的 ${U.articles.length} 篇，限制条件是否写全：${U.articles.map((x) => `<a href="#/article/${x.id}">${esc(x.skill || x.title.slice(0, 12))}</a> ${hedgeOk(x) ? "✓" : `<b class="gap">缺 ${x.hedge_missing || "“还不确定的”一节"}${x.hedge_missing ? " 句" : ""}</b> <button type="button" class="linkish" data-hedge="${x.id}" data-v="${x.version}">补上</button>`}`).join("、")}。</p>` : ""}` : `<p class="small muted">这次检索还没有写成文章。</p>`}
+        </ul>${U.articles.length > 1 ? `<p class="small">这批资料写的 ${U.articles.length} 篇，限制条件是否写全：${U.articles.map((x) => `<a href="#/article/${x.id}">${esc(x.skill || x.title.slice(0, 12))}</a> ${hedgeOk(x) ? "✓" : `<b class="gap">缺 ${x.hedge_missing || "“还不确定的”一节"}${x.hedge_missing ? " 句" : ""}</b> <button type="button" class="linkish" data-hedge="${x.id}" data-v="${x.version}">核实并补上</button>`}`).join("、")}。</p>` : ""}` : `<p class="small muted">这次检索还没有写成文章。</p>`}
         ${U.experiments.length ? `<p class="small">用这批资料做过对照实验：${U.experiments.map((x) => `<a href="#/experiments/${x.id}">${esc(x.topic.replace(/^评测实验：/, ""))}<small>（${fmtTime(x.created_at)}${x.status !== "done" ? " · " + esc(STATUS[x.status] || x.status) : ""}）</small></a>`).join("、")}（初稿与优化稿的保真度、信息密度、读者盲评都在里面）。</p>` : `<p class="small muted">还没有用这批资料做对照实验；可以在“评测”里做，用读者盲评回答“到底有没有更好懂”。</p>`}</section>
       <section class="card trust-q"><h3>④ 过程可追溯、可复现吗？ ${verdict(T.steps > 0 && T.checkpoints > 0, "每一步都有记录")}</h3>
         <ul>
@@ -1790,12 +1792,12 @@ async function showTrust(id) {
         <p><b>不会。</b>系统数的是<b>独立来源</b>，不是篇数：转载、洗稿、同一事件的重复报道会被归并（这次归并了 ${R.duplicates} 篇），同一平台同一作者算一个来源。
           只有单一来源、又不是一手资料的说法，排序时可信度降权、标“待核实”；写入长期记忆时状态是“待核实”，要等到第二个独立来源或一手资料出现才变成“已证实”。
           ${R.top_reprint ? `这次报道最多的事件有 ${R.top_reprint.docs} 篇，只算 ${R.top_reprint.independent} 个独立来源。` : ""}
-          写作时，待核实的说法会放进“还不确定的”，并写明“只有某来源报道”。</p>
+          写作时，只有单一来源的说法会先去别的网站和官方渠道找印证——找到才算数；找不到的放进“还不确定的”，并写明“目前只有某来源报道，尚待证实”。</p>
         <p class="small muted">我们的取舍：宁可把真消息暂时标成“待核实”，也不让转载量冒充证据。代价是突发新闻的第一时间判断会保守一些。</p></details>
       <details class="card" open><summary>改写更流畅，却丢掉了限制条件与争议，价值增加了吗？</summary>
         <p><b>没有，反而是减分。</b>所以“降 AI 腔”这一步有两道闸：改完逐句重新核对出处，改出问题的节退回原稿；
           并且<b>限制条件和争议的句子数只要变少，这一节就不采用改写</b>（“可能、尚未、仅、据称、有争议、样本”这类词被顺掉，就退回）。
-          成稿前还有一道：只有单一来源或有争议的说法，没写明限制就自动补上“目前只有某来源报道，尚待证实”，并在文末加“还不确定的”一节逐条列出。
+          成稿前还有两道：只有单一来源的说法，先去别的网站和官方渠道找印证，找到就补上出处；找不到的写明“目前只有某来源报道，尚待证实”，并在文末加“还不确定的”一节逐条列出。
           ${a0 ? (hedgeOk(a0) ? `这次的文章「${esc(a0.title)}」里需要说明的 ${a0.hedge_needed} 句都写明了。` : `这次的文章「${esc(a0.title)}」是加这道闸之前写的，还有 ${a0.hedge_missing} 句没写明，上面③标了红，可以一键补上。`) : ""}评测实验里还有“限制与争议/千字”指标，专门看改写有没有把它们丢掉。</p>
         <p class="small muted">我们的取舍：流畅度让位于准确的不确定性。读者宁可读一句“目前只有单一来源”，也不该读一句漂亮但过度确定的话。</p></details>
       <details class="card" open><summary>昨天交付的结论今天被更正，Agent 能否记起并说明变化？</summary>
@@ -1817,11 +1819,11 @@ async function showTrust(id) {
     const b = e.target.closest("[data-hedge]");
     if (!b) return;
     b.disabled = true;
-    b.textContent = "正在补…";
+    b.textContent = "正在找资料核实…";
     try {
       const { id: tid } = await api(`/api/articles/${b.dataset.hedge}/revise`, { method: "POST", body: { op: "hedge", base_version: Number(b.dataset.v) } });
-      for (let i = 0; i < 60; i++) {
-        await new Promise((r) => setTimeout(r, 800));
+      for (let i = 0; i < 150; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
         const t = await api(`/api/tasks/${tid}`);
         if (["done", "failed", "cancelled"].includes(t.status)) {
           if (t.status !== "done") throw new Error(t.error || "没有补成");

@@ -130,8 +130,9 @@ def _tidy(ctx, docs=None) -> dict:
                 continue
             cites = set(writing.CITE.findall(u))
             prev = next((p for p in seen if writing.overlap(core, p[0]) > 0.6 and cites <= p[1]), None)
-            if prev and u in sec["md"]:
-                sec["md"] = sec["md"].replace(u, "", 1)
+            rest = sec["md"].replace(u, "", 1) if prev and u in sec["md"] else None
+            if rest is not None and len(writing.CITE.sub("", re.sub(r"\{\{img:[^}]*\}\}", "", rest)).strip()) >= 30:
+                sec["md"] = rest            # 删完这一节还有内容才删（不把整节删空）
                 dups.append({"section": sec["id"], "sentence": u})
                 continue
             seen.append((core, cites))
@@ -150,6 +151,14 @@ def _tidy(ctx, docs=None) -> dict:
 
 
 def _after_check(ctx) -> str:
+    st = ctx.state
+    if _stages(ctx)["fix"] and not st.get("corroborated"):
+        st["corroborated"] = True               # 只找一次：找到的资料补进素材后重新核对
+        try:
+            if corroborate_claims(ctx):
+                st["check"] = _check(ctx, _docs(st))
+        except Exception as e:  # noqa: BLE001  找印证失败不影响成稿（成稿时照样写明“尚待证实”）
+            ctx.think(f"给单一来源的说法找印证时出错：{str(e)[:80]}")
     _tidy(ctx)
     stg = _stages(ctx)
     if stg["naturalize"] and _use_llm(ctx) and not ctx.state.get("naturalized"):
@@ -410,6 +419,184 @@ def gap(ctx):
         st["after_gap"] = None
         return "fix"
     return "draft"
+
+
+# ---------------------------------------------------------------- corroborate（给只有单一来源的说法找印证）
+
+CLAIM_QUERY_PROMPT = """下面每条说法目前只有一个来源报道。为了找第二个独立来源或官方/一手资料来核实，
+给每条写一个中文检索词（6-16 字，包含主体和关键事实，不要引号）和一个英文检索词（3-6 个词）。
+{items}
+只输出 JSON：{{"queries": [{{"i": 1, "zh": "...", "en": "..."}}]}}"""
+
+
+def _research_context(st):
+    """修改旧文章时补上检索任务里的检索词和来源（写作任务一开始就有）。"""
+    if st.get("source_ids") is not None and st.get("terms") is not None:
+        return
+    rt = db.query_one("SELECT state FROM tasks WHERE id=?", (st.get("research_task"),)) or {}
+    rs = rt.get("state") or {}
+    st.setdefault("terms", ((rs.get("plan") or {}).get("terms_zh") or [])[:6])
+    st.setdefault("source_ids", ((rs.get("report") or {}).get("source_ids") or []))
+    st.setdefault("source_hits", ((rs.get("report") or {}).get("by_source") or {}))
+
+
+def _append_doc(st, doc_id: str, why: str) -> int | None:
+    """把一篇新资料接在素材末尾（已有编号都不变），返回它的编号。"""
+    have = next((d["n"] for d in st["docs"] if d["id"] == doc_id), None)
+    if have:
+        return have
+    row = writing._doc_rows([doc_id]).get(doc_id)
+    if not row:
+        return None
+    n = max([d["n"] for d in st["docs"]] or [0]) + 1
+    d = {"id": doc_id, "title": row["title"] or row["url"], "url": row["url"], "source_id": row["source_id"],
+         "author": row["author"], "published_at": row["published_at"], "kind": row["content_kind"],
+         "novelty": row.get("novelty"), "primary": bool((row.get("meta") or {}).get("primary")), "value": None,
+         "disputed": False, "unverified": False, "why": why, "n": n}
+    d["label"] = writing.source_label(d, _names())
+    d["chars"] = len(row.get("text") or row.get("summary") or "")
+    st["docs"].append(d)
+    return n
+
+
+def corroborate_claims(ctx, max_claims: int = 4) -> list[dict]:
+    """能找资料证明的就去找：文章里只有单一来源（又不是一手资料）的说法，逐条去别的来源和官方/一手渠道检索，
+    找到能支持它的独立资料（换了网站、出处原文能对上），就把这篇资料加进素材、句子后面补上它的出处编号、去掉“尚待证实”的说明；
+    找不到的保持原样（成稿时会写明“目前只有某某报道，尚待证实”）。返回每条说法的核实记录。"""
+    from urllib.parse import urlsplit
+    from .. import websearch
+    st = ctx.state
+    _research_context(st)
+    st.setdefault("extra_docs", [])
+    docs = _docs(st)
+    flags = writing.doc_flags(st.get("research_task"), docs)
+    aud = writing.hedge_audit(st["sections"], flags)
+    claims, seen = [], set()
+    for x in aud["items"]:
+        if x["kind"] != "single":
+            continue
+        core = writing._short_claim(x["sentence"], 60)
+        if core in seen:
+            continue
+        seen.add(core)
+        claims.append({**x, "claim": core})
+        if len(claims) >= max_claims:
+            break
+    if not claims:
+        return []
+    srcs = _gap_sources(st)
+    if websearch.available() and not any(s["id"] == "official" for s in srcs):
+        off = next((s for s in list_sources() if s["id"] == "official"), None)
+        if off:
+            srcs = [off] + srcs[:2]
+    if not srcs:
+        ctx.think("没有可用的检索来源，单一来源的说法只能写明“尚待证实”")
+        return [{"claim": c["claim"], "result": "没有可用的检索来源"} for c in claims]
+    # 检索词：大模型按说法写（含主体和关键事实）；没有大模型就用说法本身的前半句
+    qs = {}
+    if _use_llm(ctx):
+        try:
+            d = ctx.tool("llm", messages=[{"role": "user", "content": CLAIM_QUERY_PROMPT.format(
+                items="\n".join(f"{k}. {c['claim']}" for k, c in enumerate(claims, 1)))}])["data"]
+            for q in d.get("queries") or []:
+                i = int(q.get("i")) - 1
+                if 0 <= i < len(claims):
+                    qs[i] = {"zh": str(q.get("zh") or "")[:30], "en": str(q.get("en") or "")[:60]}
+        except Exception as e:  # noqa: BLE001
+            ctx.think(f"生成核实检索词失败（{str(e)[:60]}），用说法原文检索")
+    calls, meta = [], []
+    for k, c in enumerate(claims):
+        q = qs.get(k) or {}
+        zh = q.get("zh") or c["claim"][:16]
+        for s in srcs:
+            lang = (s["config"] or {}).get("lang", "zh")
+            query = (q.get("en") or zh) if lang == "en" else zh
+            calls.append(("source_search", dict(source_id=s["id"], query=query, limit=6)))
+            meta.append((k, s))
+    res = ctx.tool_parallel(calls)
+    by_n = {d["n"]: d for d in docs}
+    known = {d["id"] for d in st["docs"]} | set(st["extra_docs"])
+    cands = {k: [] for k in range(len(claims))}
+    for (k, s), (stt, out) in zip(meta, res):
+        if stt != "ok":
+            continue
+        cited_hosts = {urlsplit(by_n[n]["url"] or "").netloc for n in claims[k]["cites"] if n in by_n}
+        for it in out["items"]:
+            host = urlsplit(it.get("url") or "").netloc
+            if not it.get("url") or host in cited_hosts:
+                continue
+            score = writing.overlap(claims[k]["claim"], f"{it.get('title')} {it.get('summary')}")
+            if score >= 0.2 and it["url"] not in {x["url"] for x in cands[k]}:
+                cands[k].append({**it, "_score": score})
+    for k in cands:
+        cands[k] = sorted(cands[k], key=lambda x: (-bool(x.get("primary")), -x["_score"]))[:2]
+    need_fetch = [it for cs in cands.values() for it in cs if it.get("content_kind") != "full"]
+    fetched = dict(zip([it["url"] for it in need_fetch],
+                       ctx.tool_parallel([("page_fetch", {"url": it["url"]}) for it in need_fetch]) if need_fetch else []))
+    # 判断找到的资料能不能支持这条说法：字面能对上（数字都在）直接算；对不上的交给大模型对照原文判断
+    checks = []
+    for k, cs in cands.items():
+        for it in cs:
+            stt, art = fetched.get(it["url"], (None, None))
+            if stt == "ok":
+                it = {**it, **article_to_item(art, it["url"], base=it)}
+            text = it.get("text") or it.get("summary") or ""
+            top = writing.best_quotes(claims[k]["claim"], {0: text}, [0], 1)
+            o = top[0][0] if top else 0.0
+            nums_ok = all(writing.num_in(n, writing._norm(text)) for n in writing.numbers(claims[k]["claim"]))
+            checks.append({"k": k, "item": it, "text": text, "overlap": o, "ok": o >= 0.35 and nums_ok, "nums_ok": nums_ok})
+    pend = [c for c in checks if not c["ok"] and c["nums_ok"] and c["text"]]
+    if pend and _use_llm(ctx):
+        items = [{"sentence": claims[c["k"]]["claim"], "cites": [j]} for j, c in enumerate(pend)]
+        try:
+            d = ctx.tool("llm", messages=[{"role": "system", "content": "你只输出 JSON。"}, {"role": "user", "content":
+                         writing.semantic_batch(items, [{"n": j, "text": c["text"]} for j, c in enumerate(pend)])}],
+                         max_tokens=1200)["data"]
+            for r in d.get("results") or []:
+                i = int(r.get("i")) - 1
+                if 0 <= i < len(pend) and r.get("verdict") == "supported":
+                    pend[i]["ok"] = True
+                    pend[i]["reason"] = str(r.get("reason") or "")[:40]
+        except Exception as e:  # noqa: BLE001
+            ctx.think(f"核实资料的语义判断失败（{str(e)[:60]}），只按字面判断")
+    found = {}
+    for c in checks:
+        if c["ok"] and c["k"] not in found:
+            it = c["item"]
+            it.setdefault("meta", {})["extract_method"] = "corroborate"
+            r = upsert_document(it, ctx.topic, task_id=ctx.task_id)
+            found[c["k"]] = {"doc_id": r["doc_id"], "title": (it.get("title") or it["url"])[:60], "url": it["url"],
+                             "primary": bool(it.get("primary"))}
+            if r["doc_id"] not in known:
+                known.add(r["doc_id"])
+                st["extra_docs"].append(r["doc_id"])
+    logs = []
+    if found:
+        by_sec = {x["id"]: x for x in st["sections"]}
+        for k, f in found.items():
+            c = claims[k]
+            n = _append_doc(st, f["doc_id"], f"核实“{c['claim'][:24]}”时找到的{'一手资料' if f['primary'] else '独立来源'}")
+            sec = by_sec.get(c["section"])
+            if not n or not sec or c["sentence"] not in sec["md"]:
+                continue
+            s0 = c["sentence"]
+            new = writing.HEDGE_NOTE.sub("", s0)
+            m = re.search(r"((?:\[\d{1,2}\])+)(\s*[。！？!?；;]?\s*)$", new)
+            if m and f"[{n}]" not in m.group(1):
+                new = new[:m.end(1)] + f"[{n}]" + new[m.end(1):]
+            sec["md"] = sec["md"].replace(s0, new, 1)
+            sec["sources"] = sorted(set(sec.get("sources") or []) | {n})
+    for k, c in enumerate(claims):
+        f = found.get(k)
+        logs.append({"claim": c["claim"], "query": (qs.get(k) or {}).get("zh") or c["claim"][:16],
+                     "candidates": len(cands[k]),
+                     "result": (f"找到{'一手资料' if f['primary'] else '独立来源'}印证：{f['title']}" if f else
+                                "没有找到其他独立来源或一手资料印证，写明“尚待证实”"),
+                     **({"doc": f} if f else {})})
+    st["corroborations"] = (st.get("corroborations") or []) + logs
+    ctx.observe("给单一来源的说法找印证：" + "；".join(f"「{x['claim'][:20]}」{'✓ ' + x['result'] if x.get('doc') else '✗ 没找到'}"
+                                            for x in logs))
+    return logs
 
 
 # ---------------------------------------------------------------- draft
@@ -1075,6 +1262,7 @@ def build_and_save(st, note: str, task_id: str | None, extra_meta: dict | None =
             "natural_log": st.get("natural_log") or [], "stages": st.get("stages_used"), "image_error": st.get("image_error"),
             "experiment": st.get("experiment"), "variant": st.get("variant"),
             "write_task": st.get("write_task"), "revisions": st.get("revisions") or [],
+            "corroborations": st.get("corroborations") or [],
             "hedges": {"needed": audit["needed"], "missing": audit["missing"], "uncertain_section": audit["uncertain_section"],
                        "added": hed["added"], "section_added": hed["section"]},
             **(extra_meta or {})}
