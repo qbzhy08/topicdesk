@@ -145,7 +145,7 @@ async function submitImport(e) {
 async function refreshList() {
   const rows = await api("/api/tasks");
   $("#task-list").innerHTML = rows.map((t) => `
-    <li><a href="#/task/${t.id}" class="${current?.id === t.id ? "active" : ""}">
+    <li><a href="${t.graph === "experiment" ? `#/experiments/${t.id}` : `#/task/${t.id}`}" class="${current?.id === t.id ? "active" : ""}">
       <span class="t">${esc(taskTitle(t))}</span>
       <span class="s">${esc(STATUS[t.status] || t.status)} · ${esc(GRAPH_NAME[t.graph] || t.graph)} · ${fmtTime(t.created_at)}</span>
     </a></li>`).join("") || `<li class="s">暂无任务</li>`;
@@ -481,6 +481,15 @@ function renderTask(t) {
   // 写作入口先渲染：报告或榜单渲染出错时不能连带它也不显示
   if (t.graph === "research" && t.status === "done") loadWritePanel(t).catch((err) => showPanelError("write", "写作入口", err));
   if (t.graph === "write") renderWriteTask(t);
+  if (t.graph === "experiment") {          // 实验任务页：这里是运行过程，报告在评测页
+    const box = $("[data-f=write]", d);
+    if (!box.dataset.exp) {
+      box.dataset.exp = "1";
+      box.innerHTML = `<div class="card cta"><div class="cta-text"><p class="kicker">这里是实验的运行过程</p>
+        <h3>结果、结论、盲评和 AIGC 检测都在实验报告里</h3></div>
+        <a class="btn primary big" href="#/experiments/${t.id}">查看实验报告 →</a></div>`;
+    }
+  }
   try { renderReport(t.state.report, t.state); } catch (err) { showPanelError("report", "采集报告", err); }
   if (t.graph === "research" && t.status === "done") loadRanking().catch((err) => showPanelError("ranking", "价值排序", err));
 }
