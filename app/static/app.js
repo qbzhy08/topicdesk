@@ -1608,6 +1608,20 @@ const VAR_OPTS = [["draft", "初稿", "列提纲后直接成稿"], ["checked", "
   ["no_recheck", "自然化不复核", "消融：自然化后不复核"]];
 const num = (x) => x == null ? "—" : (Math.round(x * 100) / 100).toString();
 
+function renderExList(list) {
+  return list.map((x) => {
+      const bad = x.status === "failed" || x.status === "cancelled", part = !bad && x.failed.length;
+      return `<a class="card ex-item ${bad ? "ex-bad" : part ? "ex-part" : ""}" href="#/experiments/${x.id}">
+        <span><b>${esc(x.topic)}</b>
+          ${bad ? `<span class="tag rel-lo">实验失败</span>` : part ? `<span class="tag rel-lo">${x.failed.length} 篇失败</span>` : ""}
+          ${bad && x.error ? `<br><small class="gap">原因：${esc(x.error.slice(0, 120))}</small>` : ""}
+          ${x.failed.length ? `<br><small class="gap">失败的素材：${x.failed.slice(0, 4).map((f) => `${esc(f.topic.slice(0, 14))}·${esc(VAR_OPTS.find((v) => v[0] === f.variant)?.[1] || f.variant)}${f.error ? `（${esc(f.error.slice(0, 40))}）` : ""}`).join("；")}${x.failed.length > 4 ? " 等" : ""}</small>` : ""}</span>
+        <span class="ex-prog"><small class="muted"><span class="badge ${x.status}">${STATUS[x.status] || x.status}</span> ${x.done}/${x.runs} 篇 · ${fmtTime(x.created_at)}</small>
+          ${x.running || x.status === "running" || x.status === "pending" ? `<span class="bar"><i style="width:${x.runs ? Math.round((x.runs - x.pending) / x.runs * 100) : 0}%"></i></span>` : ""}
+          ${x.fatal ? `<small class="gap">${esc(x.fatal.slice(0, 60))}</small>` : ""}</span></a>`;
+    }).join("") || `<p class="small muted">还没有实验。</p>`;
+}
+
 async function showExperiments() {
   const el = $("#detail");
   const me = current = {};
@@ -1640,15 +1654,24 @@ async function showExperiments() {
       <div class="row"><button>开始实验</button><small class="muted" id="ex-msg"></small></div>
     </form>
     <h2 class="section">实验记录</h2>
-    <div class="ex-list">${list.map((x) => {
-      const bad = x.status === "failed" || x.status === "cancelled", part = !bad && x.failed.length;
-      return `<a class="card ex-item ${bad ? "ex-bad" : part ? "ex-part" : ""}" href="#/experiments/${x.id}">
-        <span><b>${esc(x.topic)}</b>
-          ${bad ? `<span class="tag rel-lo">实验失败</span>` : part ? `<span class="tag rel-lo">${x.failed.length} 篇失败</span>` : ""}
-          ${bad && x.error ? `<br><small class="gap">原因：${esc(x.error.slice(0, 120))}</small>` : ""}
-          ${x.failed.length ? `<br><small class="gap">失败的素材：${x.failed.slice(0, 4).map((f) => `${esc(f.topic.slice(0, 14))}·${esc(VAR_OPTS.find((v) => v[0] === f.variant)?.[1] || f.variant)}${f.error ? `（${esc(f.error.slice(0, 40))}）` : ""}`).join("；")}${x.failed.length > 4 ? " 等" : ""}</small>` : ""}</span>
-        <small class="muted"><span class="badge ${x.status}">${STATUS[x.status] || x.status}</span> ${x.done}/${x.runs} 篇 · ${fmtTime(x.created_at)}</small></a>`;
-    }).join("") || `<p class="small muted">还没有实验。</p>`}</div>`;
+    <p class="small live-note" id="ex-running">${list.filter((x) => x.running || ["running", "pending"].includes(x.status)).length ? "有实验正在运行，进度每 5 秒自动刷新" : ""}</p>
+    <div class="ex-list">${renderExList(list)}</div>`;
+  const nRun = list.filter((x) => x.running || ["running", "pending"].includes(x.status)).length;
+  if (nRun) {                     // 有实验在跑：几个实验的进度在这里一起看，自动刷新列表（不打断正在填的表单）
+    const tick = async () => {
+      if (current !== me) return;
+      const fresh = await api("/api/experiments").catch(() => null);
+      if (!fresh || current !== me) return;
+      list.splice(0, list.length, ...fresh);
+      const box = $(".ex-list", el);
+      if (box) box.innerHTML = renderExList(list);
+      const head = $("#ex-running", el);
+      const n = list.filter((x) => x.running || ["running", "pending"].includes(x.status)).length;
+      if (head) head.textContent = n ? `${n} 个实验正在运行，进度每 5 秒自动刷新` : "";
+      if (n) me.timer = setTimeout(tick, 5000);
+    };
+    me.timer = setTimeout(tick, 5000);
+  }
   const f = $("#ex-new", el);
   $$("[name=kind]", f).forEach((r) => r.onchange = () => $$("[data-k]", f).forEach((x) => x.hidden = x.dataset.k !== f.kind.value));
   f.onsubmit = async (e) => {
@@ -1759,6 +1782,8 @@ async function showExperiment(id) {
     ${(() => {
       const bad = rows.filter((x) => x.status === "failed");
       return bad.length ? `<div class="card ex-failbox"><b>有 ${bad.length} 篇没写成功，没有计入统计</b>
+        ${r.fatal ? `<p class="gap">${esc(r.fatal)}</p>` : ""}
+        ${!busy ? `<div class="row"><button type="button" id="ex-retry">重跑失败的文章（${bad.length} 篇）</button><small class="muted">写成功的保留不动，只重写失败的，然后重新算指标和评审</small></div>` : ""}
         <ul class="small">${bad.map((x) => `<li>${esc(x.topic)} · ${esc(vname(x.variant))}：${esc(x.error || "写作任务失败")}</li>`).join("")}</ul>
         <p class="small muted">同一组素材缺了某个版本时，这组的对比不完整；可以换一组素材重新跑，或检查大模型设置后重跑。</p></div>` : "";
     })()}
@@ -1794,6 +1819,12 @@ async function showExperiment(id) {
     await api(`/api/experiments/${id}/blind?rater=${encodeURIComponent(b.dataset.clearRater)}`, { method: "DELETE" });
     showExperiment(id);
   });
+  const rt = $("#ex-retry", el);
+  if (rt) rt.onclick = async () => {
+    rt.disabled = true;
+    try { await api(`/api/experiments/${id}/retry`, { method: "POST", body: {} }); showExperiment(id); }
+    catch (err) { rt.disabled = false; rt.textContent = err.message; }
+  };
   const dt = $("#ex-detect", el);
   if (dt) dt.onclick = async () => {
     dt.disabled = true; $("#ex-det-msg").textContent = "检测中（首次要下载模型，可能需要几分钟）…";

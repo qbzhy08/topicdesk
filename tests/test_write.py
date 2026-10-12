@@ -887,8 +887,30 @@ class ExperimentFailTest(ExperimentTest):
         finally:
             E._run_one = orig
         bad = [r for r in rep["rows"] if r["status"] == "failed"]
-        self.assertEqual([(r["variant"], r["error"]) for r in bad], [("natural_only", "大模型超时（测试）")])
+        self.assertEqual([r["variant"] for r in bad], ["natural_only"])
+        self.assertIn("超时", bad[0]["error"])                                     # 报错翻译成看得懂的原因
         self.assertEqual(rep["avg"]["natural_only"]["n"], 0)                       # 失败的不计入统计
         lst = next(x for x in self.c.get("/api/experiments").get_json() if x["id"] == eid)
         self.assertEqual(lst["failed"][0]["variant"], "natural_only")
         self.assertEqual((lst["done"], lst["runs"]), (3, 4))
+
+    def test_fatal_error_stops_and_retry(self):
+        from app.graphs import experiment as E
+        orig = E._run_one
+        E._run_one = lambda r, p, u: {"write_task": None, "status": "failed", "seconds": 1, "article_id": None, "version": None,
+                                      "error": '节点 draft 失败：HTTP 402: {"error":{"message":"Insufficient Balance"}}'}
+        try:
+            eid, rep = self.run_exp(research_tasks=[self.t1], skill="brief", detector="manual", parallel=1)
+        finally:
+            E._run_one = orig
+        self.assertIn("余额不足", rep["fatal"])
+        self.assertTrue(all(r["status"] == "failed" for r in rep["rows"]))
+        self.assertIn("没有开始写", rep["rows"][-1]["error"])                    # 第一篇失败后就停了
+        # 充值后重跑：只重写失败的
+        r = self.c.post(f"/api/experiments/{eid}/retry", json={})
+        self.assertEqual(r.get_json()["retry"], 4)
+        self.assertEqual(run_task(eid), "done")
+        rep = self.c.get(f"/api/experiments/{eid}").get_json()
+        self.assertTrue(all(x["status"] == "done" for x in rep["rows"]))
+        self.assertIsNone(rep["fatal"])
+        self.assertEqual(rep["blind_pairs"], 1)

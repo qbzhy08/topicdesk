@@ -1065,10 +1065,13 @@ def list_experiments():
                     "ORDER BY created_at DESC LIMIT 50")
     out = []
     for r in rows:
-        runs = (r.pop("state") or {}).get("runs") or []
+        st_ = r.pop("state") or {}
+        runs = st_.get("runs") or []
         failed = [{"topic": x["topic"], "variant": x["variant"], "error": (x.get("error") or "")[:120],
                    "research_task": x["research_task"]} for x in runs if x.get("status") == "failed"]
-        out.append({**r, "runs": len(runs), "done": sum(1 for x in runs if x.get("status") == "done"), "failed": failed})
+        out.append({**r, "runs": len(runs), "done": sum(1 for x in runs if x.get("status") == "done"), "failed": failed,
+                    "fatal": st_.get("fatal"), "running": runner.is_running(r["id"]),
+                    "pending": sum(1 for x in runs if x.get("status") == "pending")})
     return jsonify(out)
 
 
@@ -1087,6 +1090,29 @@ def get_experiment(eid):
     rep.update(topic=t["topic"], error=t["error"], current_node=t["current_node"], running=runner.is_running(eid),
                created_at=t["created_at"])
     return jsonify(rep)
+
+
+@app.post("/api/experiments/<eid>/retry")
+def experiment_retry(eid):
+    """重跑失败（或没开始）的文章：只把这些标回待写，从“写作”这一步接着跑，写成功的保留不动。"""
+    from .harness import patch_state
+    t = _exp_or_404(eid)
+    if runner.is_running(eid):
+        return jsonify(error="实验还在运行"), 409
+    runs = (t["state"] or {}).get("runs") or []
+    redo = [r for r in runs if r.get("status") in ("failed", "pending")]
+    if not redo:
+        return jsonify(error="没有失败的文章"), 400
+    for r in redo:
+        for k in ("error", "raw_error", "write_task", "article_id", "version", "seconds", "metrics", "text", "claim_judge"):
+            r.pop(k, None)
+        r["status"] = "pending"
+    for r in runs:                      # 指标、评审要按全部文章重算
+        r.pop("claim_judge", None)
+    patch_state(eid, {"runs": runs, "fatal": None, "llm_pairs": {}}, note=f"重跑 {len(redo)} 篇失败的文章")
+    rewind(eid, "write", note="重跑失败的文章")
+    runner.start(eid)
+    return jsonify(retry=len(redo))
 
 
 @app.get("/api/experiments/<eid>/text/<path:key>")

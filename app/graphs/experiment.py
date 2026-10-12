@@ -103,6 +103,24 @@ def _run_one(r, params, user_id):
             "article_id": res.get("article_id"), "version": res.get("version")}
 
 
+FATAL = [(r"HTTP 402|Insufficient Balance|insufficient_quota|余额不足|欠费", "大模型账户余额不足（HTTP 402）：请到大模型服务商充值后，在报告页点“重跑失败的文章”"),
+         (r"HTTP 401|invalid api key|Incorrect API key|Unauthorized|未配置 LLM", "大模型的 API Key 无效或没有配置：请到“设置”里检查后重跑"),
+         (r"HTTP 403", "大模型服务拒绝访问（HTTP 403）：检查账号权限或模型名称后重跑")]
+
+
+def friendly_error(err: str | None) -> tuple[str, bool]:
+    """把写作失败的原始报错翻译成能看懂的原因；返回 (说明, 是否是继续跑也没用的致命错误)。"""
+    import re
+    for pat, msg in FATAL:
+        if err and re.search(pat, err, re.I):
+            return msg, True
+    if err and re.search(r"timed? ?out|超时", err, re.I):
+        return "大模型响应超时：可以把“同时写几篇”调小后重跑", False
+    if err and re.search(r"HTTP 429|rate limit|Too Many Requests", err, re.I):
+        return "请求太频繁被限流（HTTP 429）：把“同时写几篇”调成 1 后重跑", False
+    return (err or "写作任务失败")[:200], False
+
+
 def write(ctx):
     st, p = ctx.state, ctx.params
     todo = [r for r in st["runs"] if r["status"] == "pending"]
@@ -112,9 +130,21 @@ def write(ctx):
     params = {**p, "_exp": ctx.task_id}
     with ThreadPoolExecutor(max_workers=len(batch)) as ex:
         outs = list(ex.map(lambda r: _run_one(r, params, ctx.user_id), batch))
+    fatal = None
     for r, o in zip(batch, outs):
         r.update(o)
         r["status"] = "done" if o["status"] == "done" and o.get("article_id") else "failed"
+        if r["status"] == "failed":
+            r["raw_error"] = r.get("error")
+            r["error"], is_fatal = friendly_error(r.get("error"))
+            fatal = fatal or (r["error"] if is_fatal else None)
+    if fatal:      # 余额不足、Key 无效：后面的文章写了也是白失败，直接停下，不再浪费时间
+        rest = [r for r in st["runs"] if r["status"] == "pending"]
+        for r in rest:
+            r.update(status="failed", error=f"没有开始写：{fatal}")
+        st["fatal"] = f"{fatal}（已停止，剩下 {len(rest)} 篇没有开始写）"
+        ctx.observe(st["fatal"])
+        return "measure"
     done = sum(1 for r in st["runs"] if r["status"] != "pending")
     ctx.observe(f"已写完 {done}/{len(st['runs'])} 篇：" + "；".join(
         f"{r['topic'][:12]}·{_vname(st, r)} {'✓' if r['status'] == 'done' else '✗ ' + str(r.get('error'))[:40]}（{r['seconds']}s）"
@@ -227,14 +257,18 @@ def finish(ctx):
     st = ctx.state
     # 读者盲评：每组初稿/优化稿随机分成“甲/乙”，对应关系只存在这里（评分页看不到）
     rnd = random.Random(ctx.task_id)
+    keep = {p["research_task"]: p for p in st.get("blind") or []}     # 重跑后已有的分组不变（读者评分还对得上）
     st["blind"] = []
     if st["kind"] == "ablation":
         by = {(r["research_task"], r["variant"]): r for r in st["runs"] if r.get("text")}
         for tid in dict.fromkeys(r["research_task"] for r in st["runs"]):
             x, y = by.get((tid, BLIND_PAIR[0])), by.get((tid, BLIND_PAIR[1]))
+            if x and y and tid in keep:
+                st["blind"].append(keep[tid])
+                continue
             if x and y:
                 flip = rnd.random() < 0.5
-                st["blind"].append({"pair_id": f"p{len(st['blind']) + 1}", "research_task": tid, "topic": x["topic"],
+                st["blind"].append({"pair_id": f"p{len(st['blind']) + len(keep) + 1}", "research_task": tid, "topic": x["topic"],
                                     "甲": (y if flip else x)["key"], "乙": (x if flip else y)["key"]})
     st["finished"] = time.time()
     ctx.observe(f"实验完成：{sum(1 for r in st['runs'] if r['status'] == 'done')} 篇；读者盲评 {len(st['blind'])} 组待评")

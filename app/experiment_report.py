@@ -205,7 +205,7 @@ def build(exp: dict) -> dict:
            "params": exp["params"], "rows": rows, "variants": [{"id": v, **VARIANTS.get(v, {"name": v, "desc": ""})} for v in variants],
            "detectors": detectors, "metric_cols": [{"key": k, "name": n, "better": b} for k, n, b in METRIC_COLS],
            "aigc_note": st.get("aigc_note"), "aigc_error": st.get("aigc_error"), "judge_note": st.get("judge_note"),
-           "blind_pairs": len(st.get("blind") or []), "llm_pairs": st.get("llm_pairs") or {}}
+           "blind_pairs": len(st.get("blind") or []), "llm_pairs": st.get("llm_pairs") or {}, "fatal": st.get("fatal")}
     rep["avg"] = _avg_by_variant(rows, variants, detectors)
     if rep["kind"] == "skills":
         rep["skills"] = _skills_compare(rows)
