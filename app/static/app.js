@@ -1614,6 +1614,8 @@ async function showExperiments() {
   const [list, tasks, sk, ai] = await Promise.all([api("/api/experiments"), api("/api/tasks"), api("/api/skills"), api("/api/aigc")]);
   if (current !== me) return;
   const done = tasks.filter((t) => t.graph === "research" && t.status === "done");
+  const failedIn = {};                 // 素材在之前的实验里写失败过：选的时候标出来
+  list.forEach((x) => x.failed.forEach((f) => (failedIn[f.research_task] ||= []).push(f.error || "写作失败")));
   el.innerHTML = `<div class="detail-head"><div><p class="kicker">评测</p><h1>评测实验</h1>
       <p class="meta">用同一批素材写出不同版本，比较事实保真、信息密度、表达自然、理解成本和 AIGC 检测结果；也可以比较几种 Skill 的选材和表达。</p></div></div>
     <form class="card ex-new" id="ex-new">
@@ -1621,7 +1623,8 @@ async function showExperiments() {
       <div class="ex-kind"><label><input type="radio" name="kind" value="ablation" checked> <b>初稿 vs 优化稿 + 消融</b>：同一 Skill，只改写作步骤</label>
         <label><input type="radio" name="kind" value="skills"> <b>多种 Skill 对照</b>：同一批素材，用几种写法各写一篇图文文章</label></div>
       <fieldset><legend>素材（已完成的检索任务；初稿 vs 优化稿建议选 3 组以上）</legend>
-        <div class="ex-tasks">${done.map((t) => `<label><input type="checkbox" name="rt" value="${t.id}"> ${esc(taskTitle(t))} <small class="muted">${fmtTime(t.created_at)}</small></label>`).join("") || `<p class="small muted">还没有完成的检索任务。</p>`}</div></fieldset>
+        <div class="ex-tasks">${done.map((t) => `<label class="${failedIn[t.id] ? "ex-bad-src" : ""}"><input type="checkbox" name="rt" value="${t.id}"> ${esc(taskTitle(t))} <small class="muted">${fmtTime(t.created_at)}</small>
+          ${failedIn[t.id] ? `<span class="tag rel-lo" title="${esc(failedIn[t.id].join("；"))}">之前实验里失败 ${failedIn[t.id].length} 次</span>` : ""}</label>`).join("") || `<p class="small muted">还没有完成的检索任务。</p>`}</div></fieldset>
       <div data-k="ablation">
         <label>写法 Skill<select name="skill">${sk.skills.map((x) => `<option value="${x.id}" ${x.id === "brief" ? "selected" : ""}>${esc(x.name)} v${esc(x.version)}</option>`).join("")}</select></label>
         <fieldset><legend>变体（每组素材各写一篇）</legend><div class="ex-vars">${VAR_OPTS.map(([k, n, d]) =>
@@ -1637,8 +1640,15 @@ async function showExperiments() {
       <div class="row"><button>开始实验</button><small class="muted" id="ex-msg"></small></div>
     </form>
     <h2 class="section">实验记录</h2>
-    <div class="ex-list">${list.map((x) => `<a class="card ex-item" href="#/experiments/${x.id}"><b>${esc(x.topic)}</b>
-      <small class="muted">${STATUS[x.status] || x.status} · ${fmtTime(x.created_at)}${x.error ? ` · ${esc(x.error.slice(0, 60))}` : ""}</small></a>`).join("") || `<p class="small muted">还没有实验。</p>`}</div>`;
+    <div class="ex-list">${list.map((x) => {
+      const bad = x.status === "failed" || x.status === "cancelled", part = !bad && x.failed.length;
+      return `<a class="card ex-item ${bad ? "ex-bad" : part ? "ex-part" : ""}" href="#/experiments/${x.id}">
+        <span><b>${esc(x.topic)}</b>
+          ${bad ? `<span class="tag rel-lo">实验失败</span>` : part ? `<span class="tag rel-lo">${x.failed.length} 篇失败</span>` : ""}
+          ${bad && x.error ? `<br><small class="gap">原因：${esc(x.error.slice(0, 120))}</small>` : ""}
+          ${x.failed.length ? `<br><small class="gap">失败的素材：${x.failed.slice(0, 4).map((f) => `${esc(f.topic.slice(0, 14))}·${esc(VAR_OPTS.find((v) => v[0] === f.variant)?.[1] || f.variant)}${f.error ? `（${esc(f.error.slice(0, 40))}）` : ""}`).join("；")}${x.failed.length > 4 ? " 等" : ""}</small>` : ""}</span>
+        <small class="muted"><span class="badge ${x.status}">${STATUS[x.status] || x.status}</span> ${x.done}/${x.runs} 篇 · ${fmtTime(x.created_at)}</small></a>`;
+    }).join("") || `<p class="small muted">还没有实验。</p>`}</div>`;
   const f = $("#ex-new", el);
   $$("[name=kind]", f).forEach((r) => r.onchange = () => $$("[data-k]", f).forEach((x) => x.hidden = x.dataset.k !== f.kind.value));
   f.onsubmit = async (e) => {
@@ -1672,14 +1682,15 @@ async function showExperiment(id) {
       const x = r.avg[v.id]?.aigc?.[d], b0 = base && r.avg[base]?.aigc?.[d];
       return `<td class="${v.id !== base ? better({ better: "down" }, b0, x) : ""}">${pct(x)}</td>`; }).join("")}</tr>`).join("")}</table></div>`;
   const runRows = (tid) => rows.filter((x) => x.research_task === tid);
-  const detail = () => topics.map(([tid, topic]) => `<details class="card ex-topic"><summary><b>${esc(topic)}</b> <small class="muted">${runRows(tid).length} 篇</small></summary>
+  const detail = () => topics.map(([tid, topic]) => { const nb = runRows(tid).filter((x) => x.status === "failed").length;
+    return `<details class="card ex-topic ${nb ? "ex-bad" : ""}" ${nb ? "open" : ""}><summary><b>${esc(topic)}</b> <small class="muted">${runRows(tid).length} 篇</small>${nb ? ` <span class="tag rel-lo">${nb} 篇失败</span>` : ""}</summary>
     <div class="table-wrap"><table class="tbl ex-tbl"><tr><th>变体</th><th>字数</th><th>支持率</th><th>数字错误</th><th>待确认</th><th>独立核验</th><th>事实/千字</th><th>套话/千字</th><th>句长变化</th><th>阅读分钟</th>
       ${r.detectors.map((d) => `<th>${esc(d)}</th>`).join("")}<th>文章</th></tr>
-    ${runRows(tid).map((x) => `<tr><td>${esc(vname(x.variant))}${x.status !== "done" ? ` <span class="gap small">${esc(x.status)} ${esc(x.error || "")}</span>` : ""}</td>
+    ${runRows(tid).map((x) => `<tr class="${x.status === "failed" ? "ex-row-bad" : ""}"><td>${esc(vname(x.variant))}${x.status === "failed" ? ` <span class="tag rel-lo">失败</span><br><small class="gap">${esc((x.error || "写作任务失败").slice(0, 80))}</small>` : x.status !== "done" ? ` <small class="muted">${esc(STATUS[x.status] || x.status)}</small>` : ""}</td>
       <td>${num(x.chars)}</td><td>${pct(x.support_rate)}</td><td>${num(x.number_errors)}</td><td>${num(x.problems)}</td><td>${pct(x.judge_fidelity)}</td>
       <td>${num(x.facts_per_1k)}</td><td>${num(x.tropes_per_1k)}</td><td>${num(x.sentence_len_cv)}</td><td>${num(x.read_minutes)}</td>
       ${r.detectors.map((d) => `<td>${pct(x.aigc[d])}</td>`).join("")}
-      <td>${x.article_id ? `<a href="#/article/${x.article_id}">打开</a>` : ""}</td></tr>`).join("")}</table></div></details>`).join("");
+      <td>${x.article_id ? `<a href="#/article/${x.article_id}">打开</a>` : ""}</td></tr>`).join("")}</table></div></details>`; }).join("");
   const aigcBox = () => `<div class="card"><h3>AIGC 检测（同一检测器、同一份完整正文）</h3>
     <p class="small">“完整正文”= 文章去掉配图、图注、阅读说明和参考资料列表后的全部文字（标题、小标题、出处编号保留），每篇用同样的处理。
       检测器只给“像不像 AI 写的”的统计判断，所以下面总和事实保真、表达自然、理解成本放在一起看。</p>
@@ -1745,6 +1756,12 @@ async function showExperiment(id) {
       <p class="meta"><span class="badge ${r.status}">${STATUS[r.status] || r.status}</span> ${busy ? `正在：${esc(NODE_NAME[r.current_node] || r.current_node || "")}` : ""}
         · ${fmtTime(r.created_at)} · <a href="#/task/${id}">实验过程</a></p>${r.error ? `<p class="error">${esc(r.error)}</p>` : ""}</div></div>
     ${busy ? `<div class="live"><span class="orb"></span>实验进行中：已写完 ${rows.filter((x) => x.status !== "pending").length}/${rows.length} 篇，页面会自动刷新</div>` : ""}
+    ${(() => {
+      const bad = rows.filter((x) => x.status === "failed");
+      return bad.length ? `<div class="card ex-failbox"><b>有 ${bad.length} 篇没写成功，没有计入统计</b>
+        <ul class="small">${bad.map((x) => `<li>${esc(x.topic)} · ${esc(vname(x.variant))}：${esc(x.error || "写作任务失败")}</li>`).join("")}</ul>
+        <p class="small muted">同一组素材缺了某个版本时，这组的对比不完整；可以换一组素材重新跑，或检查大模型设置后重跑。</p></div>` : "";
+    })()}
     ${r.kind === "skills" ? skillsBox() : `
     <div class="card small"><b>实验设置</b>：Skill「${esc(r.params.skill)}」；变体：${r.variants.map((v) => `<b>${esc(v.name)}</b>（${esc(v.desc)}）`).join("；")}。
       同一组素材的各变体用完全相同的素材和 Skill，只差写作步骤；为了只比较文字，变体都不配图。</div>

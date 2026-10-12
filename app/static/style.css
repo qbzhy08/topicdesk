@@ -810,3 +810,10 @@ button.linkish { background: none; color: var(--info); padding: 0; font-size: 12
 .bl-groups button { background: var(--card); color: var(--ink); border: 1px solid var(--line); padding: 4px 12px; font-size: 13px; }
 .bl-groups button.done { color: var(--ok); }
 .bl-groups button.on { border-color: var(--ink); background: var(--ink); color: #fff; }
+.ex-item.ex-bad, details.ex-topic.ex-bad, .ex-failbox { border-color: var(--accent); border-left: 4px solid var(--accent); }
+.ex-item.ex-part { border-left: 4px solid var(--warn); }
+.ex-failbox { background: #fbf0ee; }
+.ex-failbox ul { margin: 6px 0; padding-left: 20px; }
+.ex-tbl tr.ex-row-bad td { background: #fbf0ee; }
+.ex-tbl tr.ex-row-bad td:first-child { white-space: normal; }
+.ex-bad-src { color: var(--accent) !important; }

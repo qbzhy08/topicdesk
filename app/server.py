@@ -1061,9 +1061,15 @@ def create_experiment():
 
 @app.get("/api/experiments")
 def list_experiments():
-    rows = db.query("SELECT id, topic, status, params, created_at, updated_at, error FROM tasks WHERE graph='experiment' "
+    rows = db.query("SELECT id, topic, status, params, state, created_at, updated_at, error FROM tasks WHERE graph='experiment' "
                     "ORDER BY created_at DESC LIMIT 50")
-    return jsonify(rows)
+    out = []
+    for r in rows:
+        runs = (r.pop("state") or {}).get("runs") or []
+        failed = [{"topic": x["topic"], "variant": x["variant"], "error": (x.get("error") or "")[:120],
+                   "research_task": x["research_task"]} for x in runs if x.get("status") == "failed"]
+        out.append({**r, "runs": len(runs), "done": sum(1 for x in runs if x.get("status") == "done"), "failed": failed})
+    return jsonify(out)
 
 
 def _exp_or_404(eid):

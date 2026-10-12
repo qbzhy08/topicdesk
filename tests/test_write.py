@@ -869,3 +869,26 @@ class AigcDownloadTest(WriteBase):
         self.assertTrue(aigc.status()["model_ready"])
         self.assertEqual(aigc.settings()["hf_endpoint"], "https://hf-mirror.com")
         self.assertIn("models", d)
+
+
+class ExperimentFailTest(ExperimentTest):
+    def test_failed_runs_marked(self):
+        from app.graphs import experiment as E
+        orig = E._run_one
+
+        def flaky(r, params, user_id):
+            if r["variant"] == "natural_only":
+                return {"write_task": None, "status": "failed", "error": "大模型超时（测试）", "seconds": 1,
+                        "article_id": None, "version": None}
+            return orig(r, params, user_id)
+        E._run_one = flaky
+        try:
+            eid, rep = self.run_exp(research_tasks=[self.t1], skill="brief", detector="manual")
+        finally:
+            E._run_one = orig
+        bad = [r for r in rep["rows"] if r["status"] == "failed"]
+        self.assertEqual([(r["variant"], r["error"]) for r in bad], [("natural_only", "大模型超时（测试）")])
+        self.assertEqual(rep["avg"]["natural_only"]["n"], 0)                       # 失败的不计入统计
+        lst = next(x for x in self.c.get("/api/experiments").get_json() if x["id"] == eid)
+        self.assertEqual(lst["failed"][0]["variant"], "natural_only")
+        self.assertEqual((lst["done"], lst["runs"]), (3, 4))
