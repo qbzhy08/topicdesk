@@ -42,7 +42,8 @@ def parse(text: str, origin: str = "") -> dict:
         raise SkillError(f"{origin}：YAML 格式错误 {e}") from e
     miss = [k for k in REQUIRED if not head.get(k)]
     if miss:
-        raise SkillError(f"{origin}：缺少字段 {miss}")
+        names = {"id": "id", "name": "名称", "version": "版本", "reader": "读者", "structure": "结构（至少一节）"}
+        raise SkillError(f"还差必填项：{'、'.join(names.get(k, k) for k in miss)}" + (f"（{origin}）" if origin not in ("", "SKILL.md") else ""))
     sk = {**DEFAULTS, **head}
     sk["material"] = {**DEFAULTS["material"], **(head.get("material") or {})}
     sk["images"] = {**DEFAULTS["images"], **(head.get("images") or {})}
@@ -56,7 +57,7 @@ def parse(text: str, origin: str = "") -> dict:
     secs = []
     for i, s in enumerate(sk["structure"]):
         if not isinstance(s, dict) or not s.get("heading"):
-            raise SkillError(f"{origin}：structure 第 {i + 1} 项缺少 heading")
+            raise SkillError(f"结构第 {i + 1} 节还没写小标题")
         secs.append({"id": str(s.get("id") or f"s{i}"), "heading": str(s["heading"]), "goal": str(s.get("goal") or ""),
                      "words": int(s.get("words") or 250)})
     sk["structure"] = secs
@@ -153,7 +154,7 @@ def lint(sk: dict) -> list[str]:
 def validate(text: str) -> dict:
     sk = parse(text, "SKILL.md")
     if not ID_RE.match(sk["id"]):
-        raise SkillError("id 只能用小写字母、数字、- 和 _，以字母开头，2-30 个字符，例如 my-weekly")
+        raise SkillError("id 只能用小写英文字母、数字、- 和 _，以字母开头，2-30 个字符，例如 my-weekly")
     return {"skill": public({**sk, "path": f"skills/{sk['id']}/SKILL.md"}) | {"body": sk["body"]}, "warnings": lint(sk)}
 
 

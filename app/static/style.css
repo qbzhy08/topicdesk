@@ -804,3 +804,5 @@ button.linkish { background: none; color: var(--info); padding: 0; font-size: 12
 .sx ins { background: #cfe8d7; color: #1d5a37; text-decoration: none; }
 .sx-gap { text-align: center; color: var(--muted); font-size: 12px; margin: 4px 0; }
 @media (max-width: 800px) { .sx-row { grid-template-columns: 1fr; } .sx-empty { display: none; } }
+.req { color: var(--accent); }
+.sk-form .missing { border-color: var(--accent) !important; background: #fbf0ee !important; }

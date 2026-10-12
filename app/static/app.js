@@ -1430,6 +1430,7 @@ async function showSkillEditor(editId, fromId) {
     if (fromId) { form.id = `${k.id}-my`; form.name = `${k.name}（我的版本）`; form.version = "1.0.0"; form.author = "我"; }
   }
   const editing = !!editId;
+  if (!src) form.id = "my-" + Date.now().toString(36).slice(-5);      // 新建时先给一个可用的 id，可以改
   el.innerHTML = `<div class="detail-head"><div><p class="kicker"><a href="#/skills">写法 Skill</a> · ${editing ? "编辑" : fromId ? "复制为新 Skill" : "新建"}</p>
       <h1>${editing ? esc(form.name) : fromId ? `基于「${esc(info.skill.name)}」新建` : "新建 Skill"}</h1>
       ${editing ? `<p class="meta">当前 v${esc(form.version)} · 已用它写过 ${info.articles} 篇文章 · 改了内容但没改版本号时，保存会自动升一个小版本，旧版本留在历史里</p>` : ""}</div>
@@ -1437,13 +1438,13 @@ async function showSkillEditor(editId, fromId) {
     <div class="sk-edit">
       <form class="sk-form card" data-pane="form" autocomplete="off">
         <div class="sk-grid2">
-          <label>名称<input name="name" required placeholder="例如：周报"></label>
-          <label>id（英文，保存后不能改）<input name="id" required pattern="[a-z][a-z0-9_-]{1,29}" placeholder="例如：weekly" ${editing ? "readonly" : ""}></label>
+          <label>名称 <b class="req">*</b><input name="name" required placeholder="例如：周报"></label>
+          <label>id <b class="req">*</b>（英文，已自动生成，可改；保存后不能改）<input name="id" required pattern="[a-z][a-z0-9_-]{1,29}" placeholder="例如：weekly" ${editing ? "readonly" : ""}></label>
           <label>版本<input name="version" placeholder="1.0.0"></label>
           <label>作者<input name="author" placeholder="我"></label>
         </div>
         <label>一句话简介<input name="summary" placeholder="这种写法适合什么"></label>
-        <label>读者（写给谁、他们知道什么、想要什么）<textarea name="reader" rows="2"></textarea></label>
+        <label>读者 <b class="req">*</b>（写给谁、他们知道什么、想要什么）<textarea name="reader" rows="2" placeholder="例如：团队里的产品和运营同事，了解业务但不懂技术，想知道这周发生了什么、对我们有什么影响"></textarea></label>
         <label>篇幅<input name="length" placeholder="例如：800-1200 字"></label>
         <fieldset><legend>结构（按顺序；目标里写“以【分析】开头”的节会写判断）</legend>
           <div class="sk-rows"></div><button type="button" class="ghost sm" data-add-sec>＋ 加一节</button></fieldset>
@@ -1518,7 +1519,16 @@ async function showSkillEditor(editId, fromId) {
       if (current !== me) return;
       last = r;
       const pv = $(".sk-pv", el);
-      if (!r.ok) { pv.innerHTML = `<p class="gap">还不能保存：${esc(r.error)}</p>`; return; }
+      $$(".sk-form .missing", el).forEach((x) => x.classList.remove("missing"));
+      if (!r.ok) {
+        if (mode === "form") [["名称", "name"], ["读者", "reader"], ["id", "id"]].forEach(([n, k]) => {
+          if (r.error.includes(n) && f[k]) f[k].classList.add("missing");
+        });
+        pv.innerHTML = `<p class="gap">${esc(r.error)}</p><p class="small muted">带 * 的是必填项，填好后这里会显示预览。</p>`;
+        $("#sk-save", el).disabled = true;
+        return;
+      }
+      $("#sk-save", el).disabled = false;
       const k = r.skill, total = k.structure.reduce((a, x) => a + x.words, 0);
       pv.innerHTML = `<p><b>${esc(k.name)}</b> <small class="muted">v${esc(k.version)} · 指纹 <code>${esc(k.fingerprint)}</code></small></p>
         <p class="small">${esc(k.summary)}</p><p class="small muted">读者：${esc(k.reader)}</p>
