@@ -723,6 +723,22 @@ def _last_para(st, sid):
 
 
 def illustrate(ctx):
+    """配图出错（素材图片异常、图表数据异常等）不应该让整篇文章失败：记下原因，没有配图也照样保存。"""
+    try:
+        return _illustrate(ctx)
+    except Exception as e:  # noqa: BLE001
+        from ..llm import LLMError
+        if isinstance(e, LLMError) and re.search(r"HTTP 40[123]", str(e)):
+            raise                     # 余额不足、Key 无效：让上层知道，别悄悄跳过
+        st = ctx.state
+        st["image_error"] = f"{type(e).__name__}: {str(e)[:200]}"
+        st.setdefault("figures", [])
+        st.setdefault("cover", None)
+        ctx.think(f"配图出错，先不配图保存文章（可以在文章页手动加图）：{st['image_error']}")
+        return "save"
+
+
+def _illustrate(ctx):
     """配图的目标是帮读者获取信息：
     1. 原文里的信息图（图表、数据图、流程/结构图、参数表）优先，放到讲同一件事的段落后；
     2. 用文中资料里的数字主动画图（柱状/折线，每个数值都在出处里找到），有日期事件时画时间线；
@@ -958,7 +974,7 @@ def build_and_save(st, note: str, task_id: str | None, extra_meta: dict | None =
             "figures": figs, "cover": cover, "image_rejected": st.get("image_rejected") or [], "image_checks": image_checks,
             "chart_log": st.get("chart_log") or [], "outline_by": st["outline_by"], "draft_by": st["draft_by"],
             "ref_check": writing.reference_check(rep, docs, sk), "ref_notes": st.get("ref_notes") or [],
-            "natural_log": st.get("natural_log") or [], "stages": st.get("stages_used"),
+            "natural_log": st.get("natural_log") or [], "stages": st.get("stages_used"), "image_error": st.get("image_error"),
             "experiment": st.get("experiment"), "variant": st.get("variant"),
             "write_task": st.get("write_task"), "revisions": st.get("revisions") or [], **(extra_meta or {})}
     v = save_version(st["article_id"], md, meta, note=note, title=st["title"], task_id=task_id)

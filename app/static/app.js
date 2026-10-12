@@ -1603,9 +1603,11 @@ async function showSkillEditor(editId, fromId) {
 }
 
 // ---------------------------------------------------------------- Lv3：评测实验
-const VAR_OPTS = [["draft", "初稿", "列提纲后直接成稿"], ["checked", "核对改写", "+逐句核对、补检、按核对改写"],
-  ["optimized", "优化稿", "+自然化改写（降 AI 腔）+复核"], ["natural_only", "只自然化", "消融：不核对直接降 AI 腔"],
-  ["no_recheck", "自然化不复核", "消融：自然化后不复核"]];
+const VAR_OPTS = [["draft", "初稿", "对照组：列提纲后直接成稿，什么都不检查"],
+  ["checked", "核对改写", "初稿 + 逐句核对出处、缺资料时补检、核对不过的节重写"],
+  ["optimized", "优化稿", "核对改写 + 降 AI 腔改写 + 改完再核对一遍，改坏的节退回（完整流程）"],
+  ["natural_only", "只自然化", "去掉核对、只降 AI 腔：看没有核对兜底时，降 AI 腔会不会改坏事实"],
+  ["no_recheck", "自然化不复核", "完整流程去掉最后那次复核：看“改完再核对一遍”这一步是不是必要"]];
 const num = (x) => x == null ? "—" : (Math.round(x * 100) / 100).toString();
 const pctAi = (x) => x == null ? "—" : x > 0 && x < 0.001 ? "<0.1%" : `${(x * 100).toFixed(1)}%`;   // AIGC 概率常常很小，多保留一位
 
@@ -1642,14 +1644,14 @@ async function showExperiments() {
           ${failedIn[t.id] ? `<span class="tag rel-lo" title="${esc(failedIn[t.id].join("；"))}">之前实验里失败 ${failedIn[t.id].length} 次</span>` : ""}</label>`).join("") || `<p class="small muted">还没有完成的检索任务。</p>`}</div></fieldset>
       <div data-k="ablation">
         <label>写法 Skill<select name="skill">${sk.skills.map((x) => `<option value="${x.id}" ${x.id === "brief" ? "selected" : ""}>${esc(x.name)} v${esc(x.version)}</option>`).join("")}</select></label>
-        <fieldset><legend>变体（每组素材各写一篇）</legend><div class="ex-vars">${VAR_OPTS.map(([k, n, d]) =>
+        <fieldset><legend>变体（每组素材各写一篇；后两个是“去掉某一步”的消融对照，用来证明那一步有用）</legend><div class="ex-vars">${VAR_OPTS.map(([k, n, d]) =>
           `<label><input type="checkbox" name="var" value="${k}" ${k !== "no_recheck" ? "checked" : ""}> <b>${n}</b> <small class="muted">${d}</small></label>`).join("")}</div></fieldset>
       </div>
       <div data-k="skills" hidden><fieldset><legend>写法（至少 2 种）</legend><div class="ex-vars">${sk.skills.map((x) =>
         `<label><input type="checkbox" name="sk" value="${x.id}" ${["brief", "timeline", "compare", "explainer"].includes(x.id) ? "checked" : ""}> <b>${esc(x.name)}</b> <small class="muted">${esc(x.summary)}</small></label>`).join("")}</div></fieldset></div>
       <div class="sk-grid2">
         <label>AIGC 检测器<select name="detector"><option value="auto">本地检测器（${ai.local_ready ? "已安装" : "未安装，跑完后可手动录入外部检测器分数"}）</option><option value="manual">外部检测器（手动录入分数）</option></select></label>
-        <label>同时写几篇<input name="parallel" type="number" min="1" max="4" value="2"></label>
+        <label>同时写几篇（1-6；大模型请求全局最多同时 8 个，超出的会排队，不会被限流）<input name="parallel" type="number" min="1" max="6" value="3"></label>
         <label>本地检测模型下载镜像（国内网络可填 https://hf-mirror.com，可空）<input name="hf" value="${esc(ai.hf_endpoint || "")}" placeholder="https://hf-mirror.com"></label></div>
       <p class="small muted">每篇都会调用大模型写作（初稿 vs 优化稿 4 个变体 × 3 组 ≈ 12 篇，约 15-30 分钟）。实验写的文章不会出现在普通文章列表里。</p>
       <div class="row"><button>开始实验</button><small class="muted" id="ex-msg"></small></div>
@@ -1679,7 +1681,7 @@ async function showExperiments() {
     e.preventDefault();
     const body = { kind: f.kind.value, research_tasks: $$("[name=rt]:checked", f).map((x) => x.value), skill: f.skill.value,
       variants: $$("[name=var]:checked", f).map((x) => x.value), skills: $$("[name=sk]:checked", f).map((x) => x.value),
-      detector: f.detector.value, parallel: +f.parallel.value || 2 };
+      detector: f.detector.value, parallel: +f.parallel.value || 3 };
     if (f.hf.value.trim() !== (ai.hf_endpoint || "")) await api("/api/aigc", { method: "POST", body: { hf_endpoint: f.hf.value.trim() } });
     try { const r = await api("/api/experiments", { method: "POST", body }); location.hash = `#/experiments/${r.id}`; }
     catch (err) { $("#ex-msg").textContent = err.message; }
@@ -1786,17 +1788,18 @@ async function showExperiment(id) {
   };
   const skillsBox = () => (r.skills?.groups || []).map((g) => `<div class="card"><h3>同一批素材 · ${esc(g.topic)}</h3>
     <div class="table-wrap"><table class="tbl ex-tbl"><tr><th>写法</th><th>结构</th><th>字数</th><th>引用资料</th><th>来源数</th><th>事实/千字</th><th>支持率</th><th>平均句长</th><th>套话/千字</th><th>配图</th><th>文章</th></tr>
-    ${g.rows.map((x) => `<tr><td><b>${esc(x.skill_name)}</b><br><small class="muted">v${esc(x.logs.skill_version || "")}</small></td><td class="small">${(x.structure || []).map(esc).join(" / ")}</td>
+    ${g.rows.map((x) => !x.chars ? `<tr><td><b>${esc(x.skill_name)}</b></td><td colspan="10" class="small muted">${x.status === "failed" ? `<span class="gap">失败：${esc(x.error || "")}</span>` : "写作中…写完就会出现结果"}</td></tr>`
+      : `<tr><td><b>${esc(x.skill_name)}</b><br><small class="muted">v${esc(x.logs.skill_version || "")}</small></td><td class="small">${(x.structure || []).map(esc).join(" / ")}</td>
       <td>${num(x.chars)}</td><td>${x.cited_doc_ids.length}/${x.doc_ids.length}</td><td>${num(x.sources_cited)}</td><td>${num(x.facts_per_1k)}</td>
-      <td>${pct(x.support_rate)}</td><td>${num(x.avg_sentence_len)}</td><td>${num(x.tropes_per_1k)}</td><td>${x.logs.figures} 张${x.logs.cover ? "+封面" : ""}</td>
+      <td>${pct(x.support_rate)}</td><td>${num(x.avg_sentence_len)}</td><td>${num(x.tropes_per_1k)}</td><td>${x.logs.figures ?? 0} 张${x.logs.cover ? "+封面" : ""}${x.logs.image_error ? `<br><small class="gap" title="${esc(x.logs.image_error)}">配图出错，未配图</small>` : ""}</td>
       <td><a href="#/article/${x.article_id}">打开</a></td></tr>`).join("")}</table></div>
-    <h4>同一批资料，开头怎么写</h4>${g.rows.map((x) => `<p class="small ex-open"><b>${esc(x.skill_name)}</b>：${esc(x.excerpt)}…</p>`).join("")}
+    <h4>同一批资料，开头怎么写</h4>${g.rows.filter((x) => x.excerpt).map((x) => `<p class="small ex-open"><b>${esc(x.skill_name)}</b>：${esc(x.excerpt)}…</p>`).join("") || `<p class="small muted">写完后显示。</p>`}
     <h4>选材重合度（正文实际引用的资料，Jaccard；1 = 用的资料完全相同）</h4><div class="table-wrap"><table class="tbl"><tr><th></th>${g.rows.map((x) => `<th>${esc(x.skill_name)}</th>`).join("")}</tr>
     ${g.jaccard_cited.map((line, i) => `<tr><th>${esc(g.rows[i].skill_name)}</th>${line.map((v) => `<td>${v == null ? "—" : v.toFixed(2)}</td>`).join("")}</tr>`).join("")}</table></div></div>`).join("");
   el.innerHTML = `<div class="detail-head"><div><p class="kicker"><a href="#/experiments">评测</a> · ${r.kind === "skills" ? "多种 Skill 对照" : "初稿 vs 优化稿 + 消融"}</p><h1>${esc(r.topic)}</h1>
       <p class="meta"><span class="badge ${r.status}">${STATUS[r.status] || r.status}</span> ${busy ? `正在：${esc(NODE_NAME[r.current_node] || r.current_node || "")}` : ""}
         · ${fmtTime(r.created_at)} · <a href="#/task/${id}">实验过程</a></p>${r.error ? `<p class="error">${esc(r.error)}</p>` : ""}</div></div>
-    ${busy ? `<div class="live"><span class="orb"></span>实验进行中：已写完 ${rows.filter((x) => x.status !== "pending").length}/${rows.length} 篇，页面会自动刷新</div>` : ""}
+    ${busy ? `<div class="live"><span class="orb"></span>实验进行中：已写完 ${rows.filter((x) => x.status !== "pending").length}/${rows.length} 篇，写完一篇就出一篇的结果，页面会自动刷新 <small class="muted" id="ex-llm"></small></div>` : ""}
     ${(() => {
       const bad = rows.filter((x) => x.status === "failed");
       return bad.length ? `<div class="card ex-failbox"><b>有 ${bad.length} 篇没写成功，没有计入统计</b>
@@ -1811,7 +1814,10 @@ async function showExperiment(id) {
     <h2 class="section">平均结果（${topics.length} 组素材）</h2>${avgTable()}
     ${conclBox()}${humanBox()}${aigcBox()}${gainBox()}
     <h2 class="section">每组明细</h2>${detail()}`}`;
-  if (busy) me.timer = setTimeout(() => current === me && showExperiment(id), 5000);
+  if (busy) {
+    me.timer = setTimeout(() => current === me && showExperiment(id), 5000);
+    api("/api/llm/stats").then((x) => { const e = $("#ex-llm", el); if (e) e.textContent = `· 大模型请求：进行中 ${x.in_flight}/${x.max}，排队 ${x.waiting}${x.retries ? `，限流后重试 ${x.retries} 次` : ""}`; }).catch(() => {});
+  }
   $$("[data-copy]", el).forEach((b) => b.onclick = async () => {
     const t = await api(`/api/experiments/${id}/text/${encodeURIComponent(b.dataset.copy)}`);
     try { await navigator.clipboard.writeText(t.text); b.textContent = `已复制 ${t.chars} 字`; } catch { b.textContent = "复制失败"; }

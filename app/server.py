@@ -1048,7 +1048,7 @@ def create_experiment():
         return jsonify(error="至少选一组素材（检索任务）"), 400
     params = {"kind": kind, "research_tasks": tids, "skill": b.get("skill") or "brief",
               "variants": b.get("variants") or None, "skills": b.get("skills") or [],
-              "detector": b.get("detector") or "auto", "parallel": int(b.get("parallel") or 2),
+              "detector": b.get("detector") or "auto", "parallel": max(1, min(6, int(b.get("parallel") or 3))),
               "judge": b.get("judge", True)}
     if kind == "skills" and len(params["skills"]) < 2:
         return jsonify(error="Skill 对照至少选 2 种写法"), 400
@@ -1281,6 +1281,12 @@ def experiment_rate_clear(eid):
         return jsonify(error="要指定读者"), 400
     n = db.execute("DELETE FROM eval_ratings WHERE experiment_id=? AND rater=?", (eid, rater))
     return jsonify(deleted=n)
+
+
+@app.get("/api/llm/stats")
+def llm_stats():
+    from . import llm
+    return jsonify(llm.stats())
 
 
 @app.get("/api/aigc")

@@ -126,7 +126,7 @@ def write(ctx):
     todo = [r for r in st["runs"] if r["status"] == "pending"]
     if not todo:
         return "measure"
-    batch = todo[:int(p.get("parallel") or 2)]
+    batch = todo[:int(p.get("parallel") or 3)]
     params = {**p, "_exp": ctx.task_id}
     with ThreadPoolExecutor(max_workers=len(batch)) as ex:
         outs = list(ex.map(lambda r: _run_one(r, params, ctx.user_id), batch))
@@ -134,6 +134,8 @@ def write(ctx):
     for r, o in zip(batch, outs):
         r.update(o)
         r["status"] = "done" if o["status"] == "done" and o.get("article_id") else "failed"
+        if r["status"] == "done":
+            _measure_one(r)
         if r["status"] == "failed":
             r["raw_error"] = r.get("error")
             r["error"], is_fatal = friendly_error(r.get("error"))
@@ -161,29 +163,34 @@ def _vname(st, r):
 def measure(ctx):
     st = ctx.state
     for r in st["runs"]:
-        if r["status"] != "done":
-            continue
-        v = db.query_one("SELECT markdown, meta FROM article_versions WHERE article_id=? AND version=?",
-                         (r["article_id"], r["version"]))
-        meta = v["meta"] or {}
-        docs = _docs_with_text(meta)
-        m = ev.evaluate_version(v["markdown"], meta, docs)
-        r["text"] = m.pop("text")
-        r["claims_pool"] = [{"sentence": i["sentence"], "cites": i["cites"], "analysis": i.get("analysis")}
-                            for i in m.pop("_items") if i.get("cites")]
-        r["metrics"] = m
-        r["doc_ids"] = [d["id"] for d in meta.get("docs") or []]
-        r["cited_doc_ids"] = [d["id"] for d in meta.get("docs") or [] if d.get("ref")]
-        r["structure"] = [s.get("heading") for s in meta.get("sections") or []]
-        r["logs"] = {"natural": meta.get("natural_log") or [], "fixes": len(meta.get("fixes") or []),
-                     "gap": [{"query": g.get("query"), "found": len(g.get("found") or []), "skipped": g.get("skipped")}
-                             for g in meta.get("gap_log") or []],
-                     "skill_version": (meta.get("skill") or {}).get("version"),
-                     "skill_fingerprint": (meta.get("skill") or {}).get("fingerprint"),
-                     "figures": len(meta.get("figures") or []), "cover": bool(meta.get("cover")),
-                     "ref_check": meta.get("ref_check")}
+        _measure_one(r)
     ctx.observe(f"确定性指标算完 {sum(1 for r in st['runs'] if r.get('metrics'))} 篇")
     return "judge"
+
+
+def _measure_one(r):
+    """一篇写完就算它的确定性指标（报告里边写边出结果，不用等全部写完）。"""
+    if r["status"] != "done" or r.get("metrics"):
+        return
+    v = db.query_one("SELECT markdown, meta FROM article_versions WHERE article_id=? AND version=?",
+                     (r["article_id"], r["version"]))
+    meta = v["meta"] or {}
+    docs = _docs_with_text(meta)
+    m = ev.evaluate_version(v["markdown"], meta, docs)
+    r["text"] = m.pop("text")
+    r["claims_pool"] = [{"sentence": i["sentence"], "cites": i["cites"], "analysis": i.get("analysis")}
+                        for i in m.pop("_items") if i.get("cites")]
+    r["metrics"] = m
+    r["doc_ids"] = [d["id"] for d in meta.get("docs") or []]
+    r["cited_doc_ids"] = [d["id"] for d in meta.get("docs") or [] if d.get("ref")]
+    r["structure"] = [s.get("heading") for s in meta.get("sections") or []]
+    r["logs"] = {"natural": meta.get("natural_log") or [], "fixes": len(meta.get("fixes") or []),
+                 "gap": [{"query": g.get("query"), "found": len(g.get("found") or []), "skipped": g.get("skipped")}
+                         for g in meta.get("gap_log") or []],
+                 "skill_version": (meta.get("skill") or {}).get("version"),
+                 "skill_fingerprint": (meta.get("skill") or {}).get("fingerprint"),
+                 "figures": len(meta.get("figures") or []), "cover": bool(meta.get("cover")),
+                 "ref_check": meta.get("ref_check"), "image_error": meta.get("image_error")}
 
 
 # ---------------------------------------------------------------- judge

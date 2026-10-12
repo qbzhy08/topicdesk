@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
+import time
 
 from . import config
 
@@ -51,6 +53,24 @@ class LLMError(Exception):
     pass
 
 
+# 全局并发闸门：同时进行的大模型请求最多 N 个（多个任务、多个实验一起跑时也不会把服务打到限流）。
+# 被限流（429）或服务端临时错误（5xx）时按 Retry-After / 指数退避自动重试；余额不足、Key 无效直接报错。
+MAX_CONCURRENCY = int(os.environ.get("LLM_MAX_CONCURRENCY", 8))
+_gate = threading.BoundedSemaphore(MAX_CONCURRENCY)
+_stats = {"in_flight": 0, "waiting": 0, "retries": 0}
+_stats_lock = threading.Lock()
+
+
+def stats() -> dict:
+    with _stats_lock:
+        return {**_stats, "max": MAX_CONCURRENCY}
+
+
+def _bump(k, d):
+    with _stats_lock:
+        _stats[k] += d
+
+
 def chat(messages: list[dict], *, json_mode: bool = False, temperature: float = 0.2,
          max_tokens: int = 1500, timeout: float = 60) -> dict:
     """返回 {content, data(若 json_mode), usage, _cost}。"""
@@ -64,10 +84,25 @@ def chat(messages: list[dict], *, json_mode: bool = False, temperature: float = 
         body["response_format"] = {"type": "json_object"}
     url = c["base_url"].rstrip("/") + "/chat/completions"
     headers = {"Authorization": f"Bearer {c['api_key']}", "Content-Type": "application/json"}
-    r = requests.post(url, json=body, headers=headers, timeout=timeout)
-    if r.status_code == 400 and json_mode:      # 部分服务不支持 response_format
-        body.pop("response_format")
-        r = requests.post(url, json=body, headers=headers, timeout=timeout)
+    _bump("waiting", 1)
+    with _gate:
+        _bump("waiting", -1)
+        _bump("in_flight", 1)
+        try:
+            for attempt in range(4):
+                r = requests.post(url, json=body, headers=headers, timeout=timeout)
+                if r.status_code == 400 and json_mode and "response_format" in body:   # 部分服务不支持 response_format
+                    body.pop("response_format")
+                    r = requests.post(url, json=body, headers=headers, timeout=timeout)
+                if r.status_code == 429 or r.status_code >= 500:
+                    if attempt < 3:
+                        ra = r.headers.get("retry-after", "")
+                        _bump("retries", 1)
+                        time.sleep(min(30.0, float(ra)) if ra.replace(".", "", 1).isdigit() else 2.0 * (2 ** attempt))
+                        continue
+                break
+        finally:
+            _bump("in_flight", -1)
     if r.status_code >= 400:
         raise LLMError(f"HTTP {r.status_code}: {r.text[:300]}")
     d = r.json()

@@ -50,7 +50,11 @@ def num_in(n: str, text_norm: str) -> bool:
     n = _norm(n)
     if n in text_norm:
         return True
-    raw = re.match(r"[\d,]+(?:\.\d+)?", n).group(0)
+    m = re.match(r"[-+−]?([\d,]+(?:\.\d+)?)", n)       # 图表数值可能是负数（如 -12%），或者不是数字
+    if not m:
+        return False
+    raw = m.group(1)
+    n = n[m.start(1):]
     core, unit = raw.replace(",", ""), n[len(raw):]
     plain = text_norm.replace(",", "")          # 11,000 与 11000 视为同一个数
     if core + unit in plain:
