@@ -1378,6 +1378,12 @@ async function showArticle(id, ver) {
   const d = await api(`/api/articles/${id}${ver ? `?v=${ver}` : ""}`);
   if (current !== me) return;
   const a = d.article, v = d.version || {}, m = v.meta || {};
+  if (!d.version) {          // 写作失败或还没写完：文章记录有了，但还没有任何版本
+    el.innerHTML = `<div class="detail-head"><div><p class="kicker">文章</p><h1>${esc(a.title || a.topic || "未命名文章")}</h1>
+      <p class="meta">这篇文章还没有写成（写作失败或还在写），没有可看的版本。</p></div></div>
+      <p>${a.task_id ? `<a href="#/task/${esc(a.task_id)}">打开写作过程，看卡在哪一步 →</a>` : ""}</p>`;
+    return;
+  }
   const s = m.check?.summary || {};
   const refOf = (n) => m.refmap?.[String(n)] ?? n;
   const renum = (t) => (t || "").replace(/\[(\d+)\]/g, (_, n) => `[${refOf(n)}]`);
@@ -1730,6 +1736,7 @@ async function showTrust(id) {
   const verdict = (ok, txt) => `<span class="tag ${ok ? "nv-new" : "rel-lo"}">${txt}</span>`;
   const a0 = U.articles[0];
   const mo = S.metrics?.ours || {}, mt = S.metrics?.time || {}, mh = S.metrics?.popularity || S.metrics?.hot || {};
+  const hedgeOk = (x) => !x.hedge_missing && (!x.hedge_needed || x.has_uncertain_section);
   const sameAll = ["dup@10", "primary@10", "coverage@10"].every((k) => mo[k] === mt[k] && mo[k] === mh[k]);
   el.innerHTML = `<div data-f="flow"></div>
     <div class="detail-head"><div><p class="kicker">可信度与可追溯 · <a href="#/task/${id}">${esc(d.task.topic)}</a></p>
@@ -1744,6 +1751,9 @@ async function showTrust(id) {
           ${R.top_reprint ? `<li>报道最多的事件「${esc(R.top_reprint.title.slice(0, 40))}」有 ${R.top_reprint.docs} 篇，按独立来源算是 <b>${R.top_reprint.independent}</b> 个。</li>` : ""}
           <li>写入长期记忆的事实：${facts}。</li>
           ${R.examples_single.length ? `<li>只有单一来源的例子：${R.examples_single.map(esc).join("；")}（排序时可信度降权，写作时放进“还不确定的”）。</li>` : ""}
+          ${R.primary ? "" : `<li class="gap">这次没有找到一手资料。${d.primary_search?.official_used ? "已经专门搜过政府、监管、交易所公告、论文和官方新闻稿，仍没有——相关说法都按“待证实”处理。"
+            : d.primary_search?.websearch ? "这次检索开始时还没有“官方与一手披露”来源；重新检索一次，会专门去搜政府、监管、交易所公告、论文和官方新闻稿。"
+            : "要专门搜政府、监管、交易所公告和官方新闻稿，需要先在“设置”里配置搜索 API（博查 / Tavily / Brave 任一）。"}</li>`}
         </ul><p class="small"><a href="#/library?task=${id}&sort=relevance">看全部资料和来源</a></p></section>
       <section class="card trust-q"><h3>② 筛选有价值吗？ ${verdict((mo["dup@10"] ?? 1) <= (mt["dup@10"] ?? 0), "去重后再按价值排")}</h3>
         <ul>
@@ -1754,15 +1764,16 @@ async function showTrust(id) {
             : `和“按时间”“按热度”两种排法比（前 10 条，我们 vs 按时间 / 按热度）：重复率 <b>${pc(mo["dup@10"])}</b> vs ${pc(mt["dup@10"])} / ${pc(mh["dup@10"])}；一手资料占比 <b>${pc(mo["primary@10"])}</b> vs ${pc(mt["primary@10"])} / ${pc(mh["primary@10"])}；子问题覆盖 <b>${pc(mo["coverage@10"])}</b> vs ${pc(mt["coverage@10"])} / ${pc(mh["coverage@10"])}。`}</li>
           ${S.problems.length ? `<li>系统自己标出的风险：${S.problems.map((p) => `第 ${p.rank} 条「${esc(p.title.slice(0, 30))}」${esc(p.issue)}`).join("；")}。</li>` : ""}
         </ul><p class="small"><a href="#/task/${id}">在任务页看每条资料的排序理由</a></p></section>
-      <section class="card trust-q"><h3>③ 改写帮助理解吗？ ${a0 ? verdict(a0.gain.minutes_saved > 0 && a0.caveats > 0, a0.caveats > 0 ? "省时间，限制条件还在" : "省时间，但限制条件写少了") : verdict(false, "还没写文章")}</h3>
+      <section class="card trust-q"><h3>③ 改写帮助理解吗？ ${a0 ? verdict(hedgeOk(a0) && a0.gain.minutes_saved > 0, hedgeOk(a0) ? "省时间，限制条件都写明了" : "省时间，但有限制条件没写") : verdict(false, "还没写文章")}</h3>
         ${a0 ? `<ul>
           <li>以「<a href="#/article/${a0.id}">${esc(a0.title)}</a>」（${esc(a0.skill || "")}，第 ${a0.version} 版）为例：原始资料约 <b>${a0.gain.minutes_sources}</b> 分钟才读得完，文章 <b>${a0.gain.minutes_article}</b> 分钟。</li>
           <li><b>${a0.gain.cross_source_paras}</b> 段把两个以上来源放在一起交叉印证；<b>${a0.analysis_marked}</b> 段是单独标出的判断（【分析】），和来源原话分开。</li>
           <li>出处支持率 <b>${pc(a0.fidelity.support_rate)}</b>，数字错误 <b>${a0.fidelity.number_errors}</b> 处，待确认 <b>${a0.fidelity.problems}</b> 处。</li>
-          <li>限制条件和争议：文章里有 <b>${a0.caveats}</b> 句写了“可能、尚未、仅、据称、有争议”这类限制；${a0.disputes_known ? `已知争议 ${a0.disputes_known} 条，文章提到 ${a0.disputes_kept} 条；` : ""}${a0.has_uncertain_section ? "结构里有专门写“不确定 / 证据”的一节。" : "<span class='gap'>结构里没有专门写不确定性的一节。</span>"}
-            ${!a0.caveats && a0.caveats_in_sources ? `<br><span class="gap">原始资料里有 ${a0.caveats_in_sources} 句这类限制，这篇一句没写——读者会以为这些说法都已确定。这是这篇要改的地方：可以在文章的审阅里对相关段落用“AI 改写”，要求写明“目前只有单一来源”。</span>` : ""}</li>
+          <li>限制条件和争议：只有单一来源、或有争议的说法 <b>${a0.hedge_needed}</b> 句，${a0.hedge_missing ? `<span class="gap">其中 ${a0.hedge_missing} 句没写明限制（如「${esc(a0.hedge_examples[0] || "")}」）</span>` : a0.hedge_needed ? "<b>都写明了</b>“目前只有某来源报道 / 存在争议”" : "没有需要特别说明的"}；全文共 ${a0.caveats} 句带“可能、尚未、仅、据称、有争议”这类限制。
+            ${a0.hedge_needed ? (a0.has_uncertain_section ? "结构里有专门写“还不确定的”一节。" : "<span class='gap'>结构里没有专门写不确定性的一节。</span>") : ""}
+            ${hedgeOk(a0) ? "" : `<br><button type="button" class="ghost small" data-hedge="${a0.id}" data-v="${a0.version}">一键补上限制条件（存为新版本）</button>`}</li>
           <li>平均句长 ${a0.comprehension.avg_sentence_len} 字，长句占 ${pc(a0.comprehension.long_sentence_ratio)}，未解释的外文术语 ${a0.comprehension.unexplained_terms} 个。</li>
-        </ul>${U.articles.length > 1 ? `<p class="small">这批资料写的 ${U.articles.length} 篇里，限制/争议句数：${U.articles.map((x) => `<a href="#/article/${x.id}">${esc(x.skill || x.title.slice(0, 12))}</a> <b class="${x.caveats ? "" : "gap"}">${x.caveats}</b> 句`).join("、")}。</p>` : ""}` : `<p class="small muted">这次检索还没有写成文章。</p>`}
+        </ul>${U.articles.length > 1 ? `<p class="small">这批资料写的 ${U.articles.length} 篇，限制条件是否写全：${U.articles.map((x) => `<a href="#/article/${x.id}">${esc(x.skill || x.title.slice(0, 12))}</a> ${hedgeOk(x) ? "✓" : `<b class="gap">缺 ${x.hedge_missing || "“还不确定的”一节"}${x.hedge_missing ? " 句" : ""}</b> <button type="button" class="linkish" data-hedge="${x.id}" data-v="${x.version}">补上</button>`}`).join("、")}。</p>` : ""}` : `<p class="small muted">这次检索还没有写成文章。</p>`}
         ${U.experiments.length ? `<p class="small">用这批资料做过对照实验：${U.experiments.map((x) => `<a href="#/experiments/${x.id}">${esc(x.topic.replace(/^评测实验：/, ""))}<small>（${fmtTime(x.created_at)}${x.status !== "done" ? " · " + esc(STATUS[x.status] || x.status) : ""}）</small></a>`).join("、")}（初稿与优化稿的保真度、信息密度、读者盲评都在里面）。</p>` : `<p class="small muted">还没有用这批资料做对照实验；可以在“评测”里做，用读者盲评回答“到底有没有更好懂”。</p>`}</section>
       <section class="card trust-q"><h3>④ 过程可追溯、可复现吗？ ${verdict(T.steps > 0 && T.checkpoints > 0, "每一步都有记录")}</h3>
         <ul>
@@ -1784,7 +1795,8 @@ async function showTrust(id) {
       <details class="card" open><summary>改写更流畅，却丢掉了限制条件与争议，价值增加了吗？</summary>
         <p><b>没有，反而是减分。</b>所以“降 AI 腔”这一步有两道闸：改完逐句重新核对出处，改出问题的节退回原稿；
           并且<b>限制条件和争议的句子数只要变少，这一节就不采用改写</b>（“可能、尚未、仅、据称、有争议、样本”这类词被顺掉，就退回）。
-          ${a0 ? (a0.caveats ? `这次的文章「${esc(a0.title)}」保留了 ${a0.caveats} 句限制/争议；` : `但这道闸只管“改写不能让它变少”，管不了“一开始就没写”：这次的文章「${esc(a0.title)}」一句限制/争议都没有（原始资料里有 ${a0.caveats_in_sources} 句），上面③用红字标了出来，不当作没问题。`) : ""}评测实验里还有“限制与争议/千字”指标，专门看改写有没有把它们丢掉。</p>
+          成稿前还有一道：只有单一来源或有争议的说法，没写明限制就自动补上“目前只有某来源报道，尚待证实”，并在文末加“还不确定的”一节逐条列出。
+          ${a0 ? (hedgeOk(a0) ? `这次的文章「${esc(a0.title)}」里需要说明的 ${a0.hedge_needed} 句都写明了。` : `这次的文章「${esc(a0.title)}」是加这道闸之前写的，还有 ${a0.hedge_missing} 句没写明，上面③标了红，可以一键补上。`) : ""}评测实验里还有“限制与争议/千字”指标，专门看改写有没有把它们丢掉。</p>
         <p class="small muted">我们的取舍：流畅度让位于准确的不确定性。读者宁可读一句“目前只有单一来源”，也不该读一句漂亮但过度确定的话。</p></details>
       <details class="card" open><summary>昨天交付的结论今天被更正，Agent 能否记起并说明变化？</summary>
         <p><b>能。</b>每次交付都存成一条“交付记录”，引用了哪些事实、哪些资料版本都记着。资料复查发现更正后，旧事实标为“已被更正”，
@@ -1801,6 +1813,24 @@ async function showTrust(id) {
         <p class="small muted">我们的取舍：五分钟里宁可少一条，也不放一条读者读完会被误导的。热度只作为参考，不进价值分的主项。</p></details>
     </div>`;
   loadFlow({ task: id }, 0);
+  el.onclick = async (e) => {
+    const b = e.target.closest("[data-hedge]");
+    if (!b) return;
+    b.disabled = true;
+    b.textContent = "正在补…";
+    try {
+      const { id: tid } = await api(`/api/articles/${b.dataset.hedge}/revise`, { method: "POST", body: { op: "hedge", base_version: Number(b.dataset.v) } });
+      for (let i = 0; i < 60; i++) {
+        await new Promise((r) => setTimeout(r, 800));
+        const t = await api(`/api/tasks/${tid}`);
+        if (["done", "failed", "cancelled"].includes(t.status)) {
+          if (t.status !== "done") throw new Error(t.error || "没有补成");
+          break;
+        }
+      }
+      if (current === me) showTrust(id);
+    } catch (err) { b.disabled = false; b.textContent = "重试补上"; alert(err.message); }
+  };
 }
 
 // ---------------------------------------------------------------- Lv3：评测实验

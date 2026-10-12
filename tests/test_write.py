@@ -616,7 +616,8 @@ class SkillWorkshopTest(WriteBase):
         self.assertTrue(mine["custom"])
         # 新 Skill 直接用于写作（没有改任何业务代码）
         task, v = self.write("weekly", no_llm=True)
-        self.assertEqual([s["heading"] for s in task["state"]["sections"]], ["本周进展", "我们的判断"])
+        # Skill 定义的结构原样使用；只有单一来源的说法时，系统在文末补“还不确定的”一节
+        self.assertEqual([s["heading"] for s in task["state"]["sections"] if not s.get("auto")], ["本周进展", "我们的判断"])
         fp1 = v["meta"]["skill"]["fingerprint"]
         # 编辑：内容变了没改版本号 → 自动升版本，旧版存历史
         d = self.c.get("/api/skills/weekly").get_json()
@@ -957,6 +958,47 @@ class TrustTest(WriteBase):
         self.assertIn("caveats", d["understanding"]["articles"][0])
         self.assertGreater(d["trace"]["steps"], 0)
         self.assertEqual(c.get("/api/trust/nope").status_code, 400)
+
+    def test_hedges_and_uncertain_section(self):
+        """只有单一来源的说法：成稿时自动写明限制、加“还不确定的”一节；旧文章可以一键补上；可信度页判为合格。"""
+        from app.server import create_app
+        from app import writing
+        llm.available, llm.chat = (lambda: True), NaturalWriter()
+        task, v = self.write("brief")
+        h = v["meta"]["hedges"]
+        self.assertEqual(h["missing"], 0)
+        if h["needed"]:
+            self.assertTrue(h["uncertain_section"] or h["section_added"])
+            self.assertIn("还不确定的", v["markdown"])
+        # 幂等：再跑一次不重复添加
+        secs = [dict(x) for x in v["meta"]["sections"]]
+        flags = writing.doc_flags(v["meta"]["research_task"], v["meta"]["docs"])
+        r = writing.ensure_hedges(secs, flags)
+        self.assertEqual((r["added"], r["section"]), (0, False))
+        # 模拟加闸之前写的旧文章：去掉补上的说明和那一节 → 可信度页标出缺口 → 一键补上
+        c = create_app().test_client()
+        aid = v["article_id"]
+        row = db.query_one("SELECT * FROM article_versions WHERE article_id=? ORDER BY version DESC", (aid,))
+        meta = row["meta"]
+        meta["sections"] = [dict(x, md=writing.HEDGE_NOTE.sub("", x["md"])) for x in meta["sections"] if not x.get("auto")]
+        flags = writing.doc_flags(meta["research_task"], meta["docs"])
+        # 再把正文里自然写出的限制词也去掉，保证有缺口
+        for x in meta["sections"]:
+            x["md"] = writing.HEDGE.sub("", x["md"])
+        db.execute("UPDATE article_versions SET meta=? WHERE article_id=? AND version=?",
+                   (__import__("json").dumps(meta, ensure_ascii=False), aid, row["version"]))
+        aud = writing.hedge_audit(meta["sections"], flags)
+        if not aud["needed"]:
+            self.skipTest("样例素材里没有单一来源的说法")
+        d = c.get(f"/api/trust/{self.t1}").get_json()
+        art = next(x for x in d["understanding"]["articles"] if x["id"] == aid)
+        self.assertGreater(art["hedge_missing"], 0)
+        tid = c.post(f"/api/articles/{aid}/revise", json={"op": "hedge", "base_version": row["version"]}).get_json()["id"]
+        run_task(tid)
+        d = c.get(f"/api/trust/{self.t1}").get_json()
+        art = next(x for x in d["understanding"]["articles"] if x["id"] == aid)
+        self.assertEqual(art["hedge_missing"], 0)
+        self.assertTrue(art["has_uncertain_section"])
 
     def test_naturalize_keeps_caveats(self):
         from app import trust

@@ -746,7 +746,8 @@ button.linkish { background: none; color: var(--info); padding: 0; font-size: 12
 .sk-outline li { margin: 6px 0; font-size: 13px; position: relative; }
 .sk-outline li > i { display: block; height: 3px; background: var(--accent); opacity: .5; border-radius: 2px; margin: 2px 0; }
 .sk-warn { color: var(--warn); padding-left: 18px; }
-@media (max-width: 900px) { .sk-edit { grid-template-columns: 1fr; } .sk-preview { position: static; } }
+@media (max-width: 900px) { .sk-edit { grid-template-columns: minmax(0, 1fr); } .sk-preview { position: static; max-height: none; }
+  .sk-form, .sk-preview { min-width: 0; max-width: 100%; box-sizing: border-box; } .sk-form input, .sk-form textarea, .sk-form select { max-width: 100%; box-sizing: border-box; } }
 .ref-chk { display: flex; flex-direction: column; gap: 2px; margin: 8px 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; }
 
 /* ---- 评测实验 */

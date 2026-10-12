@@ -7,9 +7,7 @@ import re
 
 from . import db, evaluate as ev, ranking, writing
 
-# 限制条件与争议：改写时最容易被“顺”掉的那类话
-HEDGE = re.compile(r"可能|或许|预计|尚未|尚不|未经|仅|只有|单一来源|据称|宣称|声称|争议|质疑|不确定|待核实|待确认|有待|局限|"
-                   r"样本|前提|条件下|并非|不代表|还不能|目前公开资料|未能确认|存疑|分歧")
+HEDGE = writing.HEDGE          # 限制条件与争议：改写时最容易被“顺”掉的那类话
 
 
 def caveats(text: str) -> int:
@@ -90,11 +88,14 @@ def understanding(research_task: str) -> dict:
         disputes = [f for f in meta.get("facts") or [] if f.get("verify") == "disputed"]
         flagged = [f for f in disputes if writing.overlap(f["content"], text) > 0.3]
         heads = [s.get("heading") for s in meta.get("sections") or []]
+        aud = writing.hedge_audit(meta.get("sections") or [], writing.doc_flags(research_task, meta.get("docs") or []))
         out.append({"id": a["id"], "title": a["title"], "version": a["current_version"],
                     "skill": (meta.get("skill") or {}).get("name"), "gain": m["gain"], "comprehension": m["comprehension"],
                     "fidelity": m["fidelity"], "caveats": caveats(text), "caveats_in_sources": src_caveats,
                     "disputes_known": len(disputes), "disputes_kept": len(flagged),
-                    "has_uncertain_section": any(re.search(r"不确定|争议|问号|没有答案|小心|局限|证据", h or "") for h in heads),
+                    "has_uncertain_section": any(writing.UNCERTAIN_HEAD.search(h or "") for h in heads),
+                    "hedge_needed": aud["needed"], "hedge_missing": aud["missing"],
+                    "hedge_examples": [writing._short_claim(x["sentence"]) for x in aud["missing_items"][:3]],
                     "analysis_marked": m["gain"]["analysis_paras"]})
     exps = db.query("SELECT id, topic, status, state, created_at FROM tasks WHERE graph='experiment' ORDER BY created_at DESC")
     rel = []
@@ -147,4 +148,12 @@ def build(task_id: str) -> dict:
                        "conflicts": mem.get("conflicts", 0), "new_facts": mem.get("new_facts", 0),
                        "stale": (mem.get("stale_from_updates") or [])[:5], "compare": compare,
                        "prefs": mem.get("pref_notes") or []},
-            "quality": rep.get("quality") or {}}
+            "quality": rep.get("quality") or {},
+            "primary_search": _primary_search(t)}
+
+
+def _primary_search(t) -> dict:
+    """这次检索有没有专门找一手资料（“官方与一手披露”来源需要搜索 API）。"""
+    from . import websearch
+    used = (t.get("state") or {}).get("source_ids") or []
+    return {"websearch": websearch.available(), "official_used": "official" in used}

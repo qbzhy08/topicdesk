@@ -542,13 +542,16 @@ def _gap_actions(st: dict, a: dict) -> list[dict]:
         zh_q = a.get("search_zh") or zh_kw
         if zh_q and core_zh and core_zh not in zh_q:
             zh_q = f"{core_zh} {zh_q}"
-    pref = ["github", "arxiv", "openalex"] if kind == "primary" else \
+    techy = bool(set(st.get("domains") or []) & {"tech"})
+    pref = (["github", "arxiv", "openalex"] if techy else ["openalex", "arxiv", "pubmed"]) if kind == "primary" else \
         ["hn", "arxiv", "github"] if kind == "recent" else \
         EN_GAP_SOURCES["science" if "science" in (st.get("domains") or []) else "default"]
     en_srcs = [s for s in pref if s in ok][:2]
     zh_srcs = [sid for sid in ok if (by_id[sid]["config"] or {}).get("lang", "zh") == "zh" and
                (by_id[sid]["method"] in ("api", "search") or (by_id[sid]["config"] or {}).get("search_feed") or
                 (by_id[sid]["method"] == "websearch" and websearch.available()))][:2]
+    if kind == "primary" and "official" in ok:      # 一手资料不足：专门搜政府/监管/公告/论文/官方新闻稿
+        zh_srcs = ["official"] + [x for x in zh_srcs if x != "official"][:1]
     why = f"定向补缺口「{a['name']}」"
     acts = []
     if en_q:

@@ -68,7 +68,8 @@ CHECK_NAME = {"weak": "出处里找不到依据", "number": "数字对不上出�
               "uncited": "有数字但没有出处", "analysis_num": "分析里有资料中没有的数字"}
 
 FIX_NOTE = """上一稿核对发现这些问题，请改写本节并修正：数字以出处原文为准；找不到依据的数字和说法直接删掉，
-或改成不含数字的定性表述。不要在正文里解释你删了什么、为什么删（读者看不到核对过程）：
+或改成不含数字的定性表述。没问题的句子和它们的出处编号原样保留，不要减少引用的来源；
+不要为了补字数加过渡句、空泛评论或重复前文。不要在正文里解释你删了什么、为什么删（读者看不到核对过程）：
 {items}"""
 
 
@@ -92,7 +93,64 @@ def _stages(ctx) -> dict:
     return {**DEFAULT_STAGES, **(ctx.params.get("stages") or {})}
 
 
+MAX_FIX_ROUNDS = 2
+
+
+def _tidy(ctx, docs=None) -> dict:
+    """改写几轮后的收尾（只在开了“核对后改写”时做，对照组初稿不做）：
+    1) 两轮改写后仍核对不过的句子（数字对不上、出处里找不到依据、有数字没出处、分析里编数字）直接删掉，
+       宁可少一句，也不留一句可能误导的话；删完这一节会太空时保留并标“（待核实）”；
+    2) 和前文意思重复的句子删掉（出处没有超出前一句的才删），降低重复率。"""
+    st = ctx.state
+    if not (_stages(ctx)["fix"] and _use_llm(ctx)):
+        return {"dropped": 0, "dups": 0}
+    docs = docs or _docs(st)
+    rep = st.get("check") or _check(ctx, docs)
+    by_sec = {x["id"]: x for x in st["sections"]}
+    dropped = []
+    for i in _serious(ctx, rep):
+        sec = by_sec.get(i["section"])
+        s0 = i["sentence"]
+        if not sec or s0 not in (sec.get("md") or "") or any(s0 in ln for ln in sec["md"].split("\n") if ln.lstrip().startswith("|")):
+            continue
+        rest = sec["md"].replace(s0, "", 1)
+        if len(writing.CITE.sub("", re.sub(r"\{\{img:[^}]*\}\}", "", rest)).strip()) < 30:
+            if "（待核实）" not in s0:
+                sec["md"] = sec["md"].replace(s0, s0.rstrip("。") + "（待核实）。", 1)
+            continue
+        sec["md"] = rest
+        dropped.append(i)
+    seen, dups = [], []
+    for sec in st["sections"]:
+        if sec.get("auto"):
+            continue
+        for u, is_analysis in writing._units(sec.get("md") or ""):
+            core = writing.CITE.sub("", u)
+            if len(core) <= 12 or u.lstrip().startswith("|"):
+                continue
+            cites = set(writing.CITE.findall(u))
+            prev = next((p for p in seen if writing.overlap(core, p[0]) > 0.6 and cites <= p[1]), None)
+            if prev and u in sec["md"]:
+                sec["md"] = sec["md"].replace(u, "", 1)
+                dups.append({"section": sec["id"], "sentence": u})
+                continue
+            seen.append((core, cites))
+    for sec in st["sections"]:
+        sec["md"] = re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]+\n", "\n", sec.get("md") or "")).strip()
+    if dropped or dups:
+        for sid in {x["section"] for x in dropped + dups}:
+            st["fixes"].append({"section": sid, "rewrite": False, "why": "收尾：" + "；".join(
+                [f"删掉两轮改写后仍核对不过的句子 {sum(1 for x in dropped if x['section'] == sid)} 句"] * any(x["section"] == sid for x in dropped)
+                + [f"删掉与前文重复的句子 {sum(1 for x in dups if x['section'] == sid)} 句"] * any(x["section"] == sid for x in dups)),
+                "items": [{"status": x.get("status", "duplicate"), "sentence": x["sentence"][:80]} for x in dropped + dups
+                          if x["section"] == sid][:6]})
+        st["check"] = _check(ctx, docs)
+        ctx.observe(f"收尾：删掉核对不过的句子 {len(dropped)} 句、与前文重复的句子 {len(dups)} 句")
+    return {"dropped": len(dropped), "dups": len(dups)}
+
+
 def _after_check(ctx) -> str:
+    _tidy(ctx)
     stg = _stages(ctx)
     if stg["naturalize"] and _use_llm(ctx) and not ctx.state.get("naturalized"):
         return "naturalize"
@@ -532,11 +590,12 @@ def check(ctx):
                 f"（支持率 {(s['support_rate'] or 0) * 100:.0f}%），数字对不上 {s['number']}，找不到依据 {s['weak']}，"
                 f"无出处的数字 {s['uncited']}，分析 {s['analysis']} 句" + (f"；自动改正出处 {len(fixes)} 处" if fixes else ""))
     serious = _serious(ctx, rep)
-    if serious and st["fix_round"] == 0 and _stages(ctx)["fix"]:
-        st["fix_round"] = 1
+    if serious and st["fix_round"] < MAX_FIX_ROUNDS and _stages(ctx)["fix"]:
+        first = st["fix_round"] == 0
+        st["fix_round"] += 1
         # 分析里编的数字只需改写；来源结论找不到依据才值得回到检索核验
         unresolved = [i for i in serious if not i.get("alt") and i["status"] in ("number", "weak")]
-        if unresolved and st["gap_round"] < 2 and _stages(ctx)["gap"]:
+        if first and unresolved and st["gap_round"] < 2 and _stages(ctx)["gap"]:
             qs = []
             for i in unresolved[:2]:
                 core = " ".join(i.get("numbers", [])[:1] + st["terms"][:2])
@@ -594,11 +653,12 @@ AI_TROPES = ["首先", "其次", "最后", "综上所述", "总而言之", "值�
 NATURAL_PROMPT = """把下面这节文章改得更像一位懂行的编辑写的，而不是 AI 生成的。读者：{reader}。风格：{style}
 要求：
 1. 事实、数字、日期、人名机构名一个都不能改，也不能新增；每个 [n] 出处编号都要保留，跟着它原来支持的那句话。
-2. 去掉套话和空泛连接词（如：{tropes}），不用排比和对仗，不要每段都“总—分—总”。
-3. 句子长短错开，能用短句就用短句；用具体的主语和动词，少用“进行”“实现”“具有……性”。
-4. 以“【分析】”开头的段落仍以“【分析】”开头；表格和列表的结构保留。
-5. 限制条件和争议一个都不能丢：“可能、预计、尚未、仅、据称、宣称、有争议、样本、前提”这类说法要保留原意。
-5. 只输出改好的正文，不要解释。
+2. 去掉套话和空泛连接词（如：{tropes}），不用排比、对仗和“不是……而是……”，不要每段都“总—分—总”，不要用破折号和冒号制造节奏。
+3. 长句短句交替：该用短句就用短句，需要交代条件和因果的地方保留完整的长句；不要把每句都切成一样短（整齐划一的短句反而像 AI）。
+4. 用具体的主语和动词，少用“进行”“实现”“具有……性”；不加原文没有的过渡句、感叹和空泛评论，不重复前面说过的话。
+5. 以“【分析】”开头的段落仍以“【分析】”开头；表格和列表的结构保留。
+6. 限制条件和争议一个都不能丢：“可能、预计、尚未、仅、据称、宣称、有争议、样本、前提、目前只有……报道”这类说法要保留原意。
+7. 只输出改好的正文，不要解释。
 原文：
 {text}"""
 
@@ -653,6 +713,7 @@ def naturalize(ctx):
     else:
         st["check"] = writing.check(st["sections"], docs, st["verdicts"])
     st["natural_log"] = log
+    _tidy(ctx, docs)
     ctx.observe("自然化改写：" + "；".join(f"{next(x['heading'] for x in st['sections'] if x['id'] == l['section'])} {l['result']}"
                                        for l in log))
     return "illustrate" if _stages(ctx)["illustrate"] else "save"
@@ -986,7 +1047,13 @@ def save(ctx):
 def build_and_save(st, note: str, task_id: str | None, extra_meta: dict | None = None) -> tuple[int, str, dict]:
     """由写作状态（节、配图、封面、素材）拼成文章、做成稿检查并存为新版本。写作和人工审阅修改共用。"""
     docs = _docs(st)
+    # 成稿前最后一道：只有单一来源 / 有争议的说法必须写明限制，并有一节“还不确定的”（写作和人工修改都经过这里）
+    flags = writing.doc_flags(st.get("research_task"), docs)
+    hed = writing.ensure_hedges(st["sections"], flags)
+    if hed["added"] or hed["section"]:
+        st["check"] = writing.check(st["sections"], docs, st.get("verdicts"))
     rep = st.get("check") or writing.check(st["sections"], docs)
+    audit = writing.hedge_audit(st["sections"], flags)
     figs, cover = st.get("figures") or [], st.get("cover")
     secs, refmap = writing.renumber(ill.insert_figures(st["sections"], figs))
     rdocs = [{**d, "n": refmap[d["n"]]} for d in docs if d["n"] in refmap]
@@ -1007,7 +1074,10 @@ def build_and_save(st, note: str, task_id: str | None, extra_meta: dict | None =
             "ref_check": writing.reference_check(rep, docs, sk), "ref_notes": st.get("ref_notes") or [],
             "natural_log": st.get("natural_log") or [], "stages": st.get("stages_used"), "image_error": st.get("image_error"),
             "experiment": st.get("experiment"), "variant": st.get("variant"),
-            "write_task": st.get("write_task"), "revisions": st.get("revisions") or [], **(extra_meta or {})}
+            "write_task": st.get("write_task"), "revisions": st.get("revisions") or [],
+            "hedges": {"needed": audit["needed"], "missing": audit["missing"], "uncertain_section": audit["uncertain_section"],
+                       "added": hed["added"], "section_added": hed["section"]},
+            **(extra_meta or {})}
     v = save_version(st["article_id"], md, meta, note=note, title=st["title"], task_id=task_id)
     return v, md, rep
 

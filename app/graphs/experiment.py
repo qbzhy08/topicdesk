@@ -15,6 +15,8 @@ kind = "skills"：同一个检索任务，用几种 Skill 各写一篇（全流�
 """
 from __future__ import annotations
 
+import re
+
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -108,6 +110,13 @@ FATAL = [(r"HTTP 402|Insufficient Balance|insufficient_quota|余额不足|欠费
          (r"HTTP 403", "大模型服务拒绝访问（HTTP 403）：检查账号权限或模型名称后重跑")]
 
 
+def display_error(err: str | None) -> str:
+    """报告里展示的失败原因：已经是说明文字的原样显示，接口原样返回的报错（带 JSON / HTTP 码）翻译成人话。"""
+    if not err:
+        return ""
+    return friendly_error(err)[0] if ("{" in err or re.search(r"HTTP \d{3}|Error|error", err)) and not err.startswith("没有开始写") else err[:200]
+
+
 def friendly_error(err: str | None) -> tuple[str, bool]:
     """把写作失败的原始报错翻译成能看懂的原因；返回 (说明, 是否是继续跑也没用的致命错误)。"""
     import re
@@ -118,6 +127,12 @@ def friendly_error(err: str | None) -> tuple[str, bool]:
         return "大模型响应超时：可以把“同时写几篇”调小后重跑", False
     if err and re.search(r"HTTP 429|rate limit|Too Many Requests", err, re.I):
         return "请求太频繁被限流（HTTP 429）：把“同时写几篇”调成 1 后重跑", False
+    if err and "{" in err:              # 接口原样返回的 JSON 报错：只取里面给人看的那句
+        m = re.search(r'"message"\s*:\s*"([^"]{1,200})"', err)
+        code = re.search(r'"code"\s*:\s*"([\w.-]{1,60})"', err)
+        head = re.split(r"[:：]\s*\{", err, 1)[0].strip()[:60]
+        return (f"大模型接口报错{('（' + head + '）') if head else ''}：" + (m.group(1) if m else "请求被拒绝")
+                + (f"（{code.group(1)}）" if code else "")), False
     return (err or "写作任务失败")[:200], False
 
 
@@ -195,6 +210,7 @@ def _measure_one(r):
     r["claims_pool"] = [{"sentence": i["sentence"], "cites": i["cites"], "analysis": i.get("analysis")}
                         for i in m.pop("_items") if i.get("cites")]
     r["metrics"] = m
+    r["metrics_version"] = ev.METRICS_VERSION
     r["doc_ids"] = [d["id"] for d in meta.get("docs") or []]
     r["cited_doc_ids"] = [d["id"] for d in meta.get("docs") or [] if d.get("ref")]
     r["structure"] = [s.get("heading") for s in meta.get("sections") or []]

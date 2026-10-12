@@ -19,6 +19,106 @@ ANALYSIS = "【分析】"
 NUM = re.compile(r"(?<![A-Za-z0-9_.,])(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s?(%|％|[kKMBG]\b|[kK](?=[\u4e00-\u9fff])|万亿|亿元|万元|万|亿|倍|年|月|日|个|款|篇|分|美元|元|台|家|人|项|次|辆|件|名|条|种|米)?")
 NOISE_NUMS = {"1", "2", "3", "4", "5"}        # 序号、“两三句”这类小数字不当成需要出处的数字
 
+# 限制条件与争议：改写时最容易被“顺”掉的那类话
+HEDGE = re.compile(r"可能|或许|预计|尚未|尚不|未经|仅|只有|单一来源|据称|宣称|声称|争议|质疑|不确定|待核实|待确认|有待|局限|"
+                   r"样本|前提|条件下|并非|不代表|还不能|目前公开资料|未能确认|存疑|分歧|计划|有望|目标是|将于")
+# 系统自动补上的限制说明（核对时先去掉再比对出处，不影响出处核对）
+HEDGE_NOTE = re.compile(r"（(?:目前只有[^）]{0,20}报道[^）]{0,12}|这一说法存在争议[^）]{0,16})）")
+UNCERTAIN_HEAD = re.compile(r"不确定|争议|问号|没有答案|小心|局限|证据|待证实")
+
+
+def doc_flags(research_task: str | None, docs: list[dict]) -> dict:
+    """每篇素材当前的可信状态（按检索任务最新一版排序结果，核验后会更新）：
+    {n: {"risky": 只有单一来源且不是一手资料（或补充核验没找到印证）, "disputed": 有争议, "label": 来源名}}"""
+    rk = ranking.latest(research_task) if research_task else None
+    items = {it["id"]: it for it in (rk or {}).get("items") or []}
+    out = {}
+    for d in docs:
+        it = items.get(d.get("id")) or {}
+        primary = bool(it.get("primary", d.get("primary")))
+        disputed = bool(it.get("disputed", d.get("disputed")))
+        single = (it.get("independent") or 1) <= 1 if it else bool(d.get("unverified"))
+        out[d["n"]] = {"risky": disputed or bool(it.get("unverified", d.get("unverified"))) or (single and not primary),
+                       "disputed": disputed, "label": (d.get("label") or d.get("source_id") or "").split("，")[0]}
+    return out
+
+
+def _risky_kind(cites: list[int], flags: dict) -> str | None:
+    fl = [flags.get(c) for c in cites if c in flags]
+    if not fl:
+        return None
+    if any(f["disputed"] for f in fl):
+        return "disputed"
+    if all(f["risky"] for f in fl):
+        return "single"
+    return None
+
+
+def hedge_audit(sections: list[dict], flags: dict) -> dict:
+    """需要写明限制的说法（引用的出处都只有单一来源、不是一手资料，或有争议）有没有写出限制。"""
+    need, missing = [], []
+    for sec in sections:
+        for u, is_analysis in _units(sec.get("md") or ""):
+            cites = [int(x) for x in CITE.findall(u)]
+            kind = _risky_kind(cites, flags) if cites and not is_analysis else None
+            if not kind:
+                continue
+            x = {"section": sec["id"], "sentence": u, "kind": kind, "cites": cites}
+            need.append(x)
+            if not HEDGE.search(CITE.sub("", u)):
+                missing.append(x)
+    has_sec = any(UNCERTAIN_HEAD.search(s.get("heading") or "") for s in sections)
+    return {"needed": len(need), "missing": len(missing), "items": need, "missing_items": missing,
+            "uncertain_section": has_sec}
+
+
+def _short_claim(sentence: str, limit: int = 46) -> str:
+    t = HEDGE_NOTE.sub("", CITE.sub("", sentence)).strip().rstrip("。；;!！")
+    if len(t) > limit:
+        cut = max(t.rfind(c, 0, limit) for c in "，,；、")
+        t = t[:cut] if cut >= 12 else t[:limit] + "…"
+    return t
+
+
+def ensure_hedges(sections: list[dict], flags: dict) -> dict:
+    """保证“只有单一来源 / 有争议”的说法写明了限制，并且文章里有一节专门写还不确定的内容。
+    1) 引用的出处都只有单一来源、又没写“可能、尚未、据称……”的句子，在出处编号前补一句说明；
+    2) 有需要写明限制的说法、结构里却没有写不确定性的一节：在文末加“还不确定的”一节，逐条列出（带出处）。
+    原地修改 sections；返回 {added: 补了几句, section: 是否加了一节}。幂等：再跑一次不会重复添加。"""
+    aud = hedge_audit(sections, flags)
+    added = 0
+    by_sec = {s["id"]: s for s in sections}
+    for x in aud["missing_items"]:
+        sec = by_sec[x["section"]]
+        s0 = x["sentence"]
+        if s0 not in (sec.get("md") or ""):
+            continue
+        labels = list(dict.fromkeys(flags[c]["label"] for c in x["cites"] if c in flags and flags[c]["label"]))
+        note = "（这一说法存在争议，各方说法不一）" if x["kind"] == "disputed" else \
+            f"（目前只有{labels[0] if len(labels) == 1 else '单一来源'}报道，尚待证实）"
+        m = re.search(r"((?:\[\d{1,2}\])+)\s*([。！？!?；;]?)\s*$", s0)
+        new = s0[:m.start()] + note + m.group(1) + m.group(2) if m else s0.rstrip("。") + note + "。"
+        sec["md"] = sec["md"].replace(s0, new, 1)
+        added += 1
+    made = False
+    if aud["needed"] and not aud["uncertain_section"] and not by_sec.get("uncertain"):
+        seen, lines = set(), []
+        for x in aud["items"]:
+            claim = _short_claim(x["sentence"])
+            if claim in seen or len(lines) >= 4:
+                continue
+            seen.add(claim)
+            refs = "".join(f"[{c}]" for c in x["cites"])
+            labels = list(dict.fromkeys(flags[c]["label"] for c in x["cites"] if c in flags and flags[c]["label"]))
+            why = "各方说法不一" if x["kind"] == "disputed" else \
+                (f"目前只有{labels[0]}报道" if len(labels) == 1 else "目前只有单一来源报道") + "，没有找到其他独立来源或一手资料印证"
+            lines.append(f"- {claim}：{why}{refs}。")
+        if lines:
+            sections.append({"id": "uncertain", "heading": "还不确定的", "auto": True,
+                             "md": "下面这些说法目前证据不足，读的时候请当作“待证实”：\n\n" + "\n".join(lines)})
+            made = True
+    return {"added": added, "section": made, "needed": aud["needed"]}
+
 
 def _norm(s: str) -> str:
     return re.sub(r"\s+", "", (s or "").lower()).replace("％", "%")
@@ -308,10 +408,14 @@ def check(sections: list[dict], docs: list[dict], verdicts: dict | None = None) 
     all_norm = "\n".join(norm.values())
     items, used = [], set()
     for sec in sections:
-        for s, is_analysis in _units(sec.get("md") or ""):
+        for s_full, is_analysis in _units(sec.get("md") or ""):
+            s = HEDGE_NOTE.sub("", s_full)           # 系统补上的限制说明不参与出处比对
             cites = [int(x) for x in CITE.findall(s)]
+            if sec.get("auto"):                     # 系统生成的“还不确定的”一节：条目摘自正文已核对过的句子
+                used.update(c for c in cites if c in by_n)
+                continue
             nums = numbers(s)
-            it = {"section": sec["id"], "sentence": s, "cites": cites, "numbers": nums, "analysis": is_analysis}
+            it = {"section": sec["id"], "sentence": s_full, "cites": cites, "numbers": nums, "analysis": is_analysis}
             if cites:
                 used.update(c for c in cites if c in by_n)
                 bad = [c for c in cites if c not in by_n]
@@ -323,7 +427,7 @@ def check(sections: list[dict], docs: list[dict], verdicts: dict | None = None) 
                 best, quote, qdoc = top[0] if top else (0.0, "", None)
                 missing = [n for n in nums if not any(num_in(n, norm[c]) for c in cites)]
                 it.update(quote=quote[:220], quote_doc=qdoc, overlap=round(best, 2), missing=missing)
-                v = verdicts.get(s) or {}
+                v = verdicts.get(s_full) or verdicts.get(s) or {}
                 if missing:
                     other = [d["n"] for d in docs if all(num_in(n, norm[d["n"]]) for n in missing)]
                     it.update(status="number", note=f"数字 {missing} 在出处 {cites} 里找不到"

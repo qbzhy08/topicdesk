@@ -39,7 +39,13 @@ PRIMARY_DOMAINS = (
     # 学术与医学
     "doi.org", "openalex.org", "pubmed.ncbi.nlm.nih.gov", "ncbi.nlm.nih.gov", "nature.com",
     "science.org", "cell.com", "thelancet.com", "nejm.org", "who.int", "biorxiv.org", "medrxiv.org",
-    "ssrn.com", "nber.org")
+    "ssrn.com", "nber.org",
+    # 论文出版社、专利、标准、科研机构
+    "sciencedirect.com", "link.springer.com", "springer.com", "onlinelibrary.wiley.com", "pubs.acs.org", "pubs.rsc.org",
+    "mdpi.com", "ieeexplore.ieee.org", "iopscience.iop.org", "patents.google.com", "cnipa.gov.cn", "wipo.int",
+    "cnki.net", "cas.cn", "edu.cn", "iea.org", "energy.gov", "nrel.gov", "europa.eu", "iso.org",
+    # 公司官方新闻稿与披露
+    "prnewswire.com", "businesswire.com", "globenewswire.com", "prnasia.com", "investor.gov")
 
 # 领域：决定一个主题用哪些来源。general 为综合新闻，任何领域都可兜底。
 class _Domains(dict):
@@ -127,6 +133,10 @@ BUILTIN = [
     dict(id="web_search", name="全网搜索", method="websearch", lang="zh", base_url="",
          config={"any_domain": True, "domains": ["community", "general", "tech", "finance", "science"],
                  "note": "通过搜索 API 检索全网（需在设置页填写 key），替代不允许抓取的百度搜索"}),
+    dict(id="official", name="官方与一手披露", method="websearch", lang="zh", base_url="",
+         config={"any_domain": True, "domains": ["community", "general", "tech", "finance", "science", "health", "auto",
+                                                  "consumer", "game"],
+                 "note": "用搜索 API 专找一手页面：政府与监管、交易所公告、论文与专利、公司官方新闻稿（需在设置页填写 key）"}),
     dict(id="wechat", name="微信公众号", method="websearch", lang="zh", base_url="https://mp.weixin.qq.com",
          config={"any_domain": True, "domains": ["community", "general", "tech", "finance"], "note": "搜索 API 限定 mp.weixin.qq.com，文章页可抓全文"}),
     dict(id="zhihu", name="知乎", method="websearch", lang="zh", base_url="https://www.zhihu.com",
@@ -573,6 +583,44 @@ def search_web(source: dict, query: str, limit: int = 10, since: float | None = 
     return items
 
 
+OFFICIAL_SITES = ("gov.cn", "cninfo.com.cn", "sse.com.cn", "szse.cn", "hkexnews.hk", "prnasia.com", "cnipa.gov.cn")
+
+
+def search_official(source: dict, query: str, limit: int = 10, since: float | None = None, **_) -> list[dict]:
+    """专找一手资料：先全网搜“{主题} 官方/公告/白皮书/论文”，再限定政府、交易所、新闻稿站点各搜一次；
+    只保留一手站点（PRIMARY_DOMAINS）上的结果，并标为一手资料。"""
+    from .. import websearch
+    seen, items = set(), []
+    queries = [(f"{query} 官方 公告 白皮书", None)] + [(query, site) for site in OFFICIAL_SITES[:4]]
+    errors = []
+    for q, site in queries:
+        try:
+            rows = websearch.search(q, site=site, count=limit, since=since)
+        except FetchError as e:
+            if e.kind == "config":
+                raise
+            errors.append(e)
+            continue
+        for x in rows:
+            if x["url"] in seen or not is_primary(x["url"]):
+                continue
+            seen.add(x["url"])
+            snippet = re.sub(r"\s+", " ", x.get("snippet") or "").strip()
+            items.append({"url": x["url"], "title": x.get("title") or x["url"], "author": x.get("site_name"),
+                          "published_at": iso(x.get("published_at")) or x.get("published_at"),
+                          "summary": snippet[:600], "text": snippet, "content_kind": "summary", "images": [],
+                          "source_id": source["id"], "primary": True,
+                          "meta": {"platform": x.get("site_name") or _host_of(x["url"]), "via": {"source": "websearch"},
+                                   "doc_type": "一手资料（官方/监管/公告/论文）"}})
+        if len(items) >= limit:
+            break
+    if not items:
+        if errors:
+            raise errors[0]
+        source["_note"] = f"搜索结果里没有政府、监管、交易所公告、论文或官方新闻稿页面（「{query[:20]}」）"
+    return items[:limit]
+
+
 def _host_of(url: str) -> str:
     h = urlsplit(url).netloc.lower()
     return h[4:] if h.startswith("www.") else h
@@ -679,7 +727,7 @@ def search_bilibili(source: dict, query: str, limit: int = 15, since: float | No
 SEARCHERS = {"rss": search_rss, "arxiv": search_arxiv, "hn": search_hn, "github": search_github,
              "juejin": search_juejin, "wallstcn": search_wallstcn, "openalex": search_openalex,
              "pubmed": search_pubmed, "bilibili": search_bilibili, "sogou_wechat": search_sogou_wechat,
-             "websearch": search_web}
+             "websearch": search_web, "official": search_official}
 
 
 def _day(ts: float) -> str:

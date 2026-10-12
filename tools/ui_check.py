@@ -225,13 +225,47 @@ def run(base, out_dir, n, full=True):
     return summary
 
 
+def watch(base, out_dir, n, every=600):
+    """持续巡检：页面代码一更新（同步了新版本）就自动增量重查；没有更新时每 every 秒按数据变化再查一次。
+    每次结果写进 summary.json（带第几轮、时间），Claude 可以直接读这个文件看结果、接着改。Ctrl+C 停止。"""
+    last_code, last_run, k = None, 0.0, 0
+    print("持续巡检已开启：同步新版本后会自动重查；按 Ctrl+C 停止。", flush=True)
+    while True:
+        try:
+            code = code_version(base)
+        except Exception:  # noqa: BLE001
+            code = None
+        if code and (code != last_code or time.time() - last_run >= every):
+            k += 1
+            why = "页面代码有更新" if last_code and code != last_code else ("首次巡检" if not last_code else "定时检查数据变化")
+            print(f"\n== 第 {k} 轮（{why}，{time.strftime('%H:%M:%S')}）", flush=True)
+            try:
+                s = run(base, out_dir, n, full=False)
+                s.update(round=k, reason=why, finished_at=time.strftime("%Y-%m-%d %H:%M:%S"))
+                (Path(out_dir) / "summary.json").write_text(json.dumps(s, ensure_ascii=False, indent=1), encoding="utf-8")
+                print(f"第 {k} 轮：检查 {s['checks']} 次（{s['reused']} 次沿用），{s['with_issues']} 次有问题", flush=True)
+                for x in s["issues"][:20]:
+                    print(f"- [{x['view']}] {x['page']}：{'；'.join(x['issues'])[:200]}", flush=True)
+            except Exception as e:  # noqa: BLE001
+                print(f"这一轮没跑成：{e}（主题编辑台是不是没在运行？）", flush=True)
+            last_code, last_run = code, time.time()
+        time.sleep(5)
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="http://127.0.0.1:8000")
     ap.add_argument("--out", default="data/ui_check")
     ap.add_argument("--max", type=int, default=6, help="每类数据最多打开几个")
     ap.add_argument("--all", action="store_true", help="不做增量，全部重查")
+    ap.add_argument("--watch", action="store_true", help="持续巡检：代码更新后自动重查")
     a = ap.parse_args()
+    if a.watch:
+        try:
+            watch(a.base.rstrip("/"), a.out, a.max)
+        except KeyboardInterrupt:
+            print("已停止持续巡检")
+        raise SystemExit(0)
     s = run(a.base.rstrip("/"), a.out, a.max, full=a.all)
     print(f"检查 {s['checks']} 次（{s['reused']} 次没变化、沿用上次），{s['with_issues']} 次有问题。报告：{Path(a.out) / 'report.html'}")
     for x in s["issues"][:40]:

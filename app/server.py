@@ -18,6 +18,7 @@ from .collect import sources as sources_mod
 from .collect.dedup import canonical_url
 from .config import ROOT
 from .harness import GRAPHS, create_task, resolve_hitl, rewind, run_task, runner
+from .graphs import experiment as E
 
 app = Flask(__name__, static_folder=str(ROOT / "app" / "static"), static_url_path="/static")
 
@@ -795,7 +796,7 @@ def list_articles():
         sql += " AND topic=?"
         args.append(a["topic"])
     rows = db.query(sql + " ORDER BY updated_at DESC LIMIT 100", args)
-    out = [_article_row(r) for r in rows]
+    out = [_article_row(r) for r in rows if r.get("current_version")]   # 写作失败、没有任何版本的不列出
     if a.get("research_task"):
         out = [r for r in out if r["research_task"] == a["research_task"]]
     if not a.get("experiment"):                     # 评测实验写的变体不混进普通文章列表
@@ -1068,7 +1069,7 @@ def list_experiments():
     for r in rows:
         st_ = r.pop("state") or {}
         runs = st_.get("runs") or []
-        failed = [{"topic": x["topic"], "variant": x["variant"], "error": (x.get("error") or "")[:120],
+        failed = [{"topic": x["topic"], "variant": x["variant"], "error": E.display_error(x.get("error"))[:120],
                    "research_task": x["research_task"]} for x in runs if x.get("status") == "failed"]
         out.append({**r, "runs": len(runs), "done": sum(1 for x in runs if x.get("status") == "done"), "failed": failed,
                     "fatal": st_.get("fatal"), "running": runner.is_running(r["id"]),
@@ -1086,9 +1087,15 @@ def _exp_or_404(eid):
 @app.get("/api/experiments/<eid>")
 def get_experiment(eid):
     from . import experiment_report
+    from . import evaluate as ev
     t = _exp_or_404(eid)
+    runs = (t["state"] or {}).get("runs") or []
+    if not runner.is_running(eid) and any(r.get("status") == "done" and r.get("metrics_version") != ev.METRICS_VERSION
+                                          for r in runs):
+        _remeasure(eid, runs)                      # 指标定义更新过：自动按新定义重算一次
+        t = _exp_or_404(eid)
     rep = experiment_report.build(t)
-    rep.update(topic=t["topic"], error=t["error"], current_node=t["current_node"], running=runner.is_running(eid),
+    rep.update(topic=t["topic"], error=E.display_error(t["error"]) or None, current_node=t["current_node"], running=runner.is_running(eid),
                created_at=t["created_at"])
     return jsonify(rep)
 
@@ -1116,16 +1123,10 @@ def experiment_retry(eid):
     return jsonify(retry=len(redo))
 
 
-@app.post("/api/experiments/<eid>/remeasure")
-def experiment_remeasure(eid):
-    """指标定义更新后，用已写好的文章重新计算确定性指标（不重写文章、不调用大模型）。"""
+def _remeasure(eid: str, runs: list[dict]) -> int:
     from . import evaluate as ev
     from .harness import patch_state
     from .graphs.experiment import _docs_with_text
-    t = _exp_or_404(eid)
-    if runner.is_running(eid):
-        return jsonify(error="实验还在运行"), 409
-    runs = (t["state"] or {}).get("runs") or []
     n = 0
     for r in runs:
         if r.get("status") != "done":
@@ -1137,9 +1138,19 @@ def experiment_remeasure(eid):
         r["text"] = m.pop("text")
         m.pop("_items", None)
         r["metrics"] = m
+        r["metrics_version"] = ev.METRICS_VERSION
         n += 1
     patch_state(eid, {"runs": runs}, note="按新的指标定义重新计算")
-    return jsonify(remeasured=n)
+    return n
+
+
+@app.post("/api/experiments/<eid>/remeasure")
+def experiment_remeasure(eid):
+    """指标定义更新后，用已写好的文章重新计算确定性指标（不重写文章、不调用大模型）。"""
+    t = _exp_or_404(eid)
+    if runner.is_running(eid):
+        return jsonify(error="实验还在运行"), 409
+    return jsonify(remeasured=_remeasure(eid, (t["state"] or {}).get("runs") or []))
 
 
 @app.get("/api/experiments/<eid>/text/<path:key>")

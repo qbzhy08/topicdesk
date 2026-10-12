@@ -36,7 +36,7 @@ REWRITE_PROMPT = """你在修改文章《{title}》（按 Skill「{name}」写�
 3. 素材里没有的信息不要写，不要编造；用户要求补充的内容如果素材里没有，就如实写“目前公开资料未能确认……”。
 4. 只输出改好后的{what}本身（Markdown），不要解释改了什么，不要重复小标题。"""
 
-OPS = ("title", "rewrite", "text", "delete_para", "figure_remove", "figure_caption", "figure_swap", "cover_swap", "figure_add")
+OPS = ("title", "rewrite", "text", "delete_para", "figure_remove", "figure_caption", "figure_swap", "cover_swap", "figure_add", "hedge")
 
 
 def _inv_refmap(meta) -> dict:
@@ -225,6 +225,14 @@ def edit(ctx):
         nf["why"] = "用户在审阅时加的图"
         st["figures"].append(nf)
         after, summary = nf["caption"], f"在「{sec['heading']}」第 {idx + 1} 段后加图：{nf['caption'][:30]}"
+    elif op == "hedge":
+        # 按当前的核验状态补上限制条件：只有单一来源 / 有争议的说法写明限制，缺“还不确定的”一节就补上
+        flags = writing.doc_flags(st.get("research_task"), docs)
+        before_aud = writing.hedge_audit(st["sections"], flags)
+        r = writing.ensure_hedges(st["sections"], flags)
+        before = f"需要写明限制的说法 {before_aud['needed']} 句，其中没写的 {before_aud['missing']} 句"
+        after = f"补上 {r['added']} 句" + ("，新增“还不确定的”一节" if r["section"] else "")
+        summary = "补上限制条件：" + (after if r["added"] or r["section"] else "原文已经都写明了，没有改动")
     elif op == "cover_swap":
         nf = _new_fig(p, st, None, 0)
         before = (st.get("cover") or {}).get("caption", "")

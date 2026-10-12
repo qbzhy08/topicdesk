@@ -97,7 +97,8 @@ def upsert_document(item: dict, topic: str, *, task_id: str | None = None,
     kind = item.get("content_kind") or "summary"
     pub = iso(item.get("published_at")) or item.get("published_at")
     meta_in = dict(item.get("meta") or {})
-    meta_in.update(primary=bool(item.get("primary")), relevance=item.get("relevance"),
+    from .sources import is_primary          # 一手站点（政府、监管、论文、官方新闻稿……）上的页面一律标为一手资料
+    meta_in.update(primary=bool(item.get("primary")) or is_primary(url), relevance=item.get("relevance"),
                    last_task=task_id)
     if item.get("images"):
         meta_in["image_candidates"] = item["images"]

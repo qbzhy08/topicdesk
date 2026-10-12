@@ -79,6 +79,9 @@ def fidelity(sections: list[dict], docs: list[dict], verdicts: dict | None = Non
             "weak": s["weak"], "bad_cite": s["bad_cite"], "items": rep["items"]}
 
 
+METRICS_VERSION = 3          # 指标定义改了就加 1：报告打开时自动按新定义重算（不重写文章、不调大模型）
+
+
 def density(text: str, items: list[dict], docs: list[dict]) -> dict:
     """信息密度：每千字可核对事实数、引用的不同来源数、重复率、空话率。"""
     n = max(1, _hanzi_len(text))
