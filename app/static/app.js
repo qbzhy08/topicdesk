@@ -183,6 +183,7 @@ function renderRail() {
     railLastActive = act.id;
     const g = act.graph === "experiment" ? "_exp" : par(act);
     if (g && !railOpen()[g]) setRailOpen(g, true);
+    if (act.graph !== "experiment" && railOpen()._tasks === false) setRailOpen("_tasks", true);
   }
   const open = railOpen();
   const isOpen = (k, members) => !!open[k] || (q && members.some((m) => hit(m, true)));
@@ -208,10 +209,16 @@ function renderRail() {
   }
   const groups = tops.filter((t) => kids[t.id]?.length).length + (exps.length ? 1 : 0);
   $("#rail-tools").hidden = rows.length < 4 && !q;
-  $("#rail-all").hidden = !groups;
-  const anyOpen = tops.some((t) => kids[t.id]?.length && open[t.id]) || open._exp;
+  $("#rail-all").hidden = !groups && !rows.length;
+  const anyOpen = (open._tasks !== false && tops.some((t) => kids[t.id]?.length && open[t.id])) || open._exp;
   $("#rail-all").textContent = anyOpen ? "全部收起" : "全部展开";
-  $("#task-list").innerHTML = (parts.join("") || `<li class="s">${q ? "没有匹配的任务" : "暂无任务"}</li>`) + expHtml;
+  // “最近任务”整块可以收起（搜索时自动展开）；评测实验整组单独收起
+  const tasksOn = q || open._tasks !== false;
+  const nTasks = tops.length;
+  $("#rail-tasks").innerHTML = `${tasksOn ? "▾" : "▸"} 最近任务 <span>${nTasks}</span>`;
+  $("#rail-tasks").setAttribute("aria-expanded", !!tasksOn);
+  $("#rail-tasks").title = tasksOn ? "收起最近任务" : "展开最近任务";
+  $("#task-list").innerHTML = (tasksOn ? (parts.join("") || `<li class="s">${q ? "没有匹配的任务" : "暂无任务"}</li>`) : "") + expHtml;
 }
 
 function setupRail() {
@@ -223,6 +230,7 @@ function setupRail() {
     setRailOpen(b.dataset.fold, b.getAttribute("aria-expanded") !== "true");
     renderRail();
   });
+  $("#rail-tasks").addEventListener("click", () => { setRailOpen("_tasks", railOpen()._tasks === false); renderRail(); });
   $("#rail-q").addEventListener("input", (e) => { railQuery = e.target.value; renderRail(); });
   $("#rail-all").addEventListener("click", () => {
     const rows = railRows || [];
@@ -231,6 +239,7 @@ function setupRail() {
     const to = !([...parents].some((p) => o[p]) || o._exp);
     parents.forEach((p) => (o[p] = to));
     o._exp = to;
+    o._tasks = to;
     store.set("railOpen", o);
     renderRail();
   });

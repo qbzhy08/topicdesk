@@ -873,3 +873,6 @@ button.linkish { background: none; color: var(--info); padding: 0; font-size: 12
 .task-list .rail-grp { background: none; border: 0; padding: 2px 4px; font: 600 12px var(--sans); color: var(--muted); cursor: pointer; }
 .task-list .rail-grp span { font-weight: 400; }
 .task-list .rail-grp:hover { color: var(--accent); }
+.rail-title .rail-grp { background: none; border: 0; padding: 2px 0; font: 600 13px var(--sans); color: var(--muted); cursor: pointer; }
+.rail-title .rail-grp span, .task-list .rail-grp span { font-weight: 400; font-size: 12px; }
+.rail-title .rail-grp:hover { color: var(--accent); }
