@@ -821,3 +821,5 @@ button.linkish { background: none; color: var(--info); padding: 0; font-size: 12
 .ex-prog .bar { width: 180px; height: 5px; background: var(--line); border-radius: 3px; overflow: hidden; }
 .ex-prog .bar i { display: block; height: 100%; background: var(--info); transition: width .4s; }
 .live-note { color: var(--info); }
+.bl-actions { gap: 10px; margin: 6px 0 10px; }
+.bl-addform { margin: 0 0 12px; background: var(--paper); }

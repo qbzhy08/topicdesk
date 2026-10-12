@@ -157,6 +157,24 @@ def _human(exp_id: str, st: dict) -> dict:
     pair_of = {p["pair_id"]: p for p in st.get("blind") or []}
     variant_of = {r["key"]: r["variant"] for r in st.get("runs") or []}
     tally = {d: {"optimized": 0, "draft": 0, "tie": 0} for d in DIMS}
+    order = list(VARIANTS)
+    comps = {}
+
+    def comp_of(p):
+        vs = sorted({variant_of.get(p["甲"]), variant_of.get(p["乙"])} - {None},
+                    key=lambda v: order.index(v) if v in order else 99)
+        if len(vs) != 2:
+            return None
+        k = "|".join(vs)
+        if k not in comps:
+            comps[k] = {"a": vs[0], "b": vs[1], "names": [VARIANTS.get(v, {}).get("name", v) for v in vs],
+                        "pairs": 0, "ratings": 0, "tally": {d: {vs[0]: 0, vs[1]: 0, "tie": 0} for d in DIMS},
+                        "ai_guess": {vs[0]: 0, vs[1]: 0, "unsure": 0}}
+        return comps[k]
+    for p in st.get("blind") or []:
+        c = comp_of(p)
+        if c:
+            c["pairs"] += 1
     guess = {"right": 0, "wrong": 0, "unsure": 0}
     raters, per_rater, comments = set(), {}, []
     for r in rows:
@@ -168,18 +186,31 @@ def _human(exp_id: str, st: dict) -> dict:
         if (r["data"] or {}).get("comment"):
             comments.append({"rater": r["rater"], "topic": p["topic"], "text": r["data"]["comment"]})
         data = r["data"] or {}
+        c = comp_of(p)
+        if c:
+            c["ratings"] += 1
         for d in DIMS:
             pick = data.get(d)
             if pick in ("甲", "乙"):
-                tally[d][variant_of.get(p[pick], "tie")] += 1
+                v = variant_of.get(p[pick], "tie")
+                if v in tally[d]:
+                    tally[d][v] += 1
+                if c:
+                    c["tally"][d][v] += 1
             elif pick:
                 tally[d]["tie"] += 1
+                if c:
+                    c["tally"][d]["tie"] += 1
+        if c:
+            g = data.get("ai_guess")
+            c["ai_guess"][variant_of.get(p[g]) if g in ("甲", "乙") else "unsure"] += 1 if g else 0
         g = data.get("ai_guess")                      # 读者认为“更像 AI 写的”是哪篇
         if g in ("甲", "乙"):
             guess["right" if variant_of.get(p[g]) == BLIND_PAIR[0] else "wrong"] += 1
         elif g:
             guess["unsure"] += 1
     return {"ratings": len(rows), "raters": len(raters), "tally": tally, "ai_guess": guess, "comments": comments,
+            "comparisons": list(comps.values()),
             "per_rater": [{"rater": k, "done": len(v), "total": len(pair_of)} for k, v in per_rater.items()],
             "note": "ai_guess：读者认为更像 AI 写的是初稿记为“right”（优化稿更不像 AI），认为是优化稿记为“wrong”"}
 

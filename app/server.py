@@ -1181,6 +1181,57 @@ def experiment_rate(eid):
     return jsonify(ok=True)
 
 
+@app.post("/api/experiments/<eid>/blind/pairs")
+def experiment_add_pairs(eid):
+    """新增盲评组：任选一组素材（或全部素材）里的两个版本，让读者盲评。甲乙随机分配。"""
+    import random
+    from .harness import patch_state
+    t = _exp_or_404(eid)
+    if runner.is_running(eid):
+        return jsonify(error="实验还在运行，跑完再加"), 409
+    b = request.get_json(force=True) or {}
+    va, vb = b.get("a"), b.get("b")
+    if not va or not vb or va == vb:
+        return jsonify(error="请选两个不同的版本"), 400
+    st = t["state"] or {}
+    runs = {(r["research_task"], r["variant"]): r for r in st.get("runs") or [] if r.get("status") == "done" and r.get("text")}
+    tids = list(dict.fromkeys(r["research_task"] for r in st.get("runs") or []))
+    if b.get("research_task") not in (None, "", "all"):
+        tids = [b["research_task"]]
+    blind = st.get("blind") or []
+    have = {(p["research_task"], frozenset((p["甲"], p["乙"]))) for p in blind}
+    nxt = max([int(p["pair_id"][1:]) for p in blind if p["pair_id"][1:].isdigit()] or [0]) + 1
+    added, skipped = [], []
+    for tid in tids:
+        x, y = runs.get((tid, va)), runs.get((tid, vb))
+        if not x or not y:
+            skipped.append(f"{tid}：缺少写成功的版本")
+            continue
+        if (tid, frozenset((x["key"], y["key"]))) in have:
+            skipped.append(f"{x['topic']}：这两个版本已经有盲评组")
+            continue
+        flip = random.random() < 0.5
+        blind.append({"pair_id": f"p{nxt}", "research_task": tid, "topic": x["topic"],
+                      "甲": (y if flip else x)["key"], "乙": (x if flip else y)["key"], "added_by": "user"})
+        added.append(f"p{nxt}")
+        nxt += 1
+    if not added:
+        return jsonify(error="没有新增：" + "；".join(skipped)), 400
+    patch_state(eid, {"blind": blind}, note=f"新增盲评组 {len(added)} 个")
+    return jsonify(added=added, skipped=skipped)
+
+
+@app.delete("/api/experiments/<eid>/blind/pairs/<pid>")
+def experiment_del_pair(eid, pid):
+    """删除一个盲评组（连同这组的评分）。"""
+    from .harness import patch_state
+    t = _exp_or_404(eid)
+    blind = [p for p in (t["state"] or {}).get("blind") or [] if p["pair_id"] != pid]
+    patch_state(eid, {"blind": blind}, note=f"删除盲评组 {pid}")
+    db.execute("DELETE FROM eval_ratings WHERE experiment_id=? AND pair_id=?", (eid, pid))
+    return jsonify(ok=True)
+
+
 @app.post("/api/experiments/<eid>/scores")
 def experiment_score(eid):
     """录入外部 AIGC 检测器的结果（同一个检测器测同一份完整正文）。分数填 0-100 或 0-1 都可以。"""

@@ -1737,15 +1737,27 @@ async function showExperiment(id) {
     const h = r.human || {};
     const DN = { accuracy: "准确可信", information: "信息量", natural: "表达自然", easy: "好理解", overall: "整体更愿意读" };
     const lp = r.llm_pairs || {};
-    return `<div class="card"><h3>读者盲评（初稿 vs 优化稿）</h3>
-      <p class="small">读者看到的是“甲/乙”两篇完整正文（去掉出处编号），不知道哪篇是初稿；每组的甲乙随机分配。把 <a href="#/blind/${id}">盲评页</a> 给读者，在这台电脑上打开即可（每人填一个化名）。</p>
+    const comps = h.comparisons || [];
+    return `<div class="card"><h3>读者盲评</h3>
+      <p class="small">读者看到的是“甲/乙”两篇完整正文（去掉出处编号），不知道哪篇是哪个版本；每组的甲乙随机分配。在这台电脑上打开盲评页，每位读者填一个化名。</p>
+      <div class="row bl-actions"><a class="btn primary big" href="#/blind/${id}">打开盲评页（${r.blind_pairs} 组）→</a>
+        ${!busy ? `<button type="button" class="ghost" id="bl-add">＋ 新增盲评组</button>` : ""}</div>
+      <div class="bl-addform card" hidden>
+        <div class="sk-grid2"><label>素材<select name="rt"><option value="all">全部素材（每组素材各加一组）</option>
+          ${topics.map(([tid, tp]) => `<option value="${tid}">${esc(tp)}</option>`).join("")}</select></label>
+          <label>版本 A<select name="a">${r.variants.map((v) => `<option value="${v.id}">${esc(v.name)}</option>`).join("")}</select></label>
+          <label>版本 B<select name="b">${r.variants.map((v, i) => `<option value="${v.id}" ${i === 1 ? "selected" : ""}>${esc(v.name)}</option>`).join("")}</select></label></div>
+        <p class="small muted">比如想知道“降 AI 腔”读者能不能读出来，就加“核对改写 vs 优化稿”；想看只降 AI 腔不核对的后果，加“优化稿 vs 只自然化”。</p>
+        <div class="row"><button type="button" id="bl-add-go">添加</button><small class="muted" id="bl-add-msg"></small></div></div>
       <p class="small">已收到 <b>${h.ratings || 0}</b> 份评分，来自 <b>${h.raters || 0}</b> 位读者（共 ${r.blind_pairs} 组）。
         ${(h.per_rater || []).map((x) => `<span class="tag ${x.done < x.total ? "rel-lo" : "nv-new"}">${esc(x.rater)} ${x.done}/${x.total}
           <button type="button" class="linkish" data-clear-rater="${esc(x.rater)}" title="删除这位读者的全部评分（例如试填的）">删除</button></span>`).join(" ")}
         ${(h.per_rater || []).some((x) => x.done < x.total) ? `<br><span class="muted">没评完的读者用<b>同一个称呼</b>再打开盲评页，就会接着评剩下的组。</span>` : ""}</p>
-      ${h.ratings ? `<table class="tbl"><tr><th>维度</th><th>选优化稿</th><th>选初稿</th><th>相当</th></tr>${Object.entries(DN).map(([k, n]) =>
-        `<tr><td>${n}</td><td>${h.tally[k].optimized}</td><td>${h.tally[k].draft}</td><td>${h.tally[k].tie}</td></tr>`).join("")}
-        <tr><td>“哪篇更像 AI 写的”</td><td colspan="3">认为是初稿 ${h.ai_guess.right} 次 · 认为是优化稿 ${h.ai_guess.wrong} 次 · 说不准 ${h.ai_guess.unsure} 次</td></tr></table>` : ""}
+      ${comps.map((c) => `<h4>${esc(c.names[0])} vs ${esc(c.names[1])} <small class="muted">${c.pairs} 组 · ${c.ratings} 份评分</small></h4>
+        ${c.ratings ? `<table class="tbl"><tr><th>维度</th><th>选${esc(c.names[1])}</th><th>选${esc(c.names[0])}</th><th>相当</th></tr>${Object.entries(DN).map(([k, n]) =>
+          `<tr><td>${n}</td><td>${c.tally[k][c.b]}</td><td>${c.tally[k][c.a]}</td><td>${c.tally[k].tie}</td></tr>`).join("")}
+          <tr><td>“哪篇更像 AI 写的”</td><td>${c.ai_guess[c.b]}</td><td>${c.ai_guess[c.a]}</td><td>说不准 ${c.ai_guess.unsure}</td></tr></table>`
+          : `<p class="small muted">还没有评分。</p>`}`).join("")}
       ${(h.comments || []).length ? `<h4>读者评论</h4>${h.comments.map((c) => `<p class="small ex-open"><b>${esc(c.rater)}</b> · ${esc(c.topic.slice(0, 16))}：${esc(c.text)}</p>`).join("")}` : ""}
       ${Object.keys(lp).length ? `<h4>大模型盲评（代理读者，交换前后顺序各评一次，两次一致才算胜）</h4>
         <table class="tbl"><tr><th>素材</th>${Object.values(DN).map((n) => `<th>${n}</th>`).join("")}</tr>
@@ -1837,6 +1849,18 @@ async function showExperiment(id) {
     await api(`/api/experiments/${id}/blind?rater=${encodeURIComponent(b.dataset.clearRater)}`, { method: "DELETE" });
     showExperiment(id);
   });
+  const ba = $("#bl-add", el);
+  if (ba) ba.onclick = () => { const f = $(".bl-addform", el); f.hidden = !f.hidden; };
+  const bg = $("#bl-add-go", el);
+  if (bg) bg.onclick = async () => {
+    const f = $(".bl-addform", el), msg = $("#bl-add-msg", el);
+    try {
+      const x = await api(`/api/experiments/${id}/blind/pairs`, { method: "POST",
+        body: { research_task: $("[name=rt]", f).value, a: $("[name=a]", f).value, b: $("[name=b]", f).value } });
+      msg.textContent = `已新增 ${x.added.length} 组${x.skipped.length ? `（跳过：${x.skipped.join("；")}）` : ""}`;
+      setTimeout(() => current === me && showExperiment(id), 900);
+    } catch (err) { msg.textContent = err.message; }
+  };
   const rm = $("#ex-remeasure", el);
   if (rm) rm.onclick = async () => {
     rm.disabled = true;

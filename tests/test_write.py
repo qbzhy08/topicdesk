@@ -921,3 +921,23 @@ class ExperimentFailTest(ExperimentTest):
         self.assertEqual(r["remeasured"], 4)
         rep = self.c.get(f"/api/experiments/{eid}").get_json()
         self.assertIsNotNone(rep["rows"][0]["dash_per_1k"])
+
+    def test_add_blind_pairs(self):
+        eid, rep = self.run_exp(research_tasks=[self.t1], skill="brief", detector="manual")
+        r = self.c.post(f"/api/experiments/{eid}/blind/pairs", json={"research_task": "all", "a": "checked", "b": "optimized"})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(self.c.post(f"/api/experiments/{eid}/blind/pairs",
+                                     json={"research_task": "all", "a": "optimized", "b": "checked"}).status_code, 400)   # 重复
+        pairs = self.c.get(f"/api/experiments/{eid}/blind?rater=甲").get_json()["pairs"]
+        self.assertEqual(len(pairs), 2)
+        new = pairs[1]
+        ans = {d: "甲" for d in ("accuracy", "information", "natural", "easy", "overall", "ai_guess")}
+        self.c.post(f"/api/experiments/{eid}/blind", json={"pair_id": new["pair_id"], "rater": "甲", "answers": ans})
+        rep = self.c.get(f"/api/experiments/{eid}").get_json()
+        comps = {(c["a"], c["b"]): c for c in rep["human"]["comparisons"]}
+        self.assertIn(("draft", "optimized"), comps)
+        c = comps[("checked", "optimized")]
+        self.assertEqual(c["ratings"], 1)
+        self.assertEqual(c["tally"]["overall"]["checked"] + c["tally"]["overall"]["optimized"], 1)
+        self.assertEqual(self.c.delete(f"/api/experiments/{eid}/blind/pairs/{new['pair_id']}").status_code, 200)
+        self.assertEqual(self.c.get(f"/api/experiments/{eid}").get_json()["blind_pairs"], 1)
