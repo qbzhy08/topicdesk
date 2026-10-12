@@ -69,7 +69,8 @@ def create():
 
 @app.get("/api/tasks")
 def list_tasks():
-    rows = db.query("SELECT id, graph, topic, status, current_node, usage, error, created_at, "
+    rows = db.query("SELECT id, graph, topic, status, current_node, usage, error, created_at, parent_task_id, "
+                    "json_extract(params, '$.skill') AS skill, "
                     "updated_at FROM tasks WHERE graph NOT IN ('revise') AND json_extract(params, '$.experiment') IS NULL "
                     "ORDER BY created_at DESC LIMIT 100")   # 审阅修改记在文章版本里
     return jsonify(rows)
@@ -1313,6 +1314,16 @@ def aigc_settings():
     b = request.get_json(force=True) or {}
     aigc.save_settings(b.get("model"), b.get("hf_endpoint"))
     return jsonify(aigc.status())
+
+
+@app.get("/api/trust/<tid>")
+def trust_report(tid):
+    """可信度与可追溯：资料是否可靠、筛选是否有价值、改写是否帮助理解、过程是否可追溯可复现。"""
+    from . import trust
+    try:
+        return jsonify(trust.build(tid))
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
 
 
 @app.get("/api/flow")

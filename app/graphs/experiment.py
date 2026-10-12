@@ -89,7 +89,7 @@ def plan(ctx):
 # ---------------------------------------------------------------- write
 
 def _run_one(r, params, user_id):
-    wp = {"research_task": r["research_task"], "skill": r["skill"], "stages": r["stages"],
+    wp = {"research_task": r["research_task"], "skill": r["skill"], "stages": r["stages"], "seed_from": r.get("seed_from"),
           "experiment": params["_exp"], "variant": r["variant"], "note": f"实验变体：{r['variant']}"}
     if params.get("no_llm"):
         wp["no_llm"] = True
@@ -126,7 +126,21 @@ def write(ctx):
     todo = [r for r in st["runs"] if r["status"] == "pending"]
     if not todo:
         return "measure"
-    batch = todo[:int(p.get("parallel") or 3)]
+    # 先写各组素材的初稿（对照组）；其他变体等初稿写完，直接用同一份初稿往后做（省时间，也只比较差异步骤）
+    drafts = {r["research_task"]: r for r in st["runs"] if r["variant"] == "draft"}
+    ready = []
+    for r in todo:
+        d = drafts.get(r["research_task"])
+        if st.get("kind") == "skills" or r["variant"] == "draft" or not d or not p.get("share_draft", True):
+            ready.append(r)
+        elif d["status"] == "done":
+            r["seed_from"] = d.get("write_task")
+            ready.append(r)
+        elif d["status"] == "failed":
+            ready.append(r)
+    if not ready:
+        ready = todo
+    batch = ready[:int(p.get("parallel") or 3)]
     params = {**p, "_exp": ctx.task_id}
     with ThreadPoolExecutor(max_workers=len(batch)) as ex:
         outs = list(ex.map(lambda r: _run_one(r, params, ctx.user_id), batch))

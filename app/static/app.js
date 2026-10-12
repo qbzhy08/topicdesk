@@ -142,13 +142,29 @@ async function submitImport(e) {
   } catch (err) { alert(err.message); }
 }
 
+function refreshListActive() {        // 切页时左栏的高亮立刻跟着变，不等下一次刷新列表
+  const h = location.hash;
+  $$("#task-list a").forEach((a) => a.classList.toggle("active", h === a.getAttribute("href") || h.startsWith(a.getAttribute("href") + "?")));
+}
+
 async function refreshList() {
   const rows = await api("/api/tasks");
-  $("#task-list").innerHTML = rows.map((t) => `
-    <li><a href="${t.graph === "experiment" ? `#/experiments/${t.id}` : `#/task/${t.id}`}" class="${current?.id === t.id ? "active" : ""}">
-      <span class="t">${esc(taskTitle(t))}</span>
-      <span class="s">${esc(STATUS[t.status] || t.status)} · ${esc(GRAPH_NAME[t.graph] || t.graph)} · ${fmtTime(t.created_at)}</span>
-    </a></li>`).join("") || `<li class="s">暂无任务</li>`;
+  if (!skillsCache) skillsCache = await api("/api/skills").catch(() => null);
+  const h = location.hash;
+  const isOn = (t) => h === `#/task/${t.id}` || h.startsWith(`#/experiments/${t.id}`) || current?.id === t.id;
+  const SK = (skillsCache?.skills || []).reduce((m, x) => (m[x.id] = x.name, m), {});
+  // 归类：写作任务挂在它的检索任务下面；评测实验单独一组，一个实验只占一行
+  const exps = rows.filter((t) => t.graph === "experiment");
+  const kids = {};
+  rows.filter((t) => t.graph === "write" && t.parent_task_id).forEach((t) => (kids[t.parent_task_id] ||= []).push(t));
+  const ids = new Set(rows.map((t) => t.id));
+  const tops = rows.filter((t) => t.graph !== "experiment" && !(t.graph === "write" && t.parent_task_id && ids.has(t.parent_task_id)));
+  const item = (t, child) => `<li class="${child ? "child" : ""}"><a href="${t.graph === "experiment" ? `#/experiments/${t.id}` : `#/task/${t.id}`}" class="${isOn(t) ? "active" : ""}">
+      <span class="t">${child ? `写作 · ${esc(SK[t.skill] || t.skill || "")}` : esc(taskTitle(t))}</span>
+      <span class="s">${esc(STATUS[t.status] || t.status)}${child ? "" : ` · ${esc(GRAPH_NAME[t.graph] || t.graph)}`} · ${fmtTime(t.created_at)}</span></a></li>`;
+  $("#task-list").innerHTML = (tops.map((t) => item(t) + (kids[t.id] || []).slice().reverse().map((k) => item(k, true)).join("")).join("")
+    || `<li class="s">暂无任务</li>`)
+    + (exps.length ? `<li class="rail-sub">评测实验</li>` + exps.map((t) => item(t)).join("") : "");
 }
 
 // ---------------------------------------------------------------- 路由
@@ -162,7 +178,7 @@ const store = {
 // 等同浏览器的后退、前进；返回时恢复之前看到的位置；旁边显示“上一页 › 当前页”，点上一页名称也能返回
 const PAGE_KIND = [[/^#\/task\//, "任务"], [/^#\/article\//, "文章"], [/^#\/doc\//, "资料"], [/^#\/library/, "资料库"],
   [/^#\/memory\/demo/, "记忆演示"], [/^#\/memory\//, "记忆"], [/^#\/memory/, "记忆"], [/^#\/sources/, "信息源"],
-  [/^#\/settings/, "设置"], [/^#\/skills\/new/, "新建 Skill"], [/^#\/skills\/edit/, "编辑 Skill"], [/^#\/skills/, "写法 Skill"], [/^#\/experiments\//, "实验报告"], [/^#\/experiments/, "评测"], [/^#\/blind/, "读者盲评"]];
+  [/^#\/settings/, "设置"], [/^#\/skills\/new/, "新建 Skill"], [/^#\/skills\/edit/, "编辑 Skill"], [/^#\/skills/, "写法 Skill"], [/^#\/experiments\//, "实验报告"], [/^#\/trust\//, "可信度"], [/^#\/experiments/, "评测"], [/^#\/blind/, "读者盲评"]];
 const hist = { labels: {}, scroll: {}, traverse: false, last: location.hash || "#/" };
 try { Object.assign(hist.labels, JSON.parse(sessionStorage.getItem("td:labels") || "{}")); } catch { /* */ }
 
@@ -270,7 +286,8 @@ function route() {
     : h.startsWith("#/memory") ? "memory"
     : h.startsWith("#/sources") ? "sources" : h.startsWith("#/settings") ? "settings" : "tasks";
   $$("#nav a").forEach((a) => a.classList.toggle("on", a.dataset.nav === view));
-  $("#app").classList.toggle("wide", view !== "tasks");
+  $("#app").classList.toggle("wide", !["tasks", "experiments"].includes(view));   // 任务、评测页保留左栏
+  refreshListActive();
   const m = h.match(/^#\/task\/(\w+)/);
   if (view === "tasks") loadSourceChecks();
   if (m) return showTask(m[1]);
@@ -286,6 +303,8 @@ function route() {
   const sk = h.match(/^#\/skills\/(new|edit)(?:\/([\w-]+))?(?:\?from=([\w-]+))?/);
   if (sk) return showSkillEditor(sk[1] === "edit" ? sk[2] : null, sk[3]);
   if (h.startsWith("#/skills")) return showSkills();
+  const tr = h.match(/^#\/trust\/(t_\w+)/);
+  if (tr) return showTrust(tr[1]);
   const ex = h.match(/^#\/experiments\/(t_\w+)/);
   if (ex) return showExperiment(ex[1]);
   const bl = h.match(/^#\/blind\/(t_\w+)/);
@@ -385,6 +404,7 @@ function autoGrow(ta) {
 }
 
 // ---------------------------------------------------------------- 任务详情
+const taskCache = new Map();         // 切换任务时先用上次看到的内容立刻显示，再在后台刷新
 function showTask(id) {
   store.set("lastTask", id);
   current = { id, lastStepId: 0, timer: null, rkTab: (store.get("rkTabs") || {})[id] || null };
@@ -398,6 +418,13 @@ function showTask(id) {
   el.querySelector("[data-act=cancel]").onclick = () => act("cancel");
   el.querySelector("[data-act=rewind]").onclick = doRewind;
   $("[data-f=docs-link]", el).href = `#/library?task=${id}&min_rel=0.4&sort=relevance&hide_dup=1`;
+  const c = taskCache.get(id);
+  if (c) {
+    try { renderTask(c.task); renderSteps(c.steps); renderDurations(); } catch (e) { console.warn(e); }
+    current.allSteps = c.steps.slice();
+    const open = c.steps.find((s) => s.status === "running");
+    current.lastStepId = open ? open.id - 1 : (c.steps.length ? c.steps[c.steps.length - 1].id : 0);
+  }
   poll();
 }
 
@@ -425,6 +452,11 @@ async function poll() {
     renderTask(task);
     renderSteps(steps);
     renderDurations();
+    const all = new Map((current.allSteps || []).map((x) => [x.id, x]));
+    steps.forEach((x) => all.set(x.id, x));
+    current.allSteps = [...all.values()].sort((a, b) => a.id - b.id);
+    taskCache.set(id, { task, steps: current.allSteps });
+    if (taskCache.size > 40) taskCache.delete(taskCache.keys().next().value);
     const open = steps.find((s) => s.status === "running");
     if (open) current.lastStepId = open.id - 1;
     else if (steps.length) current.lastStepId = steps[steps.length - 1].id;
@@ -460,6 +492,8 @@ function renderTask(t) {
   $("[data-act=resume]", d).disabled = !["interrupted", "failed", "pending"].includes(t.status) || t.running;
   $("[data-act=cancel]", d).disabled = ["done", "cancelled"].includes(t.status);
   $("[data-f=docs-link]", d).style.display = ["research", "import", "recheck"].includes(t.graph) ? "" : "none";
+  const tl = $("[data-f=trust-link]", d);
+  if (tl) { tl.hidden = !(t.graph === "research" && t.status === "done"); tl.href = `#/trust/${t.id}`; }
 
   const u = t.usage || {}, bu = t.budget || {};
   const meters = [["步数", u.steps, bu.max_steps], ["工具调用", u.tool_calls, bu.max_tool_calls],
@@ -531,6 +565,7 @@ async function loadFlow(q, here) {
       here === 3 && f.here_article === pick.article_id ? null : `#/article/${pick.article_id}`, cls(3, true))
     : step(3, "文章", pick ? "写完后在这里打开" : "—", null, "todo");
   box.innerHTML = `<nav class="flow" aria-label="本主题流程">${s1}<span class="fa">→</span>${s2}<span class="fa">→</span>${s3}
+    <a class="flow-trust" href="#/trust/${r.id}" title="资料是否可靠、筛选是否有价值、改写是否帮助理解、过程是否可追溯">可信度与可追溯 →</a>
     ${ws.length > 1 ? `<label class="flow-pick small">这批资料写过 ${ws.length} 篇，切换：<select>${ws.map((w, k) =>
       `<option value="${w.task_id}" ${w === pick ? "selected" : ""}>${k + 1}. ${esc(w.skill || "")}${w.title ? "《" + esc(w.title.slice(0, 18)) + "》" : ""}</option>`).join("")}</select></label>` : ""}</nav>`;
   const sel = $("select", box);
@@ -1602,6 +1637,90 @@ async function showSkillEditor(editId, fromId) {
   };
 }
 
+// ---------------------------------------------------------------- 可信度与可追溯（四个问题 + 通关后的思考）
+async function showTrust(id) {
+  const el = $("#detail");
+  const me = current = { id };
+  el.innerHTML = `<p class="muted small">正在汇总这次检索的数据…</p>`;
+  let d;
+  try { d = await api(`/api/trust/${id}`); } catch (err) { el.innerHTML = `<p class="error">${esc(err.message)}</p>`; return; }
+  if (current !== me) return;
+  const R = d.reliability, S = d.selection, U = d.understanding, T = d.trace, M = d.memory;
+  const pc = (x) => x == null ? "—" : `${Math.round(x * 100)}%`;
+  const VF = { supported: "已多来源证实", unverified: "待核实（独立来源不足）", disputed: "有争议", refuted: "已被否定", corrected: "已更正" };
+  const facts = Object.entries(R.facts || {}).map(([k, n]) => `${VF[k] || k} ${n} 条`).join("，") || "没有记录";
+  const verdict = (ok, txt) => `<span class="tag ${ok ? "nv-new" : "rel-lo"}">${txt}</span>`;
+  const a0 = U.articles[0];
+  const mo = S.metrics?.ours || {}, mt = S.metrics?.time || {}, mh = S.metrics?.popularity || S.metrics?.hot || {};
+  el.innerHTML = `<div data-f="flow"></div>
+    <div class="detail-head"><div><p class="kicker">可信度与可追溯 · <a href="#/task/${id}">${esc(d.task.topic)}</a></p>
+      <h1>这次检索和写作，靠不靠得住？</h1>
+      <p class="meta">下面每个回答都来自这次任务的实际数据（${fmtTime(d.task.created_at)}），点链接可以查到具体的资料、排序理由和每一步记录。</p></div></div>
+    <div class="trust-grid">
+      <section class="card trust-q"><h3>① 资料可靠吗？ ${verdict(R.events_multi > 0 && R.primary > 0, R.primary > 0 ? "有一手资料、有多来源印证" : "缺少一手资料")}</h3>
+        <ul>
+          <li>收集到 <b>${R.docs}</b> 篇，来自 <b>${R.sources}</b> 个来源；其中一手资料（论文、官方、代码仓库）<b>${R.primary}</b> 篇（${pc(R.primary_rate)}）。</li>
+          <li>识别出 <b>${R.duplicates}</b> 篇转载/重复报道，已归并到原文，<b>不重复计数</b>。</li>
+          <li>归并成 <b>${R.events}</b> 个事件：<b>${R.events_multi}</b> 个有 2 个以上独立来源印证，<b>${R.events_single}</b> 个只有单一来源且不是一手资料。</li>
+          ${R.top_reprint ? `<li>报道最多的事件「${esc(R.top_reprint.title.slice(0, 40))}」有 ${R.top_reprint.docs} 篇，按独立来源算是 <b>${R.top_reprint.independent}</b> 个。</li>` : ""}
+          <li>写入长期记忆的事实：${facts}。</li>
+          ${R.examples_single.length ? `<li>只有单一来源的例子：${R.examples_single.map(esc).join("；")}（排序时可信度降权，写作时放进“还不确定的”）。</li>` : ""}
+        </ul><p class="small"><a href="#/library?task=${id}&sort=relevance">看全部资料和来源</a></p></section>
+      <section class="card trust-q"><h3>② 筛选有价值吗？ ${verdict((mo["dup@10"] ?? 1) <= (mt["dup@10"] ?? 0), "去重后再按价值排")}</h3>
+        <ul>
+          <li>资料池 <b>${S.pool}</b> 篇 → 五分钟清单 <b>${S.list5}</b> 条（约 ${S.list5_used} 分钟）、三十分钟清单 <b>${S.list30}</b> 条。</li>
+          <li>没进五分钟清单的原因：${Object.entries(S.list5_out).map(([k, n]) => `${esc(k)} ${n} 篇`).join("，") || "无"}。</li>
+          <li>和“按时间”“按热度”两种排法比（前 10 条）：重复率 <b>${pc(mo["dup@10"])}</b> vs ${pc(mt["dup@10"])} / ${pc(mh["dup@10"])}；一手资料占比 <b>${pc(mo["primary@10"])}</b> vs ${pc(mt["primary@10"])} / ${pc(mh["primary@10"])}；子问题覆盖 <b>${pc(mo["coverage@10"])}</b> vs ${pc(mt["coverage@10"])} / ${pc(mh["coverage@10"])}。</li>
+          ${S.problems.length ? `<li>系统自己标出的风险：${S.problems.map((p) => `第 ${p.rank} 条「${esc(p.title.slice(0, 30))}」${esc(p.issue)}`).join("；")}。</li>` : ""}
+        </ul><p class="small"><a href="#/task/${id}">在任务页看每条资料的排序理由</a></p></section>
+      <section class="card trust-q"><h3>③ 改写帮助理解吗？ ${a0 ? verdict(a0.gain.minutes_saved > 0 && a0.caveats > 0, "省时间，限制条件还在") : verdict(false, "还没写文章")}</h3>
+        ${a0 ? `<ul>
+          <li>以「<a href="#/article/${a0.id}">${esc(a0.title)}</a>」（${esc(a0.skill || "")}，第 ${a0.version} 版）为例：原始资料约 <b>${a0.gain.minutes_sources}</b> 分钟才读得完，文章 <b>${a0.gain.minutes_article}</b> 分钟。</li>
+          <li><b>${a0.gain.cross_source_paras}</b> 段把两个以上来源放在一起交叉印证；<b>${a0.analysis_marked}</b> 段是单独标出的判断（【分析】），和来源原话分开。</li>
+          <li>出处支持率 <b>${pc(a0.fidelity.support_rate)}</b>，数字错误 <b>${a0.fidelity.number_errors}</b> 处，待确认 <b>${a0.fidelity.problems}</b> 处。</li>
+          <li>限制条件和争议：文章里有 <b>${a0.caveats}</b> 句写了“可能、尚未、仅、据称、有争议”这类限制；${a0.disputes_known ? `已知争议 ${a0.disputes_known} 条，文章提到 ${a0.disputes_kept} 条；` : ""}${a0.has_uncertain_section ? "结构里有专门写“不确定 / 证据”的一节。" : "<span class='gap'>结构里没有专门写不确定性的一节。</span>"}</li>
+          <li>平均句长 ${a0.comprehension.avg_sentence_len} 字，长句占 ${pc(a0.comprehension.long_sentence_ratio)}，未解释的外文术语 ${a0.comprehension.unexplained_terms} 个。</li>
+        </ul>${U.articles.length > 1 ? `<p class="small">这批资料还写了：${U.articles.slice(1).map((x) => `<a href="#/article/${x.id}">${esc(x.skill || x.title)}</a>`).join("、")}</p>` : ""}` : `<p class="small muted">这次检索还没有写成文章。</p>`}
+        ${U.experiments.length ? `<p class="small">用这批资料做过对照实验：${U.experiments.map((x) => `<a href="#/experiments/${x.id}">${esc(x.topic)}</a>`).join("、")}（初稿与优化稿的保真度、信息密度、读者盲评都在里面）。</p>` : `<p class="small muted">还没有用这批资料做对照实验；可以在“评测”里做，用读者盲评回答“到底有没有更好懂”。</p>`}</section>
+      <section class="card trust-q"><h3>④ 过程可追溯、可复现吗？ ${verdict(T.steps > 0 && T.checkpoints > 0, "每一步都有记录")}</h3>
+        <ul>
+          <li>检索任务共 <b>${T.steps}</b> 步、<b>${T.tool_calls}</b> 次工具调用（输入、输出、耗时都存着），<b>${T.checkpoints}</b> 个检查点：可以从任意一步重新执行，输入没变的调用直接复用结果。</li>
+          <li>排序有 <b>${T.ranking_versions}</b> 个版本（初评、核验后重评、人工标注后重评），能看到每次名次怎么变。</li>
+          <li>写作 <b>${T.writes}</b> 次，文章记录了用的写法 Skill 的版本号和内容指纹，Skill 改过也能找回当时的原文；每次修改都存成新版本，可以左右对比、恢复。</li>
+          <li>长期记忆有 <b>${T.memory_events}</b> 条变更记录（新增、印证、更正、失效……），每条事实都带出处和资料版本。</li>
+          <li>固定样例可以完整回放：<a href="#/memory/demo">记忆验证回放</a>（两次同主题检索、更正、删除后不再召回）。</li>
+        </ul><p class="small"><a href="#/task/${id}">打开任务轨迹</a> · ${T.articles.map((a) => `<a href="#/article/${a.id}">${esc((a.title || "").slice(0, 16))}（${a.versions} 版）</a>`).join(" · ")}</p></section>
+    </div>
+    <h2 class="section">通关后的思考：用这次的实际内容回答</h2>
+    <div class="trust-think">
+      <details class="card" open><summary>一百篇文章转述同一条未经证实的消息，会不会被系统当成可信？</summary>
+        <p><b>不会。</b>系统数的是<b>独立来源</b>，不是篇数：转载、洗稿、同一事件的重复报道会被归并（这次归并了 ${R.duplicates} 篇），同一平台同一作者算一个来源。
+          只有单一来源、又不是一手资料的说法，排序时可信度降权、标“待核实”；写入长期记忆时状态是“待核实”，要等到第二个独立来源或一手资料出现才变成“已证实”。
+          ${R.top_reprint ? `这次报道最多的事件有 ${R.top_reprint.docs} 篇，只算 ${R.top_reprint.independent} 个独立来源。` : ""}
+          写作时，待核实的说法会放进“还不确定的”，并写明“只有某来源报道”。</p>
+        <p class="small muted">我们的取舍：宁可把真消息暂时标成“待核实”，也不让转载量冒充证据。代价是突发新闻的第一时间判断会保守一些。</p></details>
+      <details class="card" open><summary>改写更流畅，却丢掉了限制条件与争议，价值增加了吗？</summary>
+        <p><b>没有，反而是减分。</b>所以“降 AI 腔”这一步有两道闸：改完逐句重新核对出处，改出问题的节退回原稿；
+          并且<b>限制条件和争议的句子数只要变少，这一节就不采用改写</b>（“可能、尚未、仅、据称、有争议、样本”这类词被顺掉，就退回）。
+          ${a0 ? `这次的文章「${esc(a0.title)}」保留了 ${a0.caveats} 句限制/争议；` : ""}评测实验里还有“限制与争议/千字”指标，专门看改写有没有把它们丢掉。</p>
+        <p class="small muted">我们的取舍：流畅度让位于准确的不确定性。读者宁可读一句“目前只有单一来源”，也不该读一句漂亮但过度确定的话。</p></details>
+      <details class="card" open><summary>昨天交付的结论今天被更正，Agent 能否记起并说明变化？</summary>
+        <p><b>能。</b>每次交付都存成一条“交付记录”，引用了哪些事实、哪些资料版本都记着。资料复查发现更正后，旧事实标为“已被更正”，
+          依赖它的交付标为“需更正”；下次同主题检索时，报告里的“与上次相比”会写出哪条结论变了、为什么变。
+          ${M.corrected ? `这次检索更正了 ${M.corrected} 条：${(M.corrections || []).map((c) => esc(typeof c === "string" ? c : (c.old || c.content || "") + (c.new ? " → " + c.new : ""))).join("；")}。` : "这次检索没有遇到更正。"}
+          ${M.stale?.length ? `有 ${M.stale.length} 条记忆因为资料更新被标为需复查。` : ""}
+          完整过程可以看 <a href="#/memory/demo">记忆验证回放</a>：同一主题两次独立检索、旧结论被更正、删除一条记忆后不再被召回。</p>
+        <p class="small muted">我们的取舍：记忆不是越多越好。被更正、被删除的内容要能“忘掉”，并且派生出的结论要跟着失效。</p></details>
+      <details class="card" open><summary>用户只有五分钟，你愿意让哪条信息占用其中的一分钟？</summary>
+        <p><b>给“新的、有证据、会改变读者判断”的那一条，而不是热度最高的那一条。</b>五分钟清单按价值分排：相关度、可信度（独立来源、一手资料）、新颖性（新进展/更新优先于背景）、时效性加权；
+          同一事件只留一篇；放不下的写明原因。${S.top5[0] ? `这次排第一的是「${esc(S.top5[0].title)}」：${esc(S.top5[0].why)}。` : ""}
+          ${S.list5_out["同一事件只留一篇"] ? `有 ${S.list5_out["同一事件只留一篇"]} 篇因为和已入选的是同一事件被挤掉。` : ""}
+          写成文章时，“主题速览”这类写法把第一段写成“只看这一段也不会误解”的结论。</p>
+        <p class="small muted">我们的取舍：五分钟里宁可少一条，也不放一条读者读完会被误导的。热度只作为参考，不进价值分的主项。</p></details>
+    </div>`;
+  loadFlow({ task: id }, 0);
+}
+
 // ---------------------------------------------------------------- Lv3：评测实验
 const VAR_OPTS = [["draft", "初稿", "对照组：列提纲后直接成稿，什么都不检查"],
   ["checked", "核对改写", "初稿 + 逐句核对出处、缺资料时补检、核对不过的节重写"],
@@ -1688,11 +1807,22 @@ async function showExperiments() {
   };
 }
 
+const expCache = new Map();          // 切换实验时先用上次的结果立刻显示，再在后台刷新
 async function showExperiment(id) {
-  const el = $("#detail");
-  const me = current = { timer: null };
+  const me = current = { timer: null, id };
+  const c = expCache.get(id);
+  if (c) renderExperiment(id, c, me);
+  else $("#detail").innerHTML = `<p class="muted small">加载实验报告…</p>`;
   const r = await api(`/api/experiments/${id}`);
   if (current !== me) return;
+  expCache.set(id, r);
+  if (!c || JSON.stringify(c) !== JSON.stringify(r)) renderExperiment(id, r, me);
+  else if (["pending", "running"].includes(r.status) || r.running) me.timer = setTimeout(() => current === me && showExperiment(id), 5000);
+}
+
+function renderExperiment(id, r, me) {
+  const el = $("#detail");
+  clearTimeout(me.timer);
   const busy = ["pending", "running"].includes(r.status) || r.running;
   const rows = r.rows || [];
   const vname = (v) => (r.variants.find((x) => x.id === v) || {}).name || v;
@@ -1701,13 +1831,16 @@ async function showExperiment(id) {
   const base = r.kind === "skills" ? null : (r.variants[0] || {}).id;
   const fmtCell = (k, x) => ["support_rate", "judge_fidelity", "redundancy", "filler_ratio", "connective_start", "long_sentence_ratio", "number_error_rate"].includes(k) ? pct(x) : num(x);
   const avgTable = () => `<div class="table-wrap"><table class="tbl ex-tbl"><tr><th>指标</th>${r.variants.map((v) => `<th>${esc(v.name)}<br><small class="muted">${r.avg[v.id]?.n || 0} 篇</small></th>`).join("")}</tr>
-    ${r.metric_cols.map((c) => `<tr><td>${c.name}${c.better ? `<small class="muted">${c.better === "up" ? " ↑好" : " ↓好"}</small>` : ""}</td>${r.variants.map((v) => {
+    ${r.metric_cols.map((c) => `<tr><td title="${esc(c.desc || "")}">${c.name}${c.better ? `<small class="muted">${c.better === "up" ? " ↑好" : " ↓好"}</small>` : ""}</td>${r.variants.map((v) => {
       const x = r.avg[v.id]?.[c.key], b0 = base && r.avg[base]?.[c.key];
       return `<td class="${v.id !== base ? better(c, b0, x) : ""}">${fmtCell(c.key, x)}</td>`; }).join("")}</tr>`).join("")}
     ${r.detectors.map((d) => `<tr><td>AIGC：${esc(d)}<small class="muted"> ↓好</small></td>${r.variants.map((v) => {
       const x = r.avg[v.id]?.aigc?.[d], b0 = base && r.avg[base]?.aigc?.[d];
       return `<td class="${v.id !== base ? better({ better: "down" }, b0, x) : ""}">${pctAi(x)}</td>`; }).join("")}</tr>`).join("")}</table></div>
-    ${!busy ? `<div class="row"><button type="button" class="ghost sm" id="ex-remeasure">按最新指标重新计算</button><small class="muted">指标定义更新后用这个刷新（不重写文章、不花大模型费用）</small></div>` : ""}
+    <details class="small ex-defs"><summary>每个指标是怎么算的（鼠标移到指标名上也能看）</summary>
+      <dl>${r.metric_cols.map((c) => `<dt>${esc(c.name)}${c.better ? (c.better === "up" ? "（越高越好）" : "（越低越好）") : ""}</dt><dd>${esc(c.desc || "")}</dd>`).join("")}
+      <dt>AIGC 概率（越低越好）</dt><dd>检测器认为这篇是 AI 写的概率；要和事实指标一起看，并先做“检测器自检”</dd></dl></details>
+    ${!busy ? `<div class="row"><button type="button" class="ghost sm" id="ex-remeasure">重新计算指标</button><small class="muted">我更新了指标的计算方法后（比如新增指标），点这个用已写好的文章重算，不重写文章、不花大模型费用；平时不用点</small></div>` : ""}
     ${(() => {                 // 所有版本都一样（比如都是 0）的指标：说明它在这次实验里区分不出差别
       const flat = r.metric_cols.filter((c) => c.better && r.variants.length > 1 && r.variants.every((v) => r.avg[v.id]?.[c.key] === r.avg[r.variants[0].id]?.[c.key]));
       return flat.length ? `<p class="small muted">各版本完全相同的指标：${flat.map((c) => c.name).join("、")}。这些指标在这次实验里区分不出差别（例如写法 Skill 已经禁止了套话和连接词开头，各版本都是 0），不能用来说明哪一步有效。</p>` : "";
@@ -1770,8 +1903,10 @@ async function showExperiment(id) {
   const conclBox = () => {
     const c = r.conclusions || { effects: [], failures: [] };
     return `<div class="card"><h3>哪些步骤有效（消融 / 对照）</h3>
-      ${c.effects.map((e) => `<div class="ex-eff ${e.effective ? "ok" : "bad"}"><b>${esc(e.step)}</b> <small class="muted">${esc(e.compare)}</small>
-        <span class="tag ${e.effective ? "nv-new" : "rel-lo"}">${e.effective ? "有效" : "这次没看到效果"}</span><p class="small">${esc(e.text)}</p></div>`).join("") || `<p class="small muted">变体还没写完。</p>`}
+      ${c.effects.map((e) => { const v = e.verdict || (e.effective ? "effective" : "none");
+        return `<div class="ex-eff ${v === "effective" ? "ok" : v === "mixed" ? "mid" : "bad"}"><b>${esc(e.step)}</b> <small class="muted">${esc(e.compare)}</small>
+        <span class="tag ${v === "effective" ? "nv-new" : "rel-lo"}">${{ effective: "有效", mixed: "部分有效", none: "这次没看到效果" }[v]}</span>
+        ${e.note ? `<p class="small"><b>${esc(e.note)}</b></p>` : ""}<p class="small">${esc(e.text)}</p></div>`; }).join("") || `<p class="small muted">变体还没写完。</p>`}
       <h3>什么时候失效（来自这次实验的具体案例）</h3>
       ${c.failures.length ? `<ul class="small">${c.failures.map((f) => `<li><b>${esc(f.where)}</b> · ${esc(f.topic.slice(0, 14))} · ${esc(f.variant)}：${esc(f.what)}</li>`).join("")}</ul>` : `<p class="small muted">没有记录到失效案例。</p>`}</div>`;
   };
@@ -1810,7 +1945,7 @@ async function showExperiment(id) {
     })()}
     ${r.kind === "skills" ? skillsBox() : `
     <div class="card small"><b>实验设置</b>：Skill「${esc(r.params.skill)}」；变体：${r.variants.map((v) => `<b>${esc(v.name)}</b>（${esc(v.desc)}）`).join("；")}。
-      同一组素材的各变体用完全相同的素材和 Skill，只差写作步骤；为了只比较文字，变体都不配图。</div>
+      同一组素材的各变体用完全相同的素材和 Skill，<b>并且共用同一份提纲和初稿</b>（先写初稿，其他变体直接在这份初稿上做后面的步骤），差别只来自被比较的步骤；为了只比较文字，变体都不配图。</div>
     <h2 class="section">平均结果（${topics.length} 组素材）</h2>${avgTable()}
     ${conclBox()}${humanBox()}${aigcBox()}${gainBox()}
     <h2 class="section">每组明细</h2>${detail()}`}`;

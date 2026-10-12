@@ -97,7 +97,9 @@ def density(text: str, items: list[dict], docs: list[dict]) -> dict:
                 break
     filler = [s for s in sents if not writing.CITE.search(s) and not re.search(r"\d", s)
               and not s.startswith("【分析】") and len(s) > 12]
-    return {"chars": n, "verified_facts": len(facts), "facts_per_1k": round(len(facts) * 1000 / n, 2),
+    from .trust import caveats
+    return {"chars": n, "caveats_per_1k": round(caveats(text) * 1000 / n, 2),
+            "verified_facts": len(facts), "facts_per_1k": round(len(facts) * 1000 / n, 2),
             "distinct_numbers": len(nums), "sources_cited": len(srcs), "redundant_sentences": dup,
             "redundancy": round(dup / max(1, len(sents)), 3), "filler_ratio": round(len(filler) / max(1, len(sents)), 3)}
 

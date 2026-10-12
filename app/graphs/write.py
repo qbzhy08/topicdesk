@@ -195,9 +195,30 @@ def _facts_text(facts) -> str:
                      for f in facts) or "（无）"
 
 
+def _seed(ctx) -> bool:
+    """对照实验：各变体共用同一份初稿（同一份提纲和初稿，只差后面的步骤）。既省掉重复的列提纲、写初稿，
+    也让变体之间的差别只来自被比较的步骤。素材不一致时不共用。"""
+    sid = ctx.params.get("seed_from")
+    if not sid:
+        return False
+    src = db.query_one("SELECT state FROM tasks WHERE id=?", (sid,))
+    snap = ((src or {}).get("state") or {}).get("draft_snapshot")
+    st = ctx.state
+    if not snap or [d["id"] for d in snap["docs"]] != [d["id"] for d in st["docs"]]:
+        ctx.think("共用初稿的素材和这次不一致，改为自己列提纲、写初稿")
+        return False
+    import copy
+    st.update(title=snap["title"], sections=copy.deepcopy(snap["sections"]), outline_by=snap["outline_by"],
+              draft_by=snap["draft_by"], seeded_from=sid)
+    ctx.observe(f"共用对照组初稿（{sid}）：提纲和初稿完全相同，只比较后面的步骤")
+    return True
+
+
 def outline(ctx):
     st = ctx.state
     sk = st["skill"]
+    if _seed(ctx):
+        return "check"
     docs = _docs(st)
     base = [{"id": s["id"], "heading": s["heading"], "goal": s["goal"], "words": s["words"], "points": [],
              "sources": []} for s in sk["structure"]]
@@ -448,6 +469,9 @@ def draft(ctx):
         sec["md"] = texts[sec["id"]]
     st.setdefault("timing", {})["逐节写作（并行）"] = round(time.time() - t0, 1)
     st["draft_by"] = "llm" if _use_llm(ctx) else "rule"
+    import copy
+    st["draft_snapshot"] = {"title": st["title"], "sections": copy.deepcopy(st["sections"]), "outline_by": st["outline_by"],
+                            "draft_by": st["draft_by"], "docs": [{"id": d["id"]} for d in st["docs"]]}
     ctx.observe(f"逐节写作完成（{'大模型' if st['draft_by'] == 'llm' else '规则摘编：未配置大模型'}），共 "
                 f"{sum(len(s['md']) for s in st['sections'])} 字")
     return "check"
@@ -571,6 +595,7 @@ NATURAL_PROMPT = """把下面这节文章改得更像一位懂行的编辑写的
 2. 去掉套话和空泛连接词（如：{tropes}），不用排比和对仗，不要每段都“总—分—总”。
 3. 句子长短错开，能用短句就用短句；用具体的主语和动词，少用“进行”“实现”“具有……性”。
 4. 以“【分析】”开头的段落仍以“【分析】”开头；表格和列表的结构保留。
+5. 限制条件和争议一个都不能丢：“可能、预计、尚未、仅、据称、宣称、有争议、样本、前提”这类说法要保留原意。
 5. 只输出改好的正文，不要解释。
 原文：
 {text}"""
@@ -597,6 +622,10 @@ def naturalize(ctx):
         lost = set(writing.CITE.findall(sec["md"])) - set(writing.CITE.findall(new))
         if lost:
             log.append({"section": sec["id"], "result": f"丢了出处 {sorted(lost)}，保留原稿"})
+            continue
+        from ..trust import caveats
+        if caveats(new) < caveats(sec["md"]):          # 改顺了，却把“可能、尚未、仅、争议”这类限制条件改没了
+            log.append({"section": sec["id"], "result": f"限制条件/争议的句子从 {caveats(sec['md'])} 句变成 {caveats(new)} 句，保留原稿"})
             continue
         sec["md"] = new
         log.append({"section": sec["id"], "result": "已改写"})

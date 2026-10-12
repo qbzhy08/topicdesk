@@ -22,7 +22,7 @@ def _row(r: dict, scores: dict) -> dict:
             "chars": d.get("chars"), "support_rate": f.get("support_rate"), "number_errors": f.get("number_errors"),
             "number_error_rate": f.get("number_error_rate"), "problems": f.get("problems"),
             "judge_fidelity": cj.get("fidelity"), "judge_bad": cj.get("bad") or [], "judge_n": cj.get("judged"),
-            "facts_per_1k": d.get("facts_per_1k"), "sources_cited": d.get("sources_cited"), "redundancy": d.get("redundancy"),
+            "facts_per_1k": d.get("facts_per_1k"), "caveats_per_1k": d.get("caveats_per_1k"), "sources_cited": d.get("sources_cited"), "redundancy": d.get("redundancy"),
             "filler_ratio": d.get("filler_ratio"), "tropes_per_1k": n.get("tropes_per_1k"), "tropes": n.get("tropes"),
             "sentence_len_cv": n.get("sentence_len_cv"), "connective_start": n.get("connective_start"),
             "dash_per_1k": n.get("dash_per_1k"), "triplets_per_1k": n.get("triplets_per_1k"),
@@ -55,21 +55,34 @@ def _excerpt(text: str) -> str:
     return (body[0] if body else "")[:160]
 
 
-METRIC_COLS = [("chars", "字数", None), ("support_rate", "出处支持率", "up"), ("number_errors", "数字错误", "down"),
-               ("problems", "待确认问题", "down"), ("judge_fidelity", "独立核验保真度", "up"),
-               ("facts_per_1k", "每千字可核对事实", "up"), ("sources_cited", "引用来源数", "up"),
-               ("redundancy", "重复率", "down"), ("filler_ratio", "空话率", "down"), ("tropes_per_1k", "套话/千字", "down"),
-               ("sentence_len_cv", "句长变化", "up"), ("connective_start", "连接词起句", "down"),
-               ("dash_per_1k", "破折号/千字", "down"), ("triplets_per_1k", "三连排比/千字", "down"),
-               ("avg_sentence_len", "平均句长", "down"), ("long_sentence_ratio", "长句比例", "down"),
-               ("unexplained_terms", "未解释术语", "down"), ("read_minutes", "阅读分钟", None)]
+METRIC_COLS = [  # (键, 名称, 越高好还是越低好, 怎么算的)
+    ("chars", "字数", None, "完整正文的字数（去掉配图、图注、阅读说明和参考资料列表，出处编号不计）"),
+    ("support_rate", "出处支持率", "up", "带出处的句子里，出处原文能支持的比例（字面相近，或大模型对照原文判断意思一致）"),
+    ("number_errors", "数字错误", "down", "带出处的句子里，在出处原文中找不到的数字个数（每篇平均）"),
+    ("problems", "待确认问题", "down", "核对没通过的句子数：数字对不上、出处里找不到依据、出处编号不存在、有数字没出处、分析里编了数字"),
+    ("judge_fidelity", "独立核验保真度", "up", "另一个大模型抽样最多 16 句，只看出处原文判断是否支持（支持=1，部分支持=0.5）"),
+    ("facts_per_1k", "每千字可核对事实", "up", "每千字里出处能支持的句子数：信息密度"),
+    ("sources_cited", "引用来源数", "up", "正文引用了几个不同的来源（网站/机构）"),
+    ("caveats_per_1k", "限制与争议/千字", "up", "每千字里写了限制条件或争议的句子数（可能、尚未、仅、据称、有争议、样本……）：改写不能把这些“顺”掉"),
+    ("redundancy", "重复率", "down", "和前文某句字面重合超过 60% 的句子占比"),
+    ("filler_ratio", "空话率", "down", "既没有出处、也没有数字、也不是【分析】的句子占比（不一定是坏句子，但信息少）"),
+    ("tropes_per_1k", "套话/千字", "down", "每千字出现的 AI 常用套话次数（首先、值得注意的是、这意味着、从长远来看……）"),
+    ("sentence_len_cv", "句长变化", "up", "句子长度的变异系数：越接近 0 句子越整齐划一（像模板），人写的文章长短句交错"),
+    ("connective_start", "连接词起句", "down", "以“此外、然而、因此、总之……”开头的句子占比"),
+    ("dash_per_1k", "破折号/千字", "down", "每千字破折号个数（大模型中文写作常见的习惯）"),
+    ("triplets_per_1k", "三连排比/千字", "down", "每千字“A、B、C 等”式三连列举的次数"),
+    ("avg_sentence_len", "平均句长", "down", "平均每句字数：越长越难读"),
+    ("long_sentence_ratio", "长句比例", "down", "超过 50 字的句子占比"),
+    ("unexplained_terms", "未解释术语", "down", "出现的英文术语/缩写里，没有用括号解释的个数"),
+    ("read_minutes", "阅读分钟", None, "按每分钟 400 字估算的阅读时间"),
+]
 
 
 def _avg_by_variant(rows: list[dict], variants: list[str], detectors: list[str]) -> dict:
     out = {}
     for v in variants:
         rs = [r for r in rows if r["variant"] == v and r["status"] == "done"]
-        out[v] = {k: ev.mean([r.get(k) for r in rs]) for k, _, _ in METRIC_COLS}
+        out[v] = {k: ev.mean([r.get(k) for r in rs]) for k, *_ in METRIC_COLS}
         out[v]["aigc"] = {d: ev.mean([r["aigc"].get(d) for r in rs]) for d in detectors}
         out[v]["n"] = len(rs)
     return out
@@ -85,6 +98,30 @@ def _fmt(x, pct=False):
     return f"{x * 100:.0f}%" if pct else (f"{round(x, 2):g}" if isinstance(x, (int, float)) else str(x))
 
 
+def _style_verdict(a, b, detectors) -> dict:
+    """降 AI 腔这一步：文风有没有变自然（套话、长句、句长变化、检测器），事实有没有变差（数字错误、待确认问题）。
+    文风变好且事实不变差 = 有效；文风变好但事实一项变差 = 部分有效；文风没变好 = 没看到效果。"""
+    lt = lambda k: (b.get(k) or 0) < (a.get(k) or 0)          # noqa: E731
+    gt = lambda k: (b.get(k) or 0) > (a.get(k) or 0)          # noqa: E731
+    style = [n for k, n in (("tropes_per_1k", "套话少了"), ("long_sentence_ratio", "长句少了"), ("avg_sentence_len", "句子短了"),
+                            ("dash_per_1k", "破折号少了"), ("triplets_per_1k", "排比少了")) if lt(k)]
+    style += ["句长更错落"] if gt("sentence_len_cv") else []
+    style += [f"{d} 分数降了" for d in detectors if (b["aigc"].get(d) is not None and a["aigc"].get(d) is not None
+                                                     and b["aigc"][d] < a["aigc"][d])]
+    worse = [n for k, n in (("number_errors", "数字错误多了"), ("problems", "待确认问题多了")) if gt(k)]
+    worse += ["出处支持率降了"] if lt("support_rate") else []
+    better_facts = [n for k, n in (("number_errors", "数字错误少了"), ("problems", "待确认问题少了")) if lt(k)]
+    if len(style) >= 2 and not worse:
+        v = "effective"
+    elif len(style) >= 2:
+        v = "mixed"
+    else:
+        v = "none"
+    note = ("文风：" + ("、".join(style) or "没有明显变化") + "；事实：" +
+            ("、".join(worse + better_facts) or "没有变化"))
+    return {"effective": v == "effective", "verdict": v, "note": note}
+
+
 def _conclusions(avg: dict, rows: list[dict], detectors: list[str], llm_pairs: dict, human: dict) -> dict:
     """消融结论：每一步的作用（有数据才下结论），以及何时失效（来自运行日志的具体案例）。"""
     effects, fails = [], []
@@ -98,7 +135,8 @@ def _conclusions(avg: dict, rows: list[dict], detectors: list[str], llm_pairs: d
                                 f"数字错误 {_fmt(a['number_errors'])} → {_fmt(b['number_errors'])} 处/篇；"
                                 f"待确认问题 {_fmt(a['problems'])} → {_fmt(b['problems'])}；"
                                 f"独立核验保真度 {_fmt(a['judge_fidelity'], True)} → {_fmt(b['judge_fidelity'], True)}",
-                        "effective": (b["problems"] or 0) < (a["problems"] or 0) or (b["support_rate"] or 0) > (a["support_rate"] or 0)})
+                        "effective": (b["problems"] or 0) < (a["problems"] or 0) or (b["support_rate"] or 0) > (a["support_rate"] or 0)}
+                       | {"verdict": "effective" if ((b["problems"] or 0) < (a["problems"] or 0) or (b["support_rate"] or 0) > (a["support_rate"] or 0)) else "none"})
     if has("checked", "optimized"):
         a, b = avg["checked"], avg["optimized"]
         det = "；".join(f"{d} AI 概率 {_fmt(a['aigc'].get(d), True)} → {_fmt(b['aigc'].get(d), True)}" for d in detectors) or "（还没有检测器分数）"
@@ -107,11 +145,7 @@ def _conclusions(avg: dict, rows: list[dict], detectors: list[str], llm_pairs: d
                                 f"{_fmt(a['sentence_len_cv'])} → {_fmt(b['sentence_len_cv'])}；平均句长 {_fmt(a['avg_sentence_len'])} → "
                                 f"{_fmt(b['avg_sentence_len'])} 字；{det}；同时出处支持率 {_fmt(a['support_rate'], True)} → "
                                 f"{_fmt(b['support_rate'], True)}、数字错误 {_fmt(a['number_errors'])} → {_fmt(b['number_errors'])}",
-                        "effective": ((b["tropes_per_1k"] or 0) < (a["tropes_per_1k"] or 0)
-                                      or (b["sentence_len_cv"] or 0) > (a["sentence_len_cv"] or 0)
-                                      or any((b["aigc"].get(d) or 1) < (a["aigc"].get(d) or 0) for d in detectors))
-                        and (b["number_errors"] or 0) <= (a["number_errors"] or 0)
-                        and (b["problems"] or 0) <= (a["problems"] or 0)})
+                        **_style_verdict(a, b, detectors)})
     for abl, label in (("natural_only", "只自然化、不核对"), ("no_recheck", "自然化后不复核")):
         if has(abl, "optimized"):
             a, b = avg[abl], avg["optimized"]
@@ -121,7 +155,9 @@ def _conclusions(avg: dict, rows: list[dict], detectors: list[str], llm_pairs: d
                                     f"独立核验保真度 {_fmt(a['judge_fidelity'], True)}；优化稿：{_fmt(b['number_errors'])}、"
                                     f"{_fmt(b['problems'])}、{_fmt(b['judge_fidelity'], True)}",
                             "effective": (b["problems"] or 0) < (a["problems"] or 0)
-                            or (b["number_errors"] or 0) < (a["number_errors"] or 0)})
+                            or (b["number_errors"] or 0) < (a["number_errors"] or 0),
+                            "verdict": "effective" if ((b["problems"] or 0) < (a["problems"] or 0)
+                                                       or (b["number_errors"] or 0) < (a["number_errors"] or 0)) else "none"})
     # 何时失效：具体案例
     for r in rows:
         lg = r["logs"]
@@ -243,7 +279,7 @@ def build(exp: dict) -> dict:
     variants = list(dict.fromkeys(r["variant"] for r in rows))
     rep = {"id": exp["id"], "status": exp["status"], "kind": st.get("kind") or exp["params"].get("kind") or "ablation",
            "params": exp["params"], "rows": rows, "variants": [{"id": v, **VARIANTS.get(v, {"name": v, "desc": ""})} for v in variants],
-           "detectors": detectors, "metric_cols": [{"key": k, "name": n, "better": b} for k, n, b in METRIC_COLS],
+           "detectors": detectors, "metric_cols": [{"key": k, "name": n, "better": b, "desc": d} for k, n, b, d in METRIC_COLS],
            "aigc_note": st.get("aigc_note"), "aigc_error": st.get("aigc_error"), "judge_note": st.get("judge_note"),
            "blind_pairs": len(st.get("blind") or []), "llm_pairs": st.get("llm_pairs") or {}, "fatal": st.get("fatal")}
     rep["avg"] = _avg_by_variant(rows, variants, detectors)

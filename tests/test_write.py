@@ -941,3 +941,37 @@ class ExperimentFailTest(ExperimentTest):
         self.assertEqual(c["tally"]["overall"]["checked"] + c["tally"]["overall"]["optimized"], 1)
         self.assertEqual(self.c.delete(f"/api/experiments/{eid}/blind/pairs/{new['pair_id']}").status_code, 200)
         self.assertEqual(self.c.get(f"/api/experiments/{eid}").get_json()["blind_pairs"], 1)
+
+
+class TrustTest(WriteBase):
+    def test_trust_report(self):
+        from app.server import create_app
+        llm.available, llm.chat = (lambda: True), NaturalWriter()
+        self.write("brief")
+        c = create_app().test_client()
+        d = c.get(f"/api/trust/{self.t1}").get_json()
+        self.assertGreater(d["reliability"]["docs"], 0)
+        self.assertGreaterEqual(d["reliability"]["duplicates"], 1)            # 转载被归并
+        self.assertGreater(d["selection"]["list5"], 0)
+        self.assertTrue(d["understanding"]["articles"])
+        self.assertIn("caveats", d["understanding"]["articles"][0])
+        self.assertGreater(d["trace"]["steps"], 0)
+        self.assertEqual(c.get("/api/trust/nope").status_code, 400)
+
+    def test_naturalize_keeps_caveats(self):
+        from app import trust
+        self.assertEqual(trust.caveats("目前只有单一来源报道。官方尚未回应。销量增长了。"), 2)
+
+
+class SharedDraftTest(ExperimentTest):
+    def test_variants_share_draft(self):
+        fake = JudgeWriter()
+        llm.chat = fake
+        eid, rep = self.run_exp(research_tasks=[self.t1], skill="brief", detector="manual")
+        self.assertEqual(sum("列提纲" in c for c in fake.calls), 1)                 # 只列一次提纲
+        st = db.query_one("SELECT state FROM tasks WHERE id=?", (eid,))["state"]
+        draft = next(r for r in st["runs"] if r["variant"] == "draft")
+        for r in st["runs"]:
+            if r["variant"] != "draft":
+                ws = db.query_one("SELECT state FROM tasks WHERE id=?", (r["write_task"],))["state"]
+                self.assertEqual(ws.get("seeded_from"), draft["write_task"])
