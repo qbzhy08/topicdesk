@@ -73,7 +73,7 @@ def _delta(a, b):
 def _fmt(x, pct=False):
     if x is None:
         return "—"
-    return f"{x * 100:.0f}%" if pct else (f"{x:g}" if isinstance(x, (int, float)) else str(x))
+    return f"{x * 100:.0f}%" if pct else (f"{round(x, 2):g}" if isinstance(x, (int, float)) else str(x))
 
 
 def _conclusions(avg: dict, rows: list[dict], detectors: list[str], llm_pairs: dict, human: dict) -> dict:
