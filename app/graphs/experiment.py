@@ -18,8 +18,9 @@ from __future__ import annotations
 import re
 
 import random
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 from .. import db, evaluate as ev, llm, ranking, skills as skills_mod
 from .. import aigc
@@ -38,6 +39,8 @@ VARIANTS = {
     "no_recheck": {"name": "自然化不复核", "desc": "消融：全流程，但自然化后不复核、不退回",
                    "stages": {**OFF, "gap": True, "fix": True, "naturalize": True}},
 }
+VARIANTS["no_examples"] = {"name": "不用编辑示例", "desc": "消融：优化稿，但去 AI 味时不参考编辑改过的句子",
+                           "stages": {**VARIANTS["optimized"]["stages"], "edit_examples": False}}
 DEFAULT_VARIANTS = ["draft", "checked", "optimized", "natural_only"]
 BLIND_PAIR = ("draft", "optimized")
 
@@ -90,13 +93,15 @@ def plan(ctx):
 
 # ---------------------------------------------------------------- write
 
-def _run_one(r, params, user_id):
+def _run_one(r, params, user_id, on_start=None):
     wp = {"research_task": r["research_task"], "skill": r["skill"], "stages": r["stages"], "seed_from": r.get("seed_from"),
           "experiment": params["_exp"], "variant": r["variant"], "note": f"实验变体：{r['variant']}"}
     if params.get("no_llm"):
         wp["no_llm"] = True
     wid = create_task("write", r["topic"], params=wp, user_id=user_id, parent_task_id=r["research_task"],
                       budget={"max_tool_calls": 200, "max_steps": 100})
+    if on_start:
+        on_start(r, wid)
     t0 = time.time()
     status = run_task(wid)
     t = db.query_one("SELECT state, error FROM tasks WHERE id=?", (wid,))
@@ -136,51 +141,84 @@ def friendly_error(err: str | None) -> tuple[str, bool]:
     return (err or "写作任务失败")[:200], False
 
 
+def _ready(st, p, r, drafts) -> bool:
+    """这篇现在能不能开写：初稿（对照组）随时能写；其他变体等同组初稿写完，直接用那份初稿往后做
+    （省时间，也只比较差异步骤）；初稿失败了就各写各的。"""
+    d = drafts.get(r["research_task"])
+    if st.get("kind") == "skills" or r["variant"] == "draft" or not d or not p.get("share_draft", True):
+        return True
+    if d["status"] == "done":
+        r["seed_from"] = d.get("write_task")
+        return True
+    return d["status"] == "failed"
+
+
 def write(ctx):
+    """流水线写作：最多同时写 parallel 篇，哪篇写完，空出来的位置马上开写下一篇；某组初稿一写完，
+    这组的其他变体立刻排上。（以前按批写：一批要等最慢的那篇，快的写完也只能干等。）"""
     st, p = ctx.state, ctx.params
-    todo = [r for r in st["runs"] if r["status"] == "pending"]
-    if not todo:
+    for r in st["runs"]:
+        r.pop("writing", None)          # 上次中断时写到一半的，按待写重来
+    pending = [r for r in st["runs"] if r["status"] == "pending"]
+    if not pending:
         return "measure"
-    # 先写各组素材的初稿（对照组）；其他变体等初稿写完，直接用同一份初稿往后做（省时间，也只比较差异步骤）
+    pending.sort(key=lambda r: r["variant"] != "draft")      # 初稿先排
     drafts = {r["research_task"]: r for r in st["runs"] if r["variant"] == "draft"}
-    ready = []
-    for r in todo:
-        d = drafts.get(r["research_task"])
-        if st.get("kind") == "skills" or r["variant"] == "draft" or not d or not p.get("share_draft", True):
-            ready.append(r)
-        elif d["status"] == "done":
-            r["seed_from"] = d.get("write_task")
-            ready.append(r)
-        elif d["status"] == "failed":
-            ready.append(r)
-    if not ready:
-        ready = todo
-    batch = ready[:int(p.get("parallel") or 3)]
+    par = max(1, min(8, int(p.get("parallel") or 3)))
     params = {**p, "_exp": ctx.task_id}
-    with ThreadPoolExecutor(max_workers=len(batch)) as ex:
-        outs = list(ex.map(lambda r: _run_one(r, params, ctx.user_id), batch))
+    lock = threading.RLock()
+
+    def flush():
+        """开始写一篇、写完一篇，都把进度写回任务状态，报告页立刻能看到。
+        只更新 tasks.state，不生成检查点；中断后从检查点恢复，没写完的按待写重来。"""
+        with lock:
+            db.update("tasks", "id", ctx.task_id, dict(state=st, updated_at=db.now()))
+
+    def on_start(r, wid):
+        with lock:
+            r.update(write_task=wid, writing=True, started_at=time.time())
+        flush()
+
     fatal = None
-    for r, o in zip(batch, outs):
-        r.update(o)
-        r["status"] = "done" if o["status"] == "done" and o.get("article_id") else "failed"
-        if r["status"] == "done":
-            _measure_one(r)
-        if r["status"] == "failed":
-            r["raw_error"] = r.get("error")
-            r["error"], is_fatal = friendly_error(r.get("error"))
-            fatal = fatal or (r["error"] if is_fatal else None)
-    if fatal:      # 余额不足、Key 无效：后面的文章写了也是白失败，直接停下，不再浪费时间
-        rest = [r for r in st["runs"] if r["status"] == "pending"]
-        for r in rest:
-            r.update(status="failed", error=f"没有开始写：{fatal}")
-        st["fatal"] = f"{fatal}（已停止，剩下 {len(rest)} 篇没有开始写）"
-        ctx.observe(st["fatal"])
-        return "measure"
-    done = sum(1 for r in st["runs"] if r["status"] != "pending")
-    ctx.observe(f"已写完 {done}/{len(st['runs'])} 篇：" + "；".join(
-        f"{r['topic'][:12]}·{_vname(st, r)} {'✓' if r['status'] == 'done' else '✗ ' + str(r.get('error'))[:40]}（{r['seconds']}s）"
-        for r in batch))
-    return "write"
+    futs = {}
+    with ThreadPoolExecutor(max_workers=par) as ex:
+        while pending or futs:
+            if not fatal:
+                for r in [r for r in pending if _ready(st, p, r, drafts)]:
+                    if len(futs) >= par:
+                        break
+                    pending.remove(r)
+                    futs[ex.submit(_run_one, r, params, ctx.user_id, on_start)] = r
+                if not futs and pending:            # 理论上不会发生（依赖的初稿不在待写里）：别死等，直接写
+                    r = pending.pop(0)
+                    futs[ex.submit(_run_one, r, params, ctx.user_id, on_start)] = r
+            if not futs:
+                break
+            done, _ = wait(futs, return_when=FIRST_COMPLETED)
+            for fu in done:
+                r, o = futs.pop(fu), fu.result()
+                with lock:
+                    r.update(o)
+                    r.pop("writing", None)
+                    r["status"] = "done" if o["status"] == "done" and o.get("article_id") else "failed"
+                    if r["status"] == "done":
+                        _measure_one(r)
+                    else:
+                        r["raw_error"] = r.get("error")
+                        r["error"], is_fatal = friendly_error(r.get("error"))
+                        fatal = fatal or (r["error"] if is_fatal else None)
+                flush()
+                ctx.observe(f"写完 {r['topic'][:12]}·{_vname(st, r)} "
+                            f"{'✓' if r['status'] == 'done' else '✗ ' + str(r.get('error'))[:40]}（{r['seconds']}s）")
+            if fatal and pending:   # 余额不足、Key 无效：后面的写了也是白失败，不再开新的
+                for r in pending:
+                    r.update(status="failed", error=f"没有开始写：{fatal}")
+                st["fatal"] = f"{fatal}（已停止，剩下 {len(pending)} 篇没有开始写）"
+                ctx.observe(st["fatal"])
+                pending = []
+    done_n = sum(1 for r in st["runs"] if r["status"] == "done")
+    ctx.observe(f"写作结束：成功 {done_n}/{len(st['runs'])} 篇（同时最多写 {par} 篇）")
+    return "measure"
 
 
 def _vname(st, r):

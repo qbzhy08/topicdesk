@@ -78,6 +78,7 @@ def chat(messages: list[dict], *, json_mode: bool = False, temperature: float = 
     c = _cfg()
     if not available():
         raise LLMError("未配置 LLM")
+    messages = _with_date(messages)
     body = {"model": c["model"], "messages": messages, "temperature": temperature,
             "max_tokens": max_tokens}
     if json_mode:
@@ -114,6 +115,22 @@ def chat(messages: list[dict], *, json_mode: bool = False, temperature: float = 
     if json_mode:
         out["data"] = parse_json(content)
     return out
+
+
+def _with_date(messages: list[dict]) -> list[dict]:
+    """每次调用都告诉模型今天是几号：模型自己不知道日期，不说就会按训练数据里的年份去“补全”（比如把今年写成 2023 年）。"""
+    if any("今天是" in str(m.get("content") or "") for m in messages):
+        return messages
+    from datetime import datetime, timedelta, timezone
+    today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    note = (f"今天是 {today}（北京时间）。你在一个新闻资料整理系统里工作，基本规则：\n"
+            "1. 只根据本次给你的资料回答；资料没写的，不要用你记得的知识补上，尤其是年份、数字、人名、头衔。\n"
+            "2. 资料不够判断时，选“不确定 / unsupported / unsure”这类选项，不要硬猜。\n"
+            "3. 资料标了来源层级时，按层级对待：官方和一手资料优先，自媒体和未经同行评审的说法不能当定论。\n"
+            "4. 严格按要求的格式输出，不加解释。")
+    if messages and messages[0].get("role") == "system":
+        return [{**messages[0], "content": f"{note}\n{messages[0]['content']}"}] + messages[1:]
+    return [{"role": "system", "content": note}] + messages
 
 
 def parse_json(text: str):

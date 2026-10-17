@@ -311,6 +311,40 @@ CREATE TABLE IF NOT EXISTS labels (
     updated_at REAL NOT NULL,
     PRIMARY KEY (topic, doc_id)
 );
+-- 判断校准：人对系统四类自动判断（转载/洗稿、同一事件、网页更新、争议裁决）的标注，用来评估和调整阈值
+CREATE TABLE IF NOT EXISTS judgment_labels (
+    kind TEXT NOT NULL,
+    key TEXT NOT NULL,
+    label TEXT NOT NULL,
+    features TEXT,          -- 标注时的特征快照（文档后来变了也能复算）
+    system TEXT,            -- 标注时系统的判断
+    detail TEXT,            -- 展示用：两篇的标题等
+    created_at REAL NOT NULL,
+    PRIMARY KEY (kind, key)
+);
+-- 编辑亲手改过的句子（改前 → 改后），写作“去 AI 味”时挑相近的当示例
+CREATE TABLE IF NOT EXISTS edit_examples (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL DEFAULT 'default',
+    skill TEXT,
+    topic TEXT,
+    article_id TEXT,
+    before_text TEXT NOT NULL,
+    after_text TEXT NOT NULL,
+    kind TEXT,
+    used INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL
+);
+-- 同一批标注样本上大模型的判断（run=1 第一次，run=2 同样设置再问一次，用来量一致性）
+CREATE TABLE IF NOT EXISTS llm_judgments (
+    kind TEXT NOT NULL,
+    key TEXT NOT NULL,
+    run INTEGER NOT NULL,
+    label TEXT NOT NULL,
+    reason TEXT,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (kind, key, run)
+);
 """
 
 

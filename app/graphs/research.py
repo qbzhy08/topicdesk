@@ -1195,6 +1195,7 @@ def remember(ctx):
                 fact_ids.add(f["id"])
     st["mem_facts"] = sorted(fact_ids)
     st["mem_docs"] = sorted(seen_docs | {d["id"] for d in docs})
+    mf.recheck_disputes(ctx.topic, ctx.task_id)          # 先把误判的争议（不同年份的同比等）作废，再裁决
     resolved = mf.resolve_disputes(ctx.topic, ctx.task_id)
     stats["disputes"] = resolved
     open_d = [r for r in resolved if r.get("open")]

@@ -13,7 +13,14 @@ fi
 git config user.email >/dev/null || git config user.email "qbzhy08@gmail.com"
 git config user.name >/dev/null || git config user.name "topicdesk"
 git add -A
-git diff --cached --quiet || git commit -qm "同步本机改动"
+MSG_FILE=".提交说明.txt"   # 有写好的提交说明就用它（用完删掉），没有就用默认说明
+if [ -f "$MSG_FILE" ]; then
+  git reset -q -- "$MSG_FILE" 2>/dev/null
+  git diff --cached --quiet || git commit -q -F "$MSG_FILE"
+  rm -f "$MSG_FILE"
+else
+  git diff --cached --quiet || git commit -qm "同步本机改动"
+fi
 ask_url() {
   read -r -p "粘贴 GitHub 仓库地址（仓库页面浏览器地址栏里的就行，如 https://github.com/你的用户名/topicdesk）：" RAW
   # 不管粘的是仓库页、某次提交页还是 .git 地址，都只取“用户名/仓库名”

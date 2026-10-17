@@ -18,7 +18,8 @@ def _row(r: dict, scores: dict) -> dict:
         det[_det_name(s["detector"])] = s["score"]
     return {"key": r["key"], "topic": r["topic"], "research_task": r["research_task"], "variant": r["variant"],
             "name": VARIANTS.get(r["variant"], {}).get("name", r["variant"]), "article_id": r.get("article_id"),
-            "version": r.get("version"), "status": r["status"], "error": _err(r.get("error")), "seconds": r.get("seconds"),
+            "version": r.get("version"), "status": r["status"], "writing": bool(r.get("writing")),
+            "write_task": r.get("write_task"), "started_at": r.get("started_at"), "error": _err(r.get("error")), "seconds": r.get("seconds"),
             "chars": d.get("chars"), "support_rate": f.get("support_rate"), "number_errors": f.get("number_errors"),
             "number_error_rate": f.get("number_error_rate"), "problems": f.get("problems"),
             "judge_fidelity": cj.get("fidelity"), "judge_bad": cj.get("bad") or [], "judge_n": cj.get("judged"),

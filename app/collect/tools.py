@@ -7,7 +7,7 @@ from . import images as images_mod
 from . import sources
 
 
-@tool("source_search", "在指定信息源中按主题检索，返回统一结构的资料条目")
+@tool("source_search", "在指定信息源中按主题检索，返回统一结构的资料条目", share_ttl=600)
 def source_search(source_id: str, query: str, limit: int = 15, terms: list | None = None,
                   since: float | None = None):
     stats = {}
@@ -16,7 +16,7 @@ def source_search(source_id: str, query: str, limit: int = 15, terms: list | Non
             "dropped_old": stats.get("dropped_old", 0)}
 
 
-@tool("page_fetch", "抓取单个网页并抽取正文、元数据和候选配图；静态页正文不足时用浏览器渲染")
+@tool("page_fetch", "抓取单个网页并抽取正文、元数据和候选配图；静态页正文不足时用浏览器渲染", share_ttl=600)
 def page_fetch(url: str, mode: str = "auto", fresh: bool = False):
     return sources.fetch_page(url, mode=mode, fresh=fresh)
 

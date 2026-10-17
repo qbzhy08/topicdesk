@@ -270,7 +270,7 @@ def cover_svg(title: str, subtitle: str) -> str:
     for i, ln in enumerate(lines):
         parts.append(f'<text x="80" y="{y0 + i * 76}" font-size="60" font-weight="700" fill="#ffffff">{html.escape(ln)}</text>')
     parts.append(f'<text x="80" y="{y0 + len(lines) * 76 + 20}" font-size="26" fill="#f1d9c9">{html.escape(subtitle)}</text>')
-    parts.append(_badge(80, 560, "示意封面：没有合适的原始图片，按标题生成"))
+    parts.append(_badge(80, 560, "示意图"))
     parts.append("</svg>")
     return "".join(parts)
 

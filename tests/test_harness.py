@@ -79,6 +79,22 @@ class HarnessTest(DBTestCase):
         search_steps = [s["status"] for s in steps(tid) if s["node"] == "search"]
         self.assertEqual(search_steps[:2], ["failed", "ok"])
 
+    def test_permanent_errors_fail_fast(self):
+        """确定性错误（输入不合法、代码 bug）重跑结果一样：不重试，直接失败并说明；暂时性错误（超时）重试一次。"""
+        from app.harness import Graph, error_kind, register_graph
+        n = {"calls": 0}
+
+        def bad(ctx):
+            n["calls"] += 1
+            raise ValueError("没有可用的素材")
+        register_graph(Graph(name="t_perm", nodes={"bad": bad}, start="bad"))
+        tid = create_task("t_perm", "x")
+        self.assertEqual(run_task(tid), "failed")
+        self.assertEqual(n["calls"], 1)                       # 没有白白重试
+        self.assertIn("重试也不会变", db.query_one("SELECT error FROM tasks WHERE id=?", (tid,))["error"])
+        self.assertEqual(error_kind(TimeoutError()), "transient")
+        self.assertEqual(error_kind(KeyError("x")), "permanent")
+
     def test_budget_exhausted_goes_to_finalize(self):
         tid = create_task("demo", "预算", params={"hitl": False, "need": 99},
                           budget={"max_tool_calls": 1})
@@ -107,3 +123,29 @@ class HarnessTest(DBTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SharedToolTest(unittest.TestCase):
+    """同一次实验里的相同检索只真正执行一次；不同实验、独立任务各自执行。"""
+
+    def test_scope(self):
+        import threading
+        from app.harness import core
+        n = {"c": 0}
+
+        def slow(q):
+            n["c"] += 1
+            import time
+            time.sleep(0.2)
+            return {"q": q}
+        spec = core.ToolSpec("t_share", slow, "", 0.0, True, 60)
+        h = core._hash({"q": "x"})
+        outs = []
+        ths = [threading.Thread(target=lambda: outs.append(core._invoke(spec, {"q": "x"}, h, "exp1"))) for _ in range(3)]
+        [t.start() for t in ths]
+        [t.join() for t in ths]
+        self.assertEqual(n["c"], 1)                                      # 同时发起：只执行一次
+        self.assertEqual(sorted(s for _, s in outs), [False, True, True])
+        core._invoke(spec, {"q": "x"}, h, "exp2")
+        core._invoke(spec, {"q": "x"}, h, None)
+        self.assertEqual(n["c"], 3)                                      # 别的实验、独立任务不复用

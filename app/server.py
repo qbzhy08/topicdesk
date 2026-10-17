@@ -1097,6 +1097,13 @@ def get_experiment(eid):
     rep = experiment_report.build(t)
     rep.update(topic=t["topic"], error=E.display_error(t["error"]) or None, current_node=t["current_node"], running=runner.is_running(eid),
                created_at=t["created_at"])
+    # 正在写的文章：带上各自写作任务当前走到哪一步，报告页显示“谁在写、写到哪、写了多久”
+    now = time.time()
+    for row in rep.get("rows") or []:
+        if row.get("writing") and row.get("write_task"):
+            w = db.query_one("SELECT current_node, status FROM tasks WHERE id=?", (row["write_task"],))
+            row["step"] = (w or {}).get("current_node")
+            row["elapsed"] = round(now - row["started_at"]) if row.get("started_at") else None
     return jsonify(rep)
 
 
@@ -1333,6 +1340,83 @@ def trust_report(tid):
     from . import trust
     try:
         return jsonify(trust.build(tid))
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+
+
+@app.get("/api/edit_examples")
+def edit_examples_list():
+    from . import edit_examples as EX
+    return jsonify(EX.list_examples())
+
+
+@app.delete("/api/edit_examples/<ex_id>")
+def edit_examples_delete(ex_id):
+    from . import edit_examples as EX
+    return (jsonify(ok=True), 200) if EX.delete(ex_id) else (jsonify(error="没有这条示例"), 404)
+
+
+@app.get("/api/calibrate")
+def calibrate_overview():
+    """判断校准：四类自动判断各自的标注数、现行规则与人工判断的一致程度、按标注调参的建议。"""
+    from . import calibrate as cal
+    topics = [r["topic"] for r in db.query("SELECT topic, COUNT(*) n FROM documents WHERE status='active' "
+                                           "GROUP BY topic ORDER BY MAX(fetched_at) DESC LIMIT 30")]
+    return jsonify(kinds=[cal.report(k) for k in cal.KINDS], labels=cal.LABELS, topics=topics)
+
+
+@app.get("/api/calibrate/<kind>/next")
+def calibrate_next(kind):
+    from . import calibrate as cal
+    if kind not in cal.KINDS:
+        return jsonify(error="未知的判断类型"), 400
+    n = min(20, int(request.args.get("n") or 6))
+    return jsonify(items=cal.candidates(kind, request.args.get("topic") or None, n))
+
+
+@app.post("/api/calibrate/<kind>/label")
+def calibrate_label(kind):
+    from . import calibrate as cal
+    b = request.get_json(force=True) or {}
+    try:
+        cal.save_label(kind, str(b["key"]), str(b["label"]), b.get("features") or {}, str(b.get("system") or ""),
+                       b.get("detail") or {})
+    except (KeyError, ValueError) as e:
+        return jsonify(error=f"标注无效：{e}"), 400
+    return jsonify(ok=True, report=cal.report(kind))
+
+
+@app.get("/api/calibrate/<kind>/llm")
+def calibrate_llm_compare(kind):
+    """规则 vs 大模型 vs 混合：同一批人工标注上的准确率、调用次数，以及大模型两次回答的一致性。"""
+    from . import calibrate as cal, calibrate_llm as cl
+    if kind not in cal.KINDS:
+        return jsonify(error="未知的判断类型"), 400
+    return jsonify(cl.compare(kind))
+
+
+@app.post("/api/calibrate/<kind>/llm")
+def calibrate_llm_run(kind):
+    from . import calibrate as cal, calibrate_llm as cl
+    if kind not in cal.KINDS:
+        return jsonify(error="未知的判断类型"), 400
+    try:
+        r = cl.run(kind, limit=int((request.get_json(silent=True) or {}).get("limit") or 30))
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    return jsonify(run=r, compare=cl.compare(kind))
+
+
+@app.post("/api/calibrate/<kind>/apply")
+def calibrate_apply(kind):
+    from . import calibrate as cal
+    if kind not in cal.KINDS:
+        return jsonify(error="未知的判断类型"), 400
+    try:
+        if (request.get_json(silent=True) or {}).get("reset"):
+            cal.reset_params(kind)
+            return jsonify(report=cal.report(kind))
+        return jsonify(report=cal.apply(kind))
     except ValueError as e:
         return jsonify(error=str(e)), 400
 

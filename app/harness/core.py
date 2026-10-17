@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import copy
+import threading
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -56,17 +58,60 @@ class ToolSpec:
     description: str = ""
     cost: float = 0.0           # 每次调用的估计成本（LLM 工具可在结果里返回实际成本）
     cacheable: bool = True
+    share_ttl: float = 0.0      # >0：同一进程里不同任务的相同调用共享结果（秒）；同时发起的相同调用只真正执行一次
 
 
 TOOLS: dict[str, ToolSpec] = {}
 
 
-def tool(name: str, description: str = "", cost: float = 0.0, cacheable: bool = True):
+def tool(name: str, description: str = "", cost: float = 0.0, cacheable: bool = True, share_ttl: float = 0.0):
     """注册工具的装饰器。工具返回值必须可 JSON 序列化。"""
     def deco(fn):
-        TOOLS[name] = ToolSpec(name, fn, description or (fn.__doc__ or "").strip(), cost, cacheable)
+        TOOLS[name] = ToolSpec(name, fn, description or (fn.__doc__ or "").strip(), cost, cacheable, share_ttl)
         return fn
     return deco
+
+
+# ---- 跨任务共享结果（只用于检索、抓网页这类“短时间内结果不变”的工具）
+# 例：对照实验里“核对改写”和“优化稿”共用同一份初稿，会对同样的说法发同样的检索；
+# 以前各搜各的，现在第一个任务真正去搜，另一个等它的结果（单飞），几分钟内再查同样的直接复用。
+_SHARED: dict = {}
+_INFLIGHT: dict = {}
+_SH_LOCK = threading.Lock()
+
+
+def _invoke(spec: ToolSpec, inp: dict, h: str, scope: str | None = None):
+    """执行工具；返回 (输出, 是否复用了别的任务的结果)。失败不缓存，等待者会自己重试。
+    只在同一个共享范围（同一次对照实验的各篇文章）里复用：两次独立检索之间绝不复用，否则发现不了网页更正。"""
+    if not spec.share_ttl or not scope or inp.get("fresh"):
+        return spec.fn(**inp), False
+    from .. import config           # 按数据库区分：演示回放用独立数据库，不和真实任务互相复用
+    key = (str(config.DB_PATH), scope, spec.name, h)
+    while True:
+        with _SH_LOCK:
+            hit = _SHARED.get(key)
+            if hit and hit[0] > time.time():
+                return copy.deepcopy(hit[1]), True
+            ev = _INFLIGHT.get(key)
+            owner = ev is None
+            if owner:
+                ev = _INFLIGHT[key] = threading.Event()
+        if not owner:
+            ev.wait(180)
+            continue
+        try:
+            out = spec.fn(**inp)
+            with _SH_LOCK:
+                now = time.time()
+                if len(_SHARED) > 2000:
+                    for k in [k for k, v in _SHARED.items() if v[0] <= now]:
+                        _SHARED.pop(k, None)
+                _SHARED[key] = (now + spec.share_ttl, copy.deepcopy(out))
+            return out, False
+        finally:
+            with _SH_LOCK:
+                _INFLIGHT.pop(key, None)
+            ev.set()
 
 
 @dataclass
@@ -108,6 +153,8 @@ class Ctx:
         self.step_id = step_id
         self.node = node
         self.grace = grace          # 收尾节点允许在预算耗尽后少量调用
+        # 共享范围：同一次对照实验的各篇文章对同样的说法发同样的检索，结果可以互相复用
+        self.share_scope = (self.params or {}).get("experiment")
         self._thoughts: list[str] = []
         self._obs: list[str] = []
 
@@ -147,7 +194,7 @@ class Ctx:
         if _cache and spec.cacheable:
             hit = db.query_one(
                 "SELECT output FROM tool_calls WHERE task_id=? AND tool=? AND input_hash=? "
-                "AND status='ok' ORDER BY id DESC LIMIT 1", (self.task_id, name, h))
+                "AND status IN ('ok','shared') ORDER BY id DESC LIMIT 1", (self.task_id, name, h))
             if hit is not None:
                 db.insert("tool_calls", dict(task_id=self.task_id, step_id=self.step_id, tool=name,
                                              input=inp, input_hash=h, output=hit["output"],
@@ -158,7 +205,7 @@ class Ctx:
         _check_cancel(self.task_id)
         t0 = time.time()
         try:
-            out = spec.fn(**inp)
+            out, shared = _invoke(spec, inp, h, self.share_scope)
         except Exception as e:  # 工具失败也要留痕，由节点决定降级还是上抛
             self.usage["tool_calls"] = self.usage.get("tool_calls", 0) + 1
             db.insert("tool_calls", dict(task_id=self.task_id, step_id=self.step_id, tool=name,
@@ -170,10 +217,12 @@ class Ctx:
         cost = spec.cost
         if isinstance(out, dict) and "_cost" in out:
             cost = out.pop("_cost")
+        if shared:
+            cost = 0
         self.usage["tool_calls"] = self.usage.get("tool_calls", 0) + 1
         self.charge(cost)
         db.insert("tool_calls", dict(task_id=self.task_id, step_id=self.step_id, tool=name,
-                                     input=inp, input_hash=h, output=out, status="ok",
+                                     input=inp, input_hash=h, output=out, status="shared" if shared else "ok",
                                      latency_ms=int((time.time() - t0) * 1000), cost=cost,
                                      created_at=db.now()))
         return out
@@ -192,7 +241,7 @@ class Ctx:
             h = _hash(inp)
             hit = db.query_one(
                 "SELECT output FROM tool_calls WHERE task_id=? AND tool=? AND input_hash=? "
-                "AND status='ok' ORDER BY id DESC LIMIT 1", (self.task_id, name, h)) if spec.cacheable else None
+                "AND status IN ('ok','shared') ORDER BY id DESC LIMIT 1", (self.task_id, name, h)) if spec.cacheable else None
             if hit is not None:
                 db.insert("tool_calls", dict(task_id=self.task_id, step_id=self.step_id, tool=name,
                                              input=inp, input_hash=h, output=hit["output"],
@@ -208,7 +257,8 @@ class Ctx:
                 i, name, inp, h, spec = item
                 t0 = time.time()
                 try:
-                    return i, "ok", spec.fn(**inp), int((time.time() - t0) * 1000)
+                    out, shared = _invoke(spec, inp, h, self.share_scope)
+                    return i, ("shared" if shared else "ok"), out, int((time.time() - t0) * 1000)
                 except Exception as e:
                     return i, "error", e, int((time.time() - t0) * 1000)
                 finally:
@@ -229,10 +279,13 @@ class Ctx:
                 cost = spec.cost
                 if isinstance(out, dict) and "_cost" in out:
                     cost = out.pop("_cost")
+                if status == "shared":
+                    cost = 0
                 self.charge(cost)
                 db.insert("tool_calls", dict(task_id=self.task_id, step_id=self.step_id, tool=name,
-                                             input=inp, input_hash=h, output=out, status="ok",
+                                             input=inp, input_hash=h, output=out, status=status,
                                              latency_ms=ms, cost=cost, created_at=db.now()))
+                status = "ok"
                 results[i] = ("ok", out)
         return results
 
@@ -291,6 +344,36 @@ def save_checkpoint(task_id: str, seq: int, next_node: str, state: dict, usage: 
 
 def _set_status(task_id: str, status: str, error: str | None = None):
     db.update("tasks", "id", task_id, dict(status=status, error=error, updated_at=db.now()))
+
+
+class PermanentError(Exception):
+    """节点主动声明：这个错误重试也没用（比如“研究任务还没完成”“没有可用的素材”）。"""
+
+
+def error_kind(e: BaseException) -> str:
+    """区分两类错误：
+    transient（暂时性）：网络超时、连接断开、限流（429）、服务端 5xx、数据库被占用、大模型偶尔返回坏 JSON——
+        节点本身是固定程序，但它依赖的外部世界每次不一样，等一下再试很可能就好了；
+    permanent（确定性）：参数不合法、缺数据、代码 bug（KeyError/TypeError……）——同样的输入重跑，结果一模一样。
+    分不清的按暂时性处理（多重试一次的代价，比把偶发故障当成永久失败小）。"""
+    import json as _json
+    import sqlite3
+    if isinstance(e, PermanentError):
+        return "permanent"
+    if isinstance(e, (TimeoutError, ConnectionError, _json.JSONDecodeError)):
+        return "transient"
+    if isinstance(e, sqlite3.OperationalError):
+        return "transient" if "locked" in str(e) or "busy" in str(e) else "permanent"
+    name = type(e).__name__
+    if name in ("FetchError",):
+        return "permanent" if getattr(e, "kind", "") in ("robots", "blocked", "not_found", "config") else "transient"
+    if name in ("LLMError", "RequestException", "ConnectionError", "Timeout", "ReadTimeout", "ConnectTimeout",
+                "ChunkedEncodingError", "SSLError", "ProxyError"):
+        return "permanent" if "未配置" in str(e) or "HTTP 401" in str(e) or "HTTP 403" in str(e) else "transient"
+    if isinstance(e, (ValueError, KeyError, TypeError, AttributeError, IndexError, AssertionError,
+                      ZeroDivisionError, NotImplementedError)):
+        return "permanent"
+    return "transient"
 
 
 def run_task(task_id: str) -> str:
@@ -383,8 +466,13 @@ def run_task(task_id: str) -> str:
             state = snapshot
             retries = state.setdefault("_retries", {})
             retries[node] = retries.get(node, 0) + 1
-            _finish_step(step_id, ctx, "failed", node, t0, usage, error=f"{e}\n{tb}")
+            kind = error_kind(e)
+            _finish_step(step_id, ctx, "failed", node, t0, usage, error=f"[{kind}] {e}\n{tb}")
             save_checkpoint(task_id, seq, node, state, usage)
+            if kind == "permanent":
+                # 程序或输入本身的问题（参数错、缺素材、代码 bug）：同样的输入重跑结果一样，不浪费一次重试
+                _set_status(task_id, "failed", f"节点 {node} 失败（重试也不会变，需要改输入或代码）：{e}")
+                return "failed"
             if retries[node] <= graph.max_retries:
                 time.sleep(min(2 ** retries[node], 8) * 0.1)
                 continue  # 从同一节点重试，工具缓存保证已完成的调用不重复

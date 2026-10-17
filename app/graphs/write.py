@@ -38,7 +38,12 @@ OUTLINE_PROMPT = """你是一位编辑。用下面的素材，按 Skill「{name}
 {angle}检索阶段已经覆盖的子问题：{covered}
 检索阶段已经专门补检过、仍然缺资料的方向（不要再列为缺口，写作时如实说明资料不足）：{tried}
 gaps：只有某一节的目标在素材里完全找不到依据、而且不属于上面两类时才列（最多 2 个），否则给空数组。
-多数情况下素材已经够用，应给空数组。"""
+多数情况下素材已经够用，应给空数组。
+提纲要求（让文章读起来像编辑写的，而不是按模板填空）：
+- 各节分工不重叠：一个概念、一组核心数字只归一节完整展开，points 里写清这一节独有的内容；别的节需要时只一句带过。
+- 小标题写这一节具体讲了什么（带上关键对象或事实，如“入境游客日均多了6.5%”），不要用“先说结论”“三个概念”
+  “来龙去脉”“各方怎么看”“我们的判断”这类模板词，小标题里不要出现“【分析】”。
+- 标题写最有新闻价值的事实，不用“……该怎么读”“……背后”“谁在……”这类套路句式。"""
 
 SECTION_PROMPT = """你在按 Skill「{name}」写文章《{title}》中的一节。
 读者：{reader}
@@ -61,8 +66,20 @@ SECTION_PROMPT = """你在按 Skill「{name}」写文章《{title}》中的一�
 4. 记忆中的事实只是线索：要写其中的内容，就引用它标注的出处编号；没有出处编号的，不要写它的数字。
 5. 直接输出这一节的正文 Markdown，不要重复小标题。正文是给读者看的：不要出现“本节”“素材”“记忆中的事实”
    “出处编号”“暂不引用”这类写作过程的说明，也不要写“综上所述”。
-6. 标着[待核实]或[有争议]的说法、只有一个来源报道的说法、素材自己写着“预计”“计划”“尚未”的说法，写的时候把限制写出来
-   （如“目前只有某某报道”“官方尚未确认”“这是计划，不是已经发生的事”），不能写成定论；篇幅再短也不能省掉这一句。"""
+6. 标着[待核实]或[有争议]的说法、只有一个来源报道的说法、素材自己写着“预计”“计划”“尚未”的说法，写的时候把限制写出来，
+   不能写成定论。像记者那样交代出处方就行（“据众信旅游”“美团的报告显示”“路透社援引携程称”），同一个说法只交代一次，
+   不要每句都缀上“尚待证实”。
+7. 全文其他各节分别负责：{others}。这些内容本节不要展开、不要重复；核心数字（总量、增速）全文只完整写一次，
+   不是本节负责的就最多一句带过，不要再列一遍。
+8. 开头直接写最有信息量的事实或一个具体细节（谁、在哪、做了什么、多少），不要先下定义、不要“先说结论”。
+9. 素材里有人物或机构的原话，挑一句最有信息量的直接引用，写明是谁说的（某某说：“……”[n]）；没有就不要编。
+10. 不写给作者或读者的操作提醒（“引用时宜……”“写作时应……”“读的时候要……”），不给行业空泛建议；
+   不用“不是……而是……”“不再是……”“这意味着”“把……放在一起看”“换挡”“结构性变化”“大白话”“真正值得”这类说法。
+11. 【分析】段全文最多两三段：只有本节目标本身就是判断或解读时才写一段【分析】，写具体判断和依据，不写口号；
+   其他节不单列【分析】段，需要解释的地方用一句不含数字、不下定论的话接在事实后面。
+12. 素材括号里标着来源层级：“一手/官方”可以直接陈述；“媒体报道”写明是哪家报道；“自媒体/社区，个人说法”只能写成
+   “有网友/博主称……”，不能当事实陈述。标着“未经同行评审”的自存档论文，只能写成“有人在自存档平台发文称……”，不能写成“学界有争议”“批评论文指出”，
+   也不能拿它和官方、期刊、主流媒体的说法平起平坐。"""
 
 CHECK_NAME = {"weak": "出处里找不到依据", "number": "数字对不上出处", "bad_cite": "出处编号不存在",
               "uncited": "有数字但没有出处", "analysis_num": "分析里有资料中没有的数字"}
@@ -84,7 +101,8 @@ def _docs(st) -> list[dict]:
             for d in st["docs"]]
 
 
-DEFAULT_STAGES = {"gap": True, "fix": True, "naturalize": True, "natural_recheck": True, "illustrate": True}
+DEFAULT_STAGES = {"gap": True, "fix": True, "naturalize": True, "natural_recheck": True, "illustrate": True,
+                  "edit_examples": True}
 
 
 def _stages(ctx) -> dict:
@@ -100,7 +118,8 @@ def _tidy(ctx, docs=None) -> dict:
     """改写几轮后的收尾（只在开了“核对后改写”时做，对照组初稿不做）：
     1) 两轮改写后仍核对不过的句子（数字对不上、出处里找不到依据、有数字没出处、分析里编数字）直接删掉，
        宁可少一句，也不留一句可能误导的话；删完这一节会太空时保留并标“（待核实）”；
-    2) 和前文意思重复的句子删掉（出处没有超出前一句的才删），降低重复率。"""
+    2) 和前文意思重复的句子删掉（出处没有超出前一句的才删；同一组核心数字前文已完整写过、这句只是换个说法再列一遍的也删），
+       降低重复率。"""
     st = ctx.state
     if not (_stages(ctx)["fix"] and _use_llm(ctx)):
         return {"dropped": 0, "dups": 0}
@@ -120,7 +139,7 @@ def _tidy(ctx, docs=None) -> dict:
             continue
         sec["md"] = rest
         dropped.append(i)
-    seen, dups = [], []
+    seen, dups, said = [], [], set()
     for sec in st["sections"]:
         if sec.get("auto"):
             continue
@@ -129,7 +148,12 @@ def _tidy(ctx, docs=None) -> dict:
             if len(core) <= 12 or u.lstrip().startswith("|"):
                 continue
             cites = set(writing.CITE.findall(u))
+            key = writing._num_key(u)
             prev = next((p for p in seen if writing.overlap(core, p[0]) > 0.6 and cites <= p[1]), None)
+            if not prev and not is_analysis and len(key) >= 2 and key <= said:
+                # 同一组核心数字前文已经完整写过一遍（如总量和两个增速），这句只是换个说法再列一次
+                prev = next((p for p in seen if writing.overlap(core, p[0]) > 0.35), None)
+            said |= key
             rest = sec["md"].replace(u, "", 1) if prev and u in sec["md"] else None
             if rest is not None and len(writing.CITE.sub("", re.sub(r"\{\{img:[^}]*\}\}", "", rest)).strip()) >= 30:
                 sec["md"] = rest            # 删完这一节还有内容才删（不把整节删空）
@@ -183,6 +207,7 @@ def load(ctx):
     st["write_task"] = ctx.task_id
     st["stages_used"] = _stages(ctx)
     st["experiment"] = p.get("experiment")
+    st["exclude"] = p.get("exclude")          # 对标评测：真人稿及其转载不进素材
     st["variant"] = p.get("variant")
     rs = rt["state"] or {}
     st["terms"] = ((rs.get("plan") or {}).get("terms_zh") or [])[:6]
@@ -222,8 +247,15 @@ def select(ctx):
     st = ctx.state
     sk = st["skill"]
     # 记忆中的事实要能引用：把它们的出处资料也放进素材（最多 4 篇），事实标上出处编号
+    try:
+        from .. import memory_facts as mf
+        fixed = mf.recheck_disputes(ctx.topic, ctx.task_id)    # 早期误判的“争议”（不同年份的同比等）先作废
+        if fixed:
+            ctx.observe(f"复查争议：{len(fixed)} 处其实不是冲突（" + "；".join(x["why"] for x in fixed[:3]) + "），已恢复核验状态")
+    except Exception as e:  # noqa: BLE001
+        ctx.think(f"复查争议失败：{str(e)[:60]}")
     st["facts"] = writing.topic_facts(ctx.topic, sk["material"].get("facts", "all"))
-    base_ids = {d["id"] for d in writing.select_material(st["research_task"], sk)["docs"]}
+    base_ids = {d["id"] for d in writing.select_material(st["research_task"], sk, exclude=st.get("exclude"))["docs"]}
     fact_docs, fact_why = [], {}
     for f in st["facts"]:
         for did in f["docs"][:1]:
@@ -232,9 +264,10 @@ def select(ctx):
                 fact_why[did] = f"记忆中事实「{f['content'][:20]}…」的出处"
     st["fact_docs"] = fact_docs
     mat = writing.select_material(st["research_task"], sk, fact_docs + [x for x in st["extra_docs"] if x not in fact_docs],
-                                  extra_why=fact_why)
+                                  extra_why=fact_why, exclude=st.get("exclude"))
     names = _names()
     st["docs"] = [{k: v for k, v in d.items() if k != "text"} | {"label": writing.source_label(d, names),
+                                                                 "title": writing.clean_title(d.get("title")),
                                                                  "chars": len(d["text"])} for d in mat["docs"]]
     st["ranking_version"] = mat["ranking_version"]
     st["ref_notes"] = mat.get("ref_notes") or []
@@ -253,7 +286,8 @@ def select(ctx):
 # ---------------------------------------------------------------- outline / gap
 
 def _materials_brief(docs) -> str:
-    return "\n".join(f"{d['n']}. {d['label']} | {d['title'][:60]} | {re.sub(r'\s+', ' ', d['text'][:160])}" for d in docs)
+    return "\n".join(f"{d['n']}. {d['label']}（{writing.source_tier(d)}） | {d['title'][:60]} | {re.sub(r'\s+', ' ', d['text'][:160])}"
+                     for d in docs)
 
 
 def _facts_text(facts) -> str:
@@ -309,7 +343,7 @@ def outline(ctx):
             valid = {x["n"] for x in docs}
             for s in base:
                 x = by.get(s["id"]) or {}
-                s["heading"] = str(x.get("heading") or s["heading"])[:30]
+                s["heading"] = writing.clean_heading(str(x.get("heading") or s["heading"]))[:30] or s["heading"]
                 s["points"] = [str(t)[:80] for t in x.get("points") or []][:6]
                 s["sources"] = [int(n) for n in x.get("sources") or [] if str(n).isdigit() and int(n) in valid]
             gaps = [g for g in d.get("gaps") or [] if isinstance(g, dict) and g.get("query")][:2]
@@ -408,8 +442,10 @@ def gap(ctx):
         # 新资料追加在素材末尾（已有编号不变），挂到提出缺口的那一节；不重新列提纲，省一次大模型调用
         before = {d["id"] for d in st["docs"]}
         st["docs"] = [{k: v for k, v in d.items() if k != "text"} | {"label": writing.source_label(d, _names()),
+                                                                     "title": writing.clean_title(d.get("title")),
                                                                      "chars": len(d["text"])}
-                      for d in writing.select_material(st["research_task"], st["skill"], (st.get("fact_docs") or []) + [x for x in st["extra_docs"] if x not in (st.get("fact_docs") or [])])["docs"]]
+                      for d in writing.select_material(st["research_task"], st["skill"], (st.get("fact_docs") or []) + [x for x in st["extra_docs"] if x not in (st.get("fact_docs") or [])],
+                                                   exclude=st.get("exclude"))["docs"]]
         new_n = [d["n"] for d in st["docs"] if d["id"] not in before]
         for g in logs:
             sec = next((x for x in st.get("sections") or [] if x["id"] == g.get("section")), None)
@@ -446,7 +482,7 @@ def _append_doc(st, doc_id: str, why: str) -> int | None:
     if have:
         return have
     row = writing._doc_rows([doc_id]).get(doc_id)
-    if not row:
+    if not row or writing.is_excluded(row, st.get("exclude")):
         return None
     n = max([d["n"] for d in st["docs"]] or [0]) + 1
     d = {"id": doc_id, "title": row["title"] or row["url"], "url": row["url"], "source_id": row["source_id"],
@@ -454,6 +490,7 @@ def _append_doc(st, doc_id: str, why: str) -> int | None:
          "novelty": row.get("novelty"), "primary": bool((row.get("meta") or {}).get("primary")), "value": None,
          "disputed": False, "unverified": False, "why": why, "n": n}
     d["label"] = writing.source_label(d, _names())
+    d["title"] = writing.clean_title(d.get("title"))
     d["chars"] = len(row.get("text") or row.get("summary") or "")
     st["docs"].append(d)
     return n
@@ -462,7 +499,7 @@ def _append_doc(st, doc_id: str, why: str) -> int | None:
 def corroborate_claims(ctx, max_claims: int = 4) -> list[dict]:
     """能找资料证明的就去找：文章里只有单一来源（又不是一手资料）的说法，逐条去别的来源和官方/一手渠道检索，
     找到能支持它的独立资料（换了网站、出处原文能对上），就把这篇资料加进素材、句子后面补上它的出处编号、去掉“尚待证实”的说明；
-    找不到的保持原样（成稿时会写明“目前只有某某报道，尚待证实”）。返回每条说法的核实记录。"""
+    找不到的保持原样（成稿时会写明“仅见于某网站”）。返回每条说法的核实记录。"""
     from urllib.parse import urlsplit
     from .. import websearch
     st = ctx.state
@@ -490,7 +527,7 @@ def corroborate_claims(ctx, max_claims: int = 4) -> list[dict]:
         if off:
             srcs = [off] + srcs[:2]
     if not srcs:
-        ctx.think("没有可用的检索来源，单一来源的说法只能写明“尚待证实”")
+        ctx.think("没有可用的检索来源，单一来源的说法只能写明“仅见于某网站”")
         return [{"claim": c["claim"], "result": "没有可用的检索来源"} for c in claims]
     # 检索词：大模型按说法写（含主体和关键事实）；没有大模型就用说法本身的前半句
     qs = {}
@@ -554,7 +591,7 @@ def corroborate_claims(ctx, max_claims: int = 4) -> list[dict]:
                          max_tokens=1200)["data"]
             for r in d.get("results") or []:
                 i = int(r.get("i")) - 1
-                if 0 <= i < len(pend) and r.get("verdict") == "supported":
+                if 0 <= i < len(pend) and writing.checked_verdict(r, [pend[i]["text"]], claims[pend[i]["k"]]["claim"])["verdict"] == "supported":
                     pend[i]["ok"] = True
                     pend[i]["reason"] = str(r.get("reason") or "")[:40]
         except Exception as e:  # noqa: BLE001
@@ -591,7 +628,7 @@ def corroborate_claims(ctx, max_claims: int = 4) -> list[dict]:
         logs.append({"claim": c["claim"], "query": (qs.get(k) or {}).get("zh") or c["claim"][:16],
                      "candidates": len(cands[k]),
                      "result": (f"找到{'一手资料' if f['primary'] else '独立来源'}印证：{f['title']}" if f else
-                                "没有找到其他独立来源或一手资料印证，写明“尚待证实”"),
+                                "没有找到其他独立来源或一手资料印证，写明“仅见于某网站”"),
                      **({"doc": f} if f else {})})
     st["corroborations"] = (st.get("corroborations") or []) + logs
     ctx.observe("给单一来源的说法找印证：" + "；".join(f"「{x['claim'][:20]}」{'✓ ' + x['result'] if x.get('doc') else '✗ 没找到'}"
@@ -621,7 +658,19 @@ def _section_materials(sec, docs) -> str:
     use = [d for d in docs if d["n"] in sec["sources"]] or docs
     focus = f"{sec['heading']} {sec['goal']} {' '.join(sec['points'])}"
     budget = max(350, min(900, 3600 // max(1, len(use))))
-    return "\n\n".join(f"[{d['n']}] {d['label']}｜{d['title'][:60]}\n{writing.excerpt(d, focus, budget)}" for d in use)
+    return "\n\n".join(f"[{d['n']}] {d['label']}（{writing.source_tier(d)}）｜{d['title'][:60]}\n{writing.excerpt(d, focus, budget)}"
+                       for d in use)
+
+
+def _others_text(st, sec) -> str:
+    """其他各节的分工（写某一节时告诉它别的节讲什么，避免各节重复同一组数字和概念）。"""
+    out = []
+    for x in st.get("sections") or []:
+        if x["id"] == sec["id"] or x.get("auto"):
+            continue
+        pts = "；".join((x.get("points") or [])[:3]) or x.get("goal") or ""
+        out.append(f"「{x['heading']}」（{pts[:90]}）")
+    return "；".join(out) or "（无）"
 
 
 def _section_input(ctx, sec, docs, fix_items=None) -> dict:
@@ -635,6 +684,7 @@ def _section_input(ctx, sec, docs, fix_items=None) -> dict:
         name=sk["name"], title=st["title"], reader=sk["reader"], style="；".join(sk["style"]),
         body=sk["body"], prefs=_prefs_text(st), refs=_refs_text(sk), heading=sec["heading"], goal=sec["goal"],
         points="；".join(sec["points"]) or "（按目标自行组织）", words=sec["words"],
+        others=_others_text(st, sec),
         materials=_section_materials(sec, docs),
         facts="记忆中的事实：\n" + _facts_text(st["facts"]), fix=fix + prev)}]}
 
@@ -643,6 +693,7 @@ def _finish_section(st, sec, content: str) -> str:
     text = (content or "").strip()
     text = re.sub(r"^#+\s*" + re.escape(sec["heading"]) + r"\s*\n", "", text)
     text, removed = writing.strip_meta(text)
+    text = writing.undash(text)
     if removed:
         st["fixes"].append({"section": sec["id"], "why": "删掉混进正文的写作说明",
                             "before": "；".join(removed)[:300], "after": "（已删除）"})
@@ -748,7 +799,8 @@ def _check(ctx, docs):
                     it = chunk[int(r.get("i")) - 1]
                 except (TypeError, ValueError, IndexError):
                     continue
-                st["verdicts"][it["sentence"]] = {"verdict": r.get("verdict"), "reason": str(r.get("reason") or "")[:40]}
+                texts = [d0["text"] for d0 in docs if d0["n"] in (it.get("cites") or [])] or [d0["text"] for d0 in docs]
+                st["verdicts"][it["sentence"]] = writing.checked_verdict(r, texts, it["sentence"])
         rep = writing.check(st["sections"], docs, st["verdicts"])
     return rep
 
@@ -835,19 +887,41 @@ def fix(ctx):
 
 AI_TROPES = ["首先", "其次", "最后", "综上所述", "总而言之", "值得注意的是", "值得一提的是", "不难看出", "由此可见",
              "总的来说", "不仅", "而且", "此外", "与此同时", "随着", "在……的背景下", "毋庸置疑", "至关重要", "显著",
-             "进一步", "赋能", "助力", "全方位", "深度融合", "具有重要意义", "扮演着", "关键角色", "日益", "不可或缺"]
+             "进一步", "赋能", "助力", "全方位", "深度融合", "具有重要意义", "扮演着", "关键角色", "日益", "不可或缺",
+             "这意味着", "放在一起看", "换挡", "结构性变化", "先说结论", "大白话", "真正值得", "说到底", "换句话说",
+             "值得留意", "不容忽视", "一个明显看点", "格局", "拐点"]
 
 NATURAL_PROMPT = """把下面这节文章改得更像一位懂行的编辑写的，而不是 AI 生成的。读者：{reader}。风格：{style}
 要求：
 1. 事实、数字、日期、人名机构名一个都不能改，也不能新增；每个 [n] 出处编号都要保留，跟着它原来支持的那句话。
-2. 去掉套话和空泛连接词（如：{tropes}），不用排比、对仗和“不是……而是……”，不要每段都“总—分—总”，不要用破折号和冒号制造节奏。
+2. 去掉套话和空泛连接词（如：{tropes}），不用排比、对仗和“不是……而是……”“不再是……”，不要每段都“总—分—总”，
+   不要用破折号和冒号制造节奏；删掉给读者或作者的操作提醒（“引用时宜……”“读的时候要……”）。{flagged}
 3. 长句短句交替：该用短句就用短句，需要交代条件和因果的地方保留完整的长句；不要把每句都切成一样短（整齐划一的短句反而像 AI）。
 4. 用具体的主语和动词，少用“进行”“实现”“具有……性”；不加原文没有的过渡句、感叹和空泛评论，不重复前面说过的话。
 5. 以“【分析】”开头的段落仍以“【分析】”开头；表格和列表的结构保留。
-6. 限制条件和争议一个都不能丢：“可能、预计、尚未、仅、据称、宣称、有争议、样本、前提、目前只有……报道”这类说法要保留原意。
-7. 只输出改好的正文，不要解释。
+6. 限制条件和争议一个都不能丢：“可能、预计、尚未、仅、据称、宣称、有争议、样本、前提、仅见于……”这类说法要保留原意；
+   “据某某”“某某显示”这种交代出处方的说法也要保留。
+7. 只输出改好的正文，不要解释。{examples}
 原文：
 {text}"""
+
+
+def _flagged_text(md: str) -> str:
+    """规则先找出这一节里 AI 腔最重的句子，点名交给改写（只改这些句子的说法，其余句子少动）。"""
+    bad = writing.trope_sentences(md)
+    from ..stylebench import _sents
+    lens = [len(x) for x in _sents(writing.CITE.sub("", md))]
+    cv_note = ""
+    if len(lens) >= 5:
+        import statistics
+        cv = statistics.pstdev(lens) / statistics.mean(lens)
+        if cv < 0.5:
+            cv_note = (f"\n   这一节句子长短太整齐（句长变异系数 {cv:.2f}，记者稿一般在 0.7 左右）："
+                       "把交代背景的几句合成一个长句，把结论、转折单独写成五到十个字的短句。")
+    if not bad:
+        return cv_note
+    return cv_note + "\n   下面这几句 AI 腔最重，重点改写（只换说法，事实和出处不变）：\n" + "\n".join(
+        f"   - 「{x['sentence'][:90]}」（{x['why']}）" for x in bad[:8])
 
 
 def naturalize(ctx):
@@ -859,9 +933,21 @@ def naturalize(ctx):
     before = {sec["id"]: sec["md"] for sec in st["sections"]}
     jobs = [sec for sec in st["sections"] if (sec.get("md") or "").strip()]
     t0 = time.time()
+    # 编辑亲手改过的句子：按和这一节的相似度挑几条当示范（关掉 edit_examples 就不用，便于对照实验）
+    from .. import edit_examples as EX
+    use_ex = _stages(ctx).get("edit_examples", True)
+    picks = {sec["id"]: (EX.pick(sec["md"], sk.get("id")) if use_ex else []) for sec in jobs}
     res = ctx.tool_parallel([("llm", {"json_mode": False, "max_tokens": 1800, "messages": [{"role": "user", "content": NATURAL_PROMPT.format(
-        reader=sk.get("reader", ""), style="；".join(sk.get("style") or []), tropes="、".join(AI_TROPES[:14]), text=sec["md"])}]})
+        reader=sk.get("reader", ""), style="；".join(sk.get("style") or []), tropes="、".join(AI_TROPES),
+        flagged=_flagged_text(sec["md"]), examples=EX.prompt_block(picks[sec["id"]]), text=sec["md"])}]})
         for sec in jobs], max_workers=6)
+    used = sorted({e["id"] for v in picks.values() for e in v})
+    if used:
+        EX.mark_used(used)
+        st["edit_examples_used"] = [{"section": sid, "examples": [{"id": e["id"], "before": e["before_text"][:60],
+                                                                     "after": e["after_text"][:60]} for e in v]}
+                                    for sid, v in picks.items() if v]
+        ctx.think(f"去 AI 味改写参考了编辑改过的 {len(used)} 条句子")
     log = []
     for sec, (stt, r) in zip(jobs, res):
         if stt != "ok" or not (r.get("content") or "").strip():
@@ -915,6 +1001,15 @@ MATCH_PROMPT = """判断每张图片放在对应段落后面是否合适：图�
 
 def _names_short(sid):
     return _names().get(sid, sid or "")
+
+
+def _doc_site(f) -> str:
+    """图源写网站名（凤凰网、新华网），不写“全网搜索”这种检索渠道，也不带资料标题。"""
+    if f.get("source_id") in writing.CHANNEL_SOURCES and f.get("doc_id"):
+        r = db.query_one("SELECT url FROM documents WHERE id=?", (f["doc_id"],))
+        if r and r.get("url"):
+            return writing.site_name(r["url"])
+    return _names_short(f.get("source_id"))
 
 
 def _download_doc_images(ctx, order):
@@ -1186,7 +1281,7 @@ def _illustrate(ctx):
             f["warn"] = [w for w in f.get("warn") or [] if "像素" not in w and "分辨率" not in w]
             f["why"] += f"；已从压缩版 {up['upgraded_from']} 换成原图 {up['width']}×{up['height']}"
         cap = (f["orig_caption"] or "").strip()
-        f["caption"] = (cap if cap else "原文配图") + f"（图源：{_names_short(f['source_id'])}《{f['doc_title'][:24]}》）"
+        f["caption"] = (f"{cap}（图源：{_doc_site(f)}）" if cap else f"图源：{_doc_site(f)}")
         f["alt"] = cap or f["doc_title"][:30]
         if not cap:
             f.setdefault("warn", []).append("原文没有图注，请确认图片内容与这段一致")
@@ -1199,11 +1294,12 @@ def _illustrate(ctx):
             cov = {**cov, "local_path": up["local_path"], "width": up["width"], "height": up["height"]}
         st["cover"] = {"kind": "photo", "image_id": cov["id"], "src": "/media/" + cov["local_path"], "url": cov["url"],
                        "doc_title": cov["doc_title"], "doc_id": cov["doc_id"],
-                       "caption": ((cov.get("caption") or "").strip() or "封面图") + f"（图源：{_names_short(cov['source_id'])}《{cov['doc_title'][:24]}》）",
+                       "caption": (f"{cov['caption'].strip()}（图源：{_doc_site(cov)}）" if (cov.get("caption") or "").strip()
+                                   else f"图源：{_doc_site(cov)}"),
                        "alt": (cov.get("caption") or cov["doc_title"])[:30], "why": "横图、清晰、与主题最相关"}
     else:
         st["cover"] = {"kind": "diagram", "src": "/media/" + ill._save_svg(ill.cover_svg(st["title"], f"{sk['name']} · {ctx.topic}")),
-                       "alt": "示意封面", "caption": "示意封面：素材中没有合适的横版原图，按标题生成",
+                       "alt": st["title"][:30], "caption": "示意图",
                        "why": "没有满足封面要求（横版照片类、宽 ≥ 960、清晰）的原始图片"}
     timing["换原图与封面"] = round(time.time() - t0, 1)
     st["image_rejected"] = rejected
@@ -1263,6 +1359,7 @@ def build_and_save(st, note: str, task_id: str | None, extra_meta: dict | None =
             "experiment": st.get("experiment"), "variant": st.get("variant"),
             "write_task": st.get("write_task"), "revisions": st.get("revisions") or [],
             "corroborations": st.get("corroborations") or [],
+            "edit_examples_used": st.get("edit_examples_used") or [],
             "hedges": {"needed": audit["needed"], "missing": audit["missing"], "uncertain_section": audit["uncertain_section"],
                        "added": hed["added"], "section_added": hed["section"]},
             **(extra_meta or {})}

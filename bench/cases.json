@@ -1,0 +1,40 @@
+{
+ "说明": "对标真人稿的主题清单。human 填真人稿网址（可多篇）；留空就让系统用搜索 API 自己找一篇主流媒体报道。skill 是系统写作用的 Skill。",
+ "cases": [
+  {
+   "topic": "2026年国庆档电影票房",
+   "genre": "数据通报",
+   "skill": "data",
+   "human": [
+    "https://m.gmw.cn/2026-10/08/content_1304573016.htm"
+   ]
+  },
+  {
+   "topic": "2026年国庆假期国内旅游数据",
+   "genre": "消费观察",
+   "skill": "brief",
+   "human": [
+    "https://www.news.cn/travel/20261009/823e861310aa46b9bcc9edf1041f092b/c.html",
+    "https://news.10jqka.com.cn/20261010/c680542831.shtml"
+   ]
+  },
+  {
+   "topic": "2026年诺贝尔生理学或医学奖",
+   "genre": "科学解读",
+   "skill": "explainer",
+   "human": [
+    "https://www.chinanews.com.cn/gj/2026/10-05/10708203.shtml",
+    "https://www.news.cn/world/20261005/34a446940d9849a182241cb2b2b76812/c.html"
+   ]
+  },
+  {
+   "topic": "2026年诺贝尔和平奖揭晓",
+   "genre": "国际事件",
+   "skill": "timeline",
+   "human": [
+    "https://global.hk01.com/即时国际/60397905/navi-pillay夺诺贝尔和平奖-曾任icc法官及联合国人权专员",
+    "https://global.hk01.com/即时国际/60398085/诺贝尔和平奖授予navi-pillay-美媒-对特朗普内塔尼亚胡的驳斥"
+   ]
+  }
+ ]
+}

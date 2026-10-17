@@ -24,10 +24,13 @@ _NUM = re.compile(r"\d+(?:\.\d+)?\s*[%KkMmBb万亿]?")
 def describe_change(old: str, new: str) -> dict:
     """比较两个版本：相似度、增删的数字（按出现次数）、增删的句子。
     用于判断是否实质变化，并向用户说明“哪里变了”。"""
-    a, b = old[:30000], new[:30000]
+    from ..calibrate import NOISE, params
+    pu = params("update")
+    a, b = NOISE.sub(" ", old[:30000]), NOISE.sub(" ", new[:30000])   # 阅读数、时间戳不参与比较
     ratio = difflib.SequenceMatcher(None, a, b, autojunk=False).quick_ratio() if a and b else 0.0
     if ratio > 0.9:
         ratio = difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
+    # 阅读数、点赞数、时间戳、“3 分钟前”这类数字每次抓取都会变，不算内容变化
     ca, cb = Counter(_NUM.findall(a)), Counter(_NUM.findall(b))
     sa = {x.strip() for x in re.split(r"[。！？!?\n]", a) if len(x.strip()) > 6}
     sb = {x.strip() for x in re.split(r"[。！？!?\n]", b) if len(x.strip()) > 6}
@@ -38,7 +41,8 @@ def describe_change(old: str, new: str) -> dict:
             "numbers_added": sorted((cb - ca).elements())[:10],
             "sentences_added": sorted(sb - sa, key=len)[:5],
             "sentences_removed": sorted(removed, key=len)[:5],
-            "significant": ratio < 0.985 or ca != cb}
+            "significant": ratio < pu["similarity"] or
+            sum(((ca - cb) + (cb - ca)).values()) >= pu["num_changed"]}
 
 
 def _basis(item: dict) -> str:
@@ -97,8 +101,9 @@ def upsert_document(item: dict, topic: str, *, task_id: str | None = None,
     kind = item.get("content_kind") or "summary"
     pub = iso(item.get("published_at")) or item.get("published_at")
     meta_in = dict(item.get("meta") or {})
-    from .sources import is_primary          # 一手站点（政府、监管、论文、官方新闻稿……）上的页面一律标为一手资料
-    meta_in.update(primary=bool(item.get("primary")) or is_primary(url), relevance=item.get("relevance"),
+    from .sources import is_primary, self_archive   # 一手站点（政府、监管、论文、官方新闻稿……）上的页面一律标为一手资料
+    meta_in.update(primary=(bool(item.get("primary")) or is_primary(url)) and not self_archive(url),
+                   unreviewed=self_archive(url) or None, relevance=item.get("relevance"),
                    last_task=task_id)
     if item.get("images"):
         meta_in["image_candidates"] = item["images"]
@@ -107,7 +112,7 @@ def upsert_document(item: dict, topic: str, *, task_id: str | None = None,
                        "ORDER BY version DESC LIMIT 1", (canon,))
     if old:
         meta = {**(old["meta"] or {}), **{k: v for k, v in meta_in.items() if v is not None}}
-        meta["primary"] = bool((old["meta"] or {}).get("primary") or meta_in.get("primary"))
+        meta["primary"] = bool((old["meta"] or {}).get("primary") or meta_in.get("primary")) and not self_archive(url)
         meta["sources_seen"] = sorted(set((old["meta"] or {}).get("sources_seen", [old["source_id"]]))
                                       | {item.get("source_id") or "web"})
         meta.setdefault("seen_by_tasks", [])
@@ -136,6 +141,9 @@ def upsert_document(item: dict, topic: str, *, task_id: str | None = None,
         same_method = (old["meta"] or {}).get("extract_method") == meta_in.get("extract_method")
         if (not same_method and old["simhash"] and hamming(old["simhash"], sh) <= 14) or \
                 (same_method and not change["significant"]):
+            if change["similarity"] < 1:
+                # 记下这次“判为不重要”的变化：判断校准页拿它请人确认“是不是真的不重要”
+                meta["minor_changes"] = ((meta.get("minor_changes") or []) + [{"at": round(db.now()), "change": change}])[-3:]
             db.update("documents", "id", old["id"], {"meta": meta, "fetched_at": db.now()})
             return {"doc_id": old["id"], "action": "unchanged", "novelty": old["novelty"],
                     "relation": "minor_change", "related_id": None}
@@ -161,20 +169,42 @@ def upsert_document(item: dict, topic: str, *, task_id: str | None = None,
     peers = db.query("SELECT id, title, simhash, published_at, event_id, duplicate_of, "
                      "content_kind, LENGTH(text) n FROM documents WHERE topic=? AND status='active'",
                      (topic,))
-    if len(basis) >= 200:
+    from ..calibrate import decide_event, decide_reprint, event_features, params, reprint_features
+    pr, pe = params("reprint"), params("event")
+    me = {"title": item.get("title") or "", "text": basis, "simhash": sh, "published_at": pub}
+    if len(basis) >= 120:
         for p in peers:
-            if p["simhash"] and (p["n"] or 0) >= 200 and hamming(p["simhash"], sh) <= NEAR_DUP:
+            if len(basis) >= 200 and p["simhash"] and (p["n"] or 0) >= 200 and hamming(p["simhash"], sh) <= pr["hamming"]:
                 dup_of = p["duplicate_of"] or p["id"]
                 event_id, novelty, relation, related = p["event_id"], "duplicate", "reprint", p["id"]
                 break
+        if not dup_of:
+            # 洗稿：逐句改写、调换语序，SimHash 认不出来；只对标题相近或指纹较近的候选逐句比对（省时间）
+            near = [p for p in peers if (p["n"] or 0) >= 120 and p["simhash"] and
+                    (hamming(p["simhash"], sh) <= 24 or title_sim(me["title"], p["title"] or "") >= 0.3)]
+            for p in near[:30]:
+                full = db.query_one("SELECT text FROM documents WHERE id=?", (p["id"],))
+                f = reprint_features(me, {**p, "text": (full or {}).get("text") or ""})
+                if decide_reprint(f, pr) == "rewrite":
+                    dup_of = p["duplicate_of"] or p["id"]
+                    event_id, novelty, relation, related = p["event_id"], "duplicate", "rewrite", p["id"]
+                    meta_in["rewrite_of"] = {"doc": p["id"], **f}
+                    break
     if not dup_of and item.get("title"):
         best, best_s = None, 0.0
         for p in peers:
             s = title_sim(item["title"], p["title"] or "")
-            if s < EVENT_TITLE_SIM or s <= best_s:
+            if s < min(pe["title"], pe["title_lo"]) or s <= best_s:
                 continue
+            f = {"title_sim": s, "days": None, "num_shared": 0}
             pd = parse_date(p["published_at"])
-            if pub_dt and pd and abs(pub_dt - pd) > EVENT_WINDOW:
+            if pub_dt and pd:
+                f["days"] = abs(pub_dt - pd).total_seconds() / 86400
+            if s < pe["title"]:
+                # 标题只是有点像：再看两篇是否共享关键数字（同一件事的报道通常引同一组数字）
+                full = db.query_one("SELECT title, text, published_at FROM documents WHERE id=?", (p["id"],))
+                f = {**event_features(me, full or {}), "days": f["days"]}
+            if decide_event(f, pe) != "same":
                 continue
             best, best_s = p, s
         if best:

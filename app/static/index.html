@@ -4,11 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>主题编辑台</title>
-<link rel="stylesheet" href="/static/style.css?v=1013k">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath fill='%23b8432f' fill-rule='evenodd' d='M27 9 h13 v19 h-5 v-14 h-3 v14 h-5 z M60 9 h13 v19 h-5 v-14 h-3 v14 h-5 z M15 27 h70 v8 h-70 z M20 35 h60 c0 21 -11 32 -30 32 c-19 0 -30 -11 -30 -32 z M23 42 h54 v3 h-54 z M25.5 50 h49 v2.4 h-49 z M31 61 l7 5 l-7 25 h-7 z M46.5 67 h7 v24 h-7 z M69 61 l-7 5 l7 25 h7 z'/%3E%3C/svg%3E">
+<script>/* 先套用保存的深浅色，避免页面闪一下 */
+try { var t = localStorage.getItem("td-theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
+<link rel="stylesheet" href="/static/style.css?v=1014g">
 </head>
 <body>
 <header class="masthead">
-  <a href="#/" class="brand">主题编辑台<span>TopicDesk</span></a>
+  <a href="#/" class="brand"><span class="seal" aria-hidden="true"></span>主题编辑台<span>TopicDesk</span></a>
   <nav id="nav">
     <a href="#/" data-nav="tasks">任务</a>
     <a href="#/library" data-nav="library">资料库</a>
@@ -17,12 +21,13 @@
     <a href="#/experiments" data-nav="experiments">评测</a>
     <a href="#/sources" data-nav="sources">信息源</a>
     <a href="#/settings" data-nav="settings">设置</a>
+    <button type="button" class="theme-btn" id="theme-btn" aria-label="切换深浅色"></button>
   </nav>
 </header>
 
 <main id="app">
   <aside class="rail" id="rail">
-    <a href="#/new" class="new-topic-btn" id="new-topic-btn"><span class="spark">✳</span> 新主题</a>
+    <a href="#/new" class="new-topic-btn" id="new-topic-btn"><span class="seal" aria-hidden="true"></span> 新主题</a>
     <details class="import-box">
       <summary>导入链接</summary>
     <form id="import-form">
@@ -145,6 +150,6 @@
     </details>
   </form>
 </div>
-<script src="/static/app.js?v=1013k"></script>
+<script src="/static/app.js?v=1014g"></script>
 </body>
 </html>

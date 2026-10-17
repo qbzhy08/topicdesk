@@ -154,6 +154,36 @@ class FactLogicTest(CollectBase):
         self.assertNotIn(fa, rec["used"])          # 被否定的说法不再被当作事实召回
         self.assertIn(fb, rec["used"])
 
+    def test_different_baseline_years_are_not_a_conflict(self):
+        """“比2024年增长19.0%”和“比2025年增长6.5%”说的是两个基准，不是互相矛盾；同一份通报里并列的数字也不是。"""
+        from app import memory_facts as mf
+        a = self._doc("https://www.mct.gov.cn/a", "全国接待入境游客298.3万人次，按可比口径比2024年增长19.0%。" * 10)
+        b = self._doc("https://news.cn/b", "入境游客298.3万人次，按可比口径比2025年增长6.5%。" * 10)
+        self.assertNotEqual(mf.skeleton("入境游客比2024年增长19.0%"), mf.skeleton("入境游客比2025年增长6.5%"))
+        stats = {}
+        fa = mf.merge_claim("T", {"doc": a, "text": "全国接待入境游客298.3万人次，按可比口径比2024年增长19.0%",
+                                  "quote": "按可比口径比2024年增长19.0%"}, "t", stats)
+        fb = mf.merge_claim("T", {"doc": b, "text": "全国接待入境游客298.3万人次，按可比口径比2025年增长6.5%",
+                                  "quote": "按可比口径比2025年增长6.5%"}, "t", stats)
+        self.assertNotIn("conflicts", stats)
+        self.assertNotEqual(mem.get(fa)["meta"]["verify"], "disputed")
+        self.assertNotEqual(mem.get(fb)["meta"]["verify"], "disputed")
+
+    def test_recheck_repairs_misjudged_disputes(self):
+        """旧规则留下的误判（不同年份被当成冲突、一方被“否定”）：复查后作废，两条事实恢复核验状态。"""
+        from app import memory_facts as mf
+        a = self._doc("https://www.mct.gov.cn/c", "入境游客按可比口径比2024年、2025年分别增长19.0%、6.5%。" * 10,
+                      primary=True)
+        fa = mem.add("topic", "fact", "入境游客比2024年增长19.0%", topic="T", meta={"verify": "refuted"})
+        fb = mem.add("topic", "fact", "入境游客比2025年增长6.5%", topic="T", meta={"verify": "supported"})
+        mf.add_evidence(fa, a, "19.0%")
+        mf.add_evidence(fb, a, "6.5%")
+        mem.add("topic", "dispute", "说法不一致", topic="T", derived_from=[fa, fb], meta={"facts": [fa, fb]})
+        out = mf.recheck_disputes("T", "t")
+        self.assertEqual(len(out), 1)
+        self.assertEqual(mem.get(fa)["meta"]["verify"], "supported")      # 一手来源支持，不再是“已被否定”
+        self.assertEqual(mf.recheck_disputes("T", "t"), [])                # 幂等
+
 
 class PreferenceApiTest(CollectBase):
     def test_reading_minutes_can_be_set_and_changed(self):

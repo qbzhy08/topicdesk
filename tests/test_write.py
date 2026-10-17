@@ -27,7 +27,8 @@ class FakeWriter:
         self.calls.append(p)
         if "能否由给出的“出处原文”支持" in p:       # 语义核对：改写过的句子判为支持，其余不支持
             n = len(re.findall(r"^\d+\. 句子：", p, re.M))
-            res = [{"i": i + 1, "verdict": "supported" if "差距" in seg else "unsupported", "reason": "测试"}
+            res = [{"i": i + 1, "verdict": "supported" if "差距" in seg else "unsupported", "reason": "测试",
+                    "evidence": (re.search(r"原文\d+：(.{12,40})", seg) or [None, ""])[1]}
                    for i, seg in enumerate(re.split(r"^\d+\. 句子：", p, flags=re.M)[1:n + 1])]
             return {"content": "", "_cost": 0, "data": {"results": res}}
         if "找出最多 2 组适合画图" in p:            # 一组真实数字 + 一组编造的数字
@@ -51,7 +52,7 @@ class FakeWriter:
         if "上一稿核对发现这些问题" in p:     # 按核对结果改写：去掉编造的数字
             return {"content": f"官方宣称支持 128K 上下文[{a}]。\n\n【分析】宣称和复现之间的差距，说明仅凭单一评测下结论还为时过早。",
                     "_cost": 0}
-        if "核心结论" in p or "先说结论" in p:
+        if re.search(r"本节小标题：(核心结论|先说结论)", p):
             return {"content": (f"官方宣称该模型支持 128K 上下文[{a}]。"
                                 f"复现评测发现在 64K 以上时检索准确率明显下降[{a}]。\n\n"   # 错误 1：出处引错
                                 "官方宣称支持 128K 上下文。\n\n"                           # 错误 2：有数字没出处
@@ -393,6 +394,33 @@ class ReviewWriter(FakeWriter):
 
 class ReviewTest(WriteBase):
     """Lv3 人工审阅：每次修改存新版本、重新核对；修改意见可写入长期记忆，下次写作用上。"""
+
+    def test_manual_edits_become_examples(self):
+        """编辑亲手改的句子存成“改前 → 改后”示例；下次去 AI 味改写时放进提示词；改数字的不算写法示例。"""
+        from app import edit_examples as EX
+        task, v1 = self.write("brief", no_llm=True)
+        aid = task["state"]["result"]["article_id"]
+        sec = next(s for s in self.art(aid)["version"]["review"]["sections"] if s["paras"])
+        n = re.findall(r"\[(\d+)\]", sec["paras"][0])[0]
+        old = f"这意味着社区开发者的复现结果与官方宣称的能力存在明显差距，值得关注[{n}]。"
+        self.revise(aid, op="text", section=sec["id"], para=0, text=old)
+        new = f"社区开发者复现的结果，和官方宣称的能力对不上[{n}]。"
+        st, t = self.revise(aid, op="text", section=sec["id"], para=0, text=new)
+        self.assertEqual(st, "done", t["error"])
+        ex = EX.list_examples()
+        self.assertTrue(any("官方宣称的能力对不上" in x["after_text"] and "这意味着" in x["before_text"] for x in ex), ex)
+        self.assertIn("AI 腔", next(x["kind"] for x in ex if "这意味着" in x["before_text"]))
+        self.assertEqual(EX.pairs_from_edit("销量增长了30%，这意味着需求旺盛。", "销量增长了35%，需求旺盛。"), [])  # 改数字：不算
+        self.assertFalse(any("这意味着" in x["after_text"] for x in ex))      # 越改越像 AI 的不收
+        # 下次写作：去 AI 味的提示词里带上示例，并记在文章元数据里
+        nat = NaturalWriter()
+        llm.available, llm.chat = (lambda: True), nat
+        task2, v2 = self.write("brief")
+        self.assertTrue(any("编辑过去亲手改过的句子" in c and "官方宣称的能力对不上" in c for c in nat.calls))
+        self.assertTrue(v2["meta"]["edit_examples_used"])
+        # 删掉示例
+        self.assertEqual(self.c.delete(f"/api/edit_examples/{ex[0]['id']}").status_code, 200)
+        self.assertEqual(len(EX.list_examples()), len(ex) - 1)
 
     def setUp(self):
         super().setUp()
@@ -877,11 +905,11 @@ class ExperimentFailTest(ExperimentTest):
         from app.graphs import experiment as E
         orig = E._run_one
 
-        def flaky(r, params, user_id):
+        def flaky(r, params, user_id, on_start=None):
             if r["variant"] == "natural_only":
                 return {"write_task": None, "status": "failed", "error": "大模型超时（测试）", "seconds": 1,
                         "article_id": None, "version": None}
-            return orig(r, params, user_id)
+            return orig(r, params, user_id, on_start)
         E._run_one = flaky
         try:
             eid, rep = self.run_exp(research_tasks=[self.t1], skill="brief", detector="manual")
@@ -895,10 +923,34 @@ class ExperimentFailTest(ExperimentTest):
         self.assertEqual(lst["failed"][0]["variant"], "natural_only")
         self.assertEqual((lst["done"], lst["runs"]), (3, 4))
 
+    def test_pipeline_starts_next_without_waiting_for_batch(self):
+        """流水线：慢的那篇还在写时，空出来的位置马上开写下一篇（不按批等最慢的）。"""
+        import threading, time as _t
+        from app.graphs import experiment as E
+        orig, order, gate = E._run_one, [], threading.Event()
+
+        def fake(r, params, user_id, on_start=None):
+            order.append(("start", r["variant"]))
+            if r["variant"] == "checked":        # 这一篇很慢：等到其他变体都写完才放行
+                gate.wait(5)
+            out = orig(r, params, user_id, on_start)
+            order.append(("end", r["variant"]))
+            if sum(1 for k, v in order if k == "end") == 3:
+                gate.set()
+            return out
+        E._run_one = fake
+        try:
+            eid, rep = self.run_exp(research_tasks=[self.t1], skill="brief", detector="manual", parallel=2)
+        finally:
+            E._run_one = orig
+        self.assertTrue(all(r["status"] == "done" for r in rep["rows"]))
+        self.assertEqual(order[-1], ("end", "checked"))                              # 慢的最后完成，其他没被它挡住
+        self.assertFalse(any(r.get("writing") for r in rep["rows"]))
+
     def test_fatal_error_stops_and_retry(self):
         from app.graphs import experiment as E
         orig = E._run_one
-        E._run_one = lambda r, p, u: {"write_task": None, "status": "failed", "seconds": 1, "article_id": None, "version": None,
+        E._run_one = lambda r, p, u, s=None: {"write_task": None, "status": "failed", "seconds": 1, "article_id": None, "version": None,
                                       "error": '节点 draft 失败：HTTP 402: {"error":{"message":"Insufficient Balance"}}'}
         try:
             eid, rep = self.run_exp(research_tasks=[self.t1], skill="brief", detector="manual", parallel=1)
@@ -969,7 +1021,7 @@ class TrustTest(WriteBase):
         self.assertEqual(h["missing"], 0)
         if h["needed"]:
             self.assertTrue(h["uncertain_section"] or h["section_added"])
-            self.assertIn("还不确定的", v["markdown"])
+            self.assertTrue("还不确定的" in v["markdown"] or "尚待确认" in v["markdown"])
         # 幂等：再跑一次不重复添加
         secs = [dict(x) for x in v["meta"]["sections"]]
         flags = writing.doc_flags(v["meta"]["research_task"], v["meta"]["docs"])
@@ -1017,10 +1069,21 @@ class TrustTest(WriteBase):
                          "content_kind": "full", "source_id": source_id, "published_at": "2026-10-12T00:00:00+00:00"}]
             return orig_search(source_id, query, limit=limit, **kw)
         S.search = fake_search
+        # 样例里“复现”那篇和官方那篇报的是同一事件（有两个来源）：这里把它们都当成单一来源，模拟“只有一家报道”
+        orig_flags = writing.doc_flags
+
+        def single_flags(rt, docs):
+            out = orig_flags(rt, docs)
+            for k, f in out.items():
+                if k != "_disputed":
+                    f["risky"] = "example-news" not in str(next((d.get("url") for d in docs if d["n"] == k), ""))
+            return out
+        writing.doc_flags = single_flags
         try:
             task, v = self.write("brief")
         finally:
             S.search, S.fetch_page = orig_search, orig_fetch
+            writing.doc_flags = orig_flags
         logs = v["meta"]["corroborations"]
         self.assertTrue(logs)
         hit = [x for x in logs if x.get("doc")]
@@ -1029,7 +1092,7 @@ class TrustTest(WriteBase):
         body = "\n".join(x["md"] for x in v["meta"]["sections"] if not x.get("auto"))
         self.assertIn(f"[{n}]", body)                         # 句子补上了新出处
         self.assertIn("example-news.cn", v["markdown"])       # 参考资料里有这篇
-        flags = writing.doc_flags(v["meta"]["research_task"], task["state"]["docs"])
+        flags = single_flags(v["meta"]["research_task"], task["state"]["docs"])
         aud = writing.hedge_audit([x for x in v["meta"]["sections"] if not x.get("auto")], flags)
         self.assertEqual(aud["missing"], 0)
 
@@ -1050,3 +1113,40 @@ class SharedDraftTest(ExperimentTest):
             if r["variant"] != "draft":
                 ws = db.query_one("SELECT state FROM tasks WHERE id=?", (r["write_task"],))["state"]
                 self.assertEqual(ws.get("seeded_from"), draft["write_task"])
+
+
+class StyleBenchTest(WriteBase):
+    """对标真人稿：真人稿（及转载）不进素材；系统稿写完逐项对比、出报告。"""
+
+    def test_bench_case_excludes_human_and_compares(self):
+        import tempfile
+        from types import SimpleNamespace
+        from app import writing
+        from tools import style_bench as B
+        llm.available, llm.chat = (lambda: False), llm.chat          # 规则写作，不需要大模型
+        rows = db.query("SELECT id, url, text FROM documents WHERE topic=? AND status='active' AND length(text) > 200", (TOPIC,))
+        human = rows[0]
+        # 1) 选材时排除：同一 URL / 正文大半重合的转载
+        sk = skills.public(skills.get("brief")) | {"body": ""}
+        ids = {d["id"] for d in writing.select_material(self.t1, sk, exclude={"urls": [human["url"]], "texts": []})["docs"]}
+        self.assertNotIn(human["id"], ids)
+        ids = {d["id"] for d in writing.select_material(self.t1, sk, exclude={"urls": [], "texts": [human["text"]]})["docs"]}
+        self.assertNotIn(human["id"], ids)
+        # 2) 跑一个主题：真人稿抓取用假的，检索复用已有任务
+        old = B.fetch_text, B.OUT
+        B.fetch_text = lambda u: {"url": u, "title": "真人稿", "site": "测试", "text": human["text"]}
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                args = SimpleNamespace(rejudge=False, fresh=False, reuse_days=3, no_judge=True)
+                rec = B.run_case(1, {"topic": TOPIC, "skill": "brief", "genre": "测试", "human": [human["url"]]},
+                                 args, Path(d))
+                self.assertFalse(rec["errors"], rec["errors"])
+                self.assertEqual(rec["research_task"], self.t1)
+                self.assertIn("gaps", rec["compare"])
+                ws = db.query_one("SELECT state FROM tasks WHERE id=?", (rec["write_task"],))["state"]
+                self.assertNotIn(human["id"], [x["id"] for x in ws["docs"]])
+                agg = __import__("app.stylebench", fromlist=["x"]).aggregate([rec])
+                B.report([rec], agg, Path(d))
+                self.assertIn("对标真人稿", (Path(d) / "report.md").read_text(encoding="utf-8"))
+        finally:
+            B.fetch_text, B.OUT = old

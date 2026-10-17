@@ -12,6 +12,7 @@ import re
 from . import db, ranking
 from . import memory as mem
 from .collect.dedup import parse_date
+from .collect.sources import self_archive as _self_archive
 
 CITE = re.compile(r"\[(\d{1,2})\]")
 ANALYSIS = "【分析】"
@@ -21,10 +22,12 @@ NOISE_NUMS = {"1", "2", "3", "4", "5"}        # 序号、“两三句”这类�
 
 # 限制条件与争议：改写时最容易被“顺”掉的那类话
 HEDGE = re.compile(r"可能|或许|预计|尚未|尚不|未经|仅|只有|单一来源|据称|宣称|声称|争议|质疑|不确定|待核实|待确认|有待|局限|"
-                   r"样本|前提|条件下|并非|不代表|还不能|目前公开资料|未能确认|存疑|分歧|计划|有望|目标是|将于")
+                   r"样本|前提|条件下|并非|不代表|还不能|目前公开资料|未能确认|存疑|分歧|计划|有望|目标是|将于|不一|存疑|仅见于")
 # 系统自动补上的限制说明（核对时先去掉再比对出处，不影响出处核对）
-HEDGE_NOTE = re.compile(r"（(?:目前只有[^）]{0,20}报道[^）]{0,12}|这一说法存在争议[^）]{0,16})）")
-UNCERTAIN_HEAD = re.compile(r"不确定|争议|问号|没有答案|小心|局限|证据|待证实")
+HEDGE_NOTE = re.compile(r"（(?:目前只有[^）]{0,20}报道[^）]{0,12}|这一说法存在争议[^）]{0,16}|仅见于[^）]{1,20}|各方数字不一|尚无一手资料印证)）")
+UNCERTAIN_HEAD = re.compile(r"不确定|争议|问号|没有答案|小心|局限|证据|待证实|待核实|待确认|存疑")
+# 交代了“谁说的”：单一来源的说法写明出处方，也算交代了限制（新闻写作的常规做法）
+ATTRIB = re.compile(r"据|显示|援引|测算|统计|盘点|称|表示|指出|发布|披露|报告|通报|介绍|透露")
 
 
 def doc_flags(research_task: str | None, docs: list[dict]) -> dict:
@@ -38,38 +41,176 @@ def doc_flags(research_task: str | None, docs: list[dict]) -> dict:
         primary = bool(it.get("primary", d.get("primary")))
         disputed = bool(it.get("disputed", d.get("disputed")))
         single = (it.get("independent") or 1) <= 1 if it else bool(d.get("unverified"))
-        out[d["n"]] = {"risky": disputed or bool(it.get("unverified", d.get("unverified"))) or (single and not primary),
-                       "disputed": disputed, "label": (d.get("label") or d.get("source_id") or "").split("，")[0]}
+        unreviewed = bool(d.get("url")) and _self_archive(d["url"])
+        out[d["n"]] = {"risky": unreviewed or bool(it.get("unverified", d.get("unverified"))) or (single and not primary),
+                       "disputed": disputed, "label": publisher_label(d)}
+    # 争议按“句子”判断，不按“文章”：一篇资料里有一条说法有争议，不代表引用它的每句话都有争议
+    out["_disputed"] = disputed_facts(research_task)
     return out
 
 
-def _risky_kind(cites: list[int], flags: dict) -> str | None:
+def disputed_facts(research_task: str | None) -> list[str]:
+    """检索任务主题下，记忆里当前仍有争议的事实（内容）。"""
+    if not research_task:
+        return []
+    t = db.query_one("SELECT topic FROM tasks WHERE id=?", (research_task,))
+    if not t or not t.get("topic"):
+        return []
+    rows = db.query("SELECT content, meta FROM memories WHERE topic=? AND kind='fact' AND "
+                    "status IN ('active','stale')", (t["topic"],))
+    out = []
+    for r in rows:
+        m = r["meta"]
+        if isinstance(m, str):
+            import json
+            try:
+                m = json.loads(m or "{}")
+            except ValueError:
+                m = {}
+        if (m or {}).get("verify") == "disputed":
+            out.append(r["content"])
+    return out
+
+
+SITE_NAMES = {
+    "gov.cn": "政府网站", "mct.gov.cn": "文化和旅游部", "people.com.cn": "人民网", "news.cn": "新华网",
+    "xinhuanet.com": "新华网", "cctv.com": "央视网", "cctv.cn": "央视网", "chinanews.com.cn": "中国新闻网",
+    "sina.com.cn": "新浪", "ifeng.com": "凤凰网", "qq.com": "腾讯网", "163.com": "网易", "sohu.com": "搜狐",
+    "thepaper.cn": "澎湃新闻", "zhihu.com": "知乎", "weibo.com": "微博", "xhby.net": "新华报业网",
+    "10jqka.com.cn": "同花顺", "caixin.com": "财新", "yicai.com": "第一财经", "jiemian.com": "界面新闻",
+    "36kr.com": "36氪", "github.com": "GitHub", "arxiv.org": "arXiv", "huggingface.co": "Hugging Face",
+    "reuters.com": "路透社", "bloomberg.com": "彭博社", "nytimes.com": "纽约时报",
+    "gmw.cn": "光明网", "stcn.com": "证券时报网", "rfi.fr": "法广", "dw.com": "德国之声", "bbc.com": "BBC",
+    "bbc.co.uk": "BBC", "apnews.com": "美联社", "afp.com": "法新社", "cls.cn": "财联社", "nbd.com.cn": "每日经济新闻",
+    "bjnews.com.cn": "新京报", "chinadaily.com.cn": "中国日报网", "ce.cn": "中国经济网", "cnr.cn": "央广网",
+    "youth.cn": "中国青年网", "huanqiu.com": "环球网", "eastmoney.com": "东方财富网", "stockstar.com": "证券之星",
+    "ithome.com": "IT之家", "sspai.com": "少数派", "guancha.cn": "观察者网", "cyol.com": "中青在线",
+    "chinanews.com": "中新网", "zaobao.com": "联合早报", "nobelprize.org": "诺贝尔奖官网",
+    "zenodo.org": "Zenodo 自存档", "openalex.org": "OpenAlex", "hk01.com": "香港01",
+}
+# 这些是“怎么找到的”（搜索渠道），不是“谁发布的”；写进正文和参考资料时换成网站名
+CHANNEL_SOURCES = {"web_search", "websearch", "official", "web", "search", "gap", "bocha", "tavily"}
+
+
+def site_name(url: str) -> str:
+    from urllib.parse import urlparse
+    host = (urlparse(url or "").hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    parts = host.split(".")
+    for i in range(len(parts) - 1):
+        k = ".".join(parts[i:])
+        if k in SITE_NAMES and k != "gov.cn":
+            return SITE_NAMES[k]
+    if host.endswith(".gov.cn"):
+        return "政府网站"
+    return host
+
+
+# 自媒体号：挂在门户域名下，但不是记者稿（网易号、百家号、搜狐号、头条号、公众号、知乎……）
+SELF_MEDIA = re.compile(r"dy\.163\.com|163\.com/dy/|baijiahao\.baidu|sohu\.com/a/|toutiao\.com|mp\.weixin|zhihu|weibo|"
+                        r"bilibili|douyin|xiaohongshu|tieba\.baidu|ishare\.ifeng|k\.sina\.com\.cn|"
+                        r"cj\.sina\.com\.cn/articles|new\.qq\.com/rain|page\.om\.qq")
+SOCIAL_SOURCES = {"zhihu", "weibo", "wechat", "tieba", "xiaohongshu", "douyin", "bilibili", "hn", "reddit", "v2ex"}
+
+
+def source_tier(d: dict) -> str:
+    """来源层级（写进给大模型的素材标签里）：大模型自己分不清“谁说话算数”，要由程序明确告诉它。"""
+    from .collect.sources import is_primary
+    url = d.get("url") or ""
+    if _self_archive(url):
+        return "自存档，未经同行评审"
+    if d.get("primary") or is_primary(url):
+        return "一手/官方"
+    if d.get("source_id") in SOCIAL_SOURCES or SELF_MEDIA.search(url):
+        return "自媒体/社区，个人说法"
+    host = site_name(url)
+    if host != (re.sub(r"^www\.", "", (url.split("/")[2] if "//" in url else "")).lower()):
+        return "媒体报道"
+    return "其他网站"
+
+
+def publisher_label(d: dict) -> str:
+    """正文和“仅见于……”里用的来源名：优先网站/机构名，而不是“全网搜索”这类检索渠道名。"""
+    if d.get("url") and _self_archive(d["url"]):
+        return "一篇未经同行评审的自存档论文"
+    label = (d.get("label") or d.get("source_id") or "").split("，")[0]
+    if d.get("url") and (d.get("source_id") in CHANNEL_SOURCES or "搜索" in label or "一手披露" in label
+                         or not label):
+        return site_name(d["url"]) or label
+    return label
+
+
+def _num_key(sentence: str) -> frozenset:
+    """一句话里的“硬数字”，用来识别同一个说法在文中第二次出现。"""
+    return frozenset(n for n in numbers(HEDGE_NOTE.sub("", CITE.sub("", sentence))) if n not in NOISE_NUMS)
+
+
+def _matches_disputed(sentence: str, facts: list[str]) -> bool:
+    """这句话是不是在复述某条有争议的事实：文字相近，并且用到了那条事实里的数字。"""
+    plain = HEDGE_NOTE.sub("", CITE.sub("", sentence))
+    mine = set(numbers(plain)) - NOISE_NUMS
+    for f in facts or []:
+        fn = set(numbers(f)) - NOISE_NUMS
+        if fn and not (mine & fn):
+            continue
+        if overlap(f, plain) >= 0.35 or overlap(plain, f) >= 0.35:
+            return True
+    return False
+
+
+def _risky_kind(cites: list[int], flags: dict, sentence: str = "") -> str | None:
     fl = [flags.get(c) for c in cites if c in flags]
     if not fl:
         return None
-    if any(f["disputed"] for f in fl):
+    if "_disputed" in flags:
+        # 句子级：只有真的在复述有争议的那条说法，才算有争议
+        if any(f["disputed"] for f in fl) and _matches_disputed(sentence, flags["_disputed"]):
+            return "disputed"
+    elif any(f["disputed"] for f in fl):
         return "disputed"
     if all(f["risky"] for f in fl):
         return "single"
     return None
 
 
+def _hedged(sentence: str, kind: str) -> bool:
+    plain = CITE.sub("", sentence)
+    if HEDGE.search(plain):
+        return True
+    # 单一来源的说法，句子里已经交代了“谁说的”（据……、……显示、……称），读者知道这是一家之言
+    return kind == "single" and bool(ATTRIB.search(plain))
+
+
 def hedge_audit(sections: list[dict], flags: dict) -> dict:
-    """需要写明限制的说法（引用的出处都只有单一来源、不是一手资料，或有争议）有没有写出限制。"""
-    need, missing = [], []
+    """需要写明限制的说法（引用的出处都只有单一来源、不是一手资料，或有争议）有没有写出限制。
+    同一个说法（同一组数字）在文中只需要交代一次：第一次出现写明了，后面复述不再要求。"""
+    need, missing, seen = [], [], {}
     for sec in sections:
+        if sec.get("auto"):
+            continue
         for u, is_analysis in _units(sec.get("md") or ""):
             cites = [int(x) for x in CITE.findall(u)]
-            kind = _risky_kind(cites, flags) if cites and not is_analysis else None
+            kind = _risky_kind(cites, flags, u) if cites and not is_analysis else None
             if not kind:
                 continue
+            key = _num_key(u)
             x = {"section": sec["id"], "sentence": u, "kind": kind, "cites": cites}
+            if key and key in seen:
+                x["repeat"] = True
+                if not seen[key]:
+                    seen[key] = _hedged(u, kind)
+                need.append(x)
+                continue
+            ok = _hedged(u, kind)
+            if key:
+                seen[key] = ok
             need.append(x)
-            if not HEDGE.search(CITE.sub("", u)):
+            if not ok:
                 missing.append(x)
-    has_sec = any(UNCERTAIN_HEAD.search(s.get("heading") or "") for s in sections)
-    return {"needed": len(need), "missing": len(missing), "items": need, "missing_items": missing,
-            "uncertain_section": has_sec}
+    has_sec = any(UNCERTAIN_HEAD.search(s.get("heading") or "") for s in sections if not s.get("auto"))
+    return {"needed": len([x for x in need if not x.get("repeat")]), "missing": len(missing), "items": need,
+            "missing_items": missing, "uncertain_section": has_sec}
 
 
 def _short_claim(sentence: str, limit: int = 46) -> str:
@@ -80,13 +221,23 @@ def _short_claim(sentence: str, limit: int = 46) -> str:
     return t
 
 
+def _note(kind: str, labels: list[str]) -> str:
+    if kind == "disputed":
+        return "（各方数字不一）"
+    return f"（仅见于{labels[0]}）" if len(labels) == 1 else "（尚无一手资料印证）"
+
+
 def ensure_hedges(sections: list[dict], flags: dict) -> dict:
-    """保证“只有单一来源 / 有争议”的说法写明了限制，并且文章里有一节专门写还不确定的内容。
-    1) 引用的出处都只有单一来源、又没写“可能、尚未、据称……”的句子，在出处编号前补一句说明；
-    2) 有需要写明限制的说法、结构里却没有写不确定性的一节：在文末加“还不确定的”一节，逐条列出（带出处）。
+    """保证“只有单一来源 / 有争议”的说法写明了限制，并且文章里有一处交代还不确定的内容。
+    1) 第一次出现、又没交代来源或限制的句子，在出处编号前补一个很短的括注（仅见于××网 / 各方数字不一）；
+       同一组数字后面再出现不重复补；
+    2) 有需要写明限制的说法、结构里却没有写不确定性的一节：在文末加一小段“尚待确认”，列出（带出处）。
     原地修改 sections；返回 {added: 补了几句, section: 是否加了一节}。幂等：再跑一次不会重复添加。"""
     had_auto = any(x.get("auto") for x in sections)
     sections[:] = [x for x in sections if not x.get("auto")]     # 自动生成的那一节每次按最新核实状态重写
+    # 旧版本留下的冗长括注先清掉，按现在的规则重新判断
+    for sec in sections:
+        sec["md"] = HEDGE_NOTE.sub("", sec.get("md") or "")
     aud = hedge_audit(sections, flags)
     added = 0
     by_sec = {s["id"]: s for s in sections}
@@ -96,8 +247,7 @@ def ensure_hedges(sections: list[dict], flags: dict) -> dict:
         if s0 not in (sec.get("md") or ""):
             continue
         labels = list(dict.fromkeys(flags[c]["label"] for c in x["cites"] if c in flags and flags[c]["label"]))
-        note = "（这一说法存在争议，各方说法不一）" if x["kind"] == "disputed" else \
-            f"（目前只有{labels[0] if len(labels) == 1 else '单一来源'}报道，尚待证实）"
+        note = _note(x["kind"], labels)
         m = re.search(r"((?:\[\d{1,2}\])+)\s*([。！？!?；;]?)\s*$", s0)
         new = s0[:m.start()] + note + m.group(1) + m.group(2) if m else s0.rstrip("。") + note + "。"
         sec["md"] = sec["md"].replace(s0, new, 1)
@@ -106,18 +256,20 @@ def ensure_hedges(sections: list[dict], flags: dict) -> dict:
     if aud["needed"] and not aud["uncertain_section"] and not by_sec.get("uncertain"):
         seen, lines = set(), []
         for x in aud["items"]:
+            if x.get("repeat"):
+                continue
             claim = _short_claim(x["sentence"])
             if claim in seen or len(lines) >= 4:
                 continue
             seen.add(claim)
             refs = "".join(f"[{c}]" for c in x["cites"])
             labels = list(dict.fromkeys(flags[c]["label"] for c in x["cites"] if c in flags and flags[c]["label"]))
-            why = "各方说法不一" if x["kind"] == "disputed" else \
-                (f"目前只有{labels[0]}报道" if len(labels) == 1 else "目前只有单一来源报道") + "，没有找到其他独立来源或一手资料印证"
-            lines.append(f"- {claim}：{why}{refs}。")
+            why = "各方给出的数字不一致" if x["kind"] == "disputed" else \
+                (f"目前只见于{labels[0]}" if len(labels) == 1 else "目前只有单一来源")
+            lines.append(f"- {claim}，{why}{refs}。")
         if lines:
-            sections.append({"id": "uncertain", "heading": "还不确定的", "auto": True,
-                             "md": "下面这些说法目前证据不足，读的时候请当作“待证实”：\n\n" + "\n".join(lines)})
+            # 有意保留的可信度设计：真人新闻稿通常不单列，但这里要让读者一眼看到哪些说法还没有第二个来源
+            sections.append({"id": "uncertain", "heading": "尚待确认", "auto": True, "md": "\n".join(lines)})
             made = not had_auto
     return {"added": added, "section": made, "needed": aud["needed"]}
 
@@ -182,8 +334,29 @@ def _doc_rows(ids: list[str]) -> dict:
                                          f"WHERE id IN ({marks})", ids)}
 
 
+def _url_key(u: str) -> str:
+    u = re.sub(r"^https?://(www\.|m\.)?", "", (u or "").strip().lower())
+    return u.split("?")[0].split("#")[0].rstrip("/")
+
+
+def is_excluded(row: dict, exclude: dict | None) -> bool:
+    """对标评测用：真人稿（及其转载）不能进素材，否则比的就是“抄得像不像”。
+    exclude = {"urls": [...], "texts": [真人稿正文]}；同一 URL，或正文一半以上和真人稿重合（转载/通稿），都排除。"""
+    if not exclude or not row:
+        return False
+    if _url_key(row.get("url")) in {_url_key(u) for u in exclude.get("urls") or []}:
+        return True
+    head = (row.get("text") or row.get("summary") or "")[:2000]
+    if len(head) < 60:
+        return False
+    for t in exclude.get("texts") or []:
+        if t and (overlap(head, t) >= 0.5 or overlap(t[:2000], head) >= 0.5):
+            return True
+    return False
+
+
 def select_material(research_task: str, skill: dict, extra_ids: list[str] | None = None,
-                    extra_why: dict | None = None) -> dict:
+                    extra_why: dict | None = None, exclude: dict | None = None) -> dict:
     """按 Skill 选材：先取它指定的阅读清单，再按价值排序补足，并按 prefer 调整顺序。
     返回 {docs: [...], why: {doc_id: 入选理由}, skipped: [...]}。"""
     rk = ranking.latest(research_task)
@@ -217,8 +390,13 @@ def select_material(research_task: str, skill: dict, extra_ids: list[str] | None
     # 清单内的顺序基本保持，prefer 只在相近位置上调整（每个加分相当于提前 3 位）
     pos = {i: k for k, i in enumerate(order)}
     order.sort(key=lambda i: pos[i] - 3 * boost(i))
+    if exclude:
+        rows0 = _doc_rows(order[:150])
+        order = [i for i in order if not is_excluded(rows0.get(i), exclude)]
     chosen, notes = _apply_reference_rules(order, skill, int(mat.get("max_docs") or 10), why)
     for e in extra_ids or []:
+        if exclude and is_excluded(_doc_rows([e]).get(e), exclude):
+            continue
         if e not in chosen:
             chosen.append(e)
             why[e] = (extra_why or {}).get(e) or "写作时发现缺口，补充检索得到"
@@ -232,7 +410,7 @@ def select_material(research_task: str, skill: dict, extra_ids: list[str] | None
         docs.append({"id": i, "title": d["title"] or d["url"], "url": d["url"], "source_id": d["source_id"],
                      "author": d["author"], "published_at": d["published_at"], "kind": d["content_kind"],
                      "text": d["text"] or d["summary"] or "", "novelty": d["novelty"],
-                     "primary": bool((d["meta"] or {}).get("primary")), "value": it.get("value"),
+                     "primary": bool((d["meta"] or {}).get("primary")) and not _self_archive(d["url"]), "value": it.get("value"),
                      "disputed": bool(it.get("disputed")), "unverified": bool(it.get("unverified")),
                      "why": why.get(i, "")})
     for n, d in enumerate(docs, 1):
@@ -333,6 +511,10 @@ def excerpt(doc: dict, focus: str, budget: int = 700) -> str:
 def source_label(doc: dict, names: dict | None = None) -> str:
     dt = parse_date(doc.get("published_at"))
     name = (names or {}).get(doc.get("source_id")) or doc.get("source_id") or ""
+    if doc.get("source_id") in CHANNEL_SOURCES and doc.get("url"):
+        name = site_name(doc["url"]) or name          # “全网搜索”是检索渠道，读者要看的是哪家网站发的
+    if doc.get("url") and _self_archive(doc["url"]):
+        name = "自存档论文，未经同行评审"
     return f"{name}{'，' + dt.strftime('%Y-%m-%d') if dt else ''}"
 
 
@@ -466,11 +648,94 @@ def check(sections: list[dict], docs: list[dict], verdicts: dict | None = None) 
     return {"items": items, "summary": summary, "used": sorted(used)}
 
 
-SEMANTIC_PROMPT = """判断每条“文章句子”能否由给出的“出处原文”支持。允许改写、概括、合并多句；
-但主体、动作、数字、时间、因果方向必须和原文一致，原文没说的推断不算支持。
+SEMANTIC_PROMPT = """你是事实核对员。逐条判断“文章句子”能否由给出的“出处原文”支持。
+标准：允许改写、概括、合并多句；但主体（谁）、动作（做了什么）、数字、时间、范围（全国/某地、全部/部分）、
+因果方向和确定程度（“计划”不能写成“已经”，“可能”不能写成“将会”）必须和原文一致。原文没说的推断不算支持。
+只看给出的原文，不要用你自己知道的知识补充；原文不够判断就选 unsupported。
+
+例子（不是本次要判断的内容）：
+- 原文“预计明年推出”→句子“明年将推出”：partial（把预计写成了确定）
+- 原文“比2024年增长19%”→句子“同比增长19%”：unsupported（比较基准变了）
+- 原文“北京地区销量增长30%”→句子“销量增长30%”：unsupported（范围变了）
+
 {items}
-只输出 JSON：{{"results": [{{"i": 1, "verdict": "supported", "reason": "不超过 20 字"}}]}}
-verdict 只能是 supported（支持）/ partial（大体支持，有轻微引申）/ unsupported（不支持或原文没有）。"""
+只输出 JSON：{{"results": [{{"i": 1, "verdict": "supported", "evidence": "原文里支持它的那一小段，原样复制", "reason": "不超过 20 字"}}]}}
+verdict 只能是 supported（支持）/ partial（大体支持，有轻微引申）/ unsupported（不支持或原文没有）。
+evidence：supported 和 partial 必须给，从出处原文里原样复制 10-60 字，不能改字、不能翻译（英文原文就抄英文），
+中间要省略的用“……”隔开；unsupported 留空。"""
+
+
+def _ev_norm(s: str) -> str:
+    """比对用的规范化：全角半角统一（NFKC）、小写、去掉空白和标点。"""
+    import unicodedata
+    s = unicodedata.normalize("NFKC", s or "").lower()
+    return re.sub(r"[\s\W_]+", "", s)
+
+
+def _segment_match(seg: str, text: str) -> float:
+    """一段依据在原文里的最好匹配程度（0-1）：先找完全相同的子串；找不到就在原文里定位和它最像的一个
+    连续窗口，算两者的相似度。必须是“连续的一段话”像，不能是把原文各处的字拼起来。"""
+    import difflib
+    if not seg:
+        return 0.0
+    if seg in text:
+        return 1.0
+    sm = difflib.SequenceMatcher(None, text, seg, autojunk=False)
+    best = 0.0
+    # 以依据里的几段 4 字片段为锚点，在原文中找到出现位置，再比较锚点附近等长的窗口
+    anchors = {seg[k:k + 4] for k in range(0, max(1, len(seg) - 3), max(1, len(seg) // 6))}
+    starts = set()
+    for a in anchors:
+        pos = text.find(a)
+        while pos >= 0 and len(starts) < 40:
+            starts.add(max(0, pos - seg.find(a)))
+            pos = text.find(a, pos + 1)
+    for st0 in starts:
+        win = text[max(0, st0 - 4): st0 + len(seg) + 4]
+        sm.set_seqs(win, seg)
+        best = max(best, sm.ratio())
+        if best >= 0.95:
+            break
+    return round(best, 3)
+
+
+def evidence_match(evidence: str, texts: list[str], sentence: str = "") -> dict:
+    """核对大模型给的“依据”：
+    1) 依据必须是原文里连续的一段（容忍全半角、标点、空格、个别字差异：最佳窗口相似度 ≥ 0.85）；
+       依据里用“……”省略中间的，拆成几段分别核对，每段都要找得到；
+    2) 依据要和句子相关：句子里有关键数字的，依据里至少要出现其中一个（防止抄一段真实但无关的原文）。
+    返回 {ok, why, score}。"""
+    raw = (evidence or "").strip()
+    segs = [_ev_norm(x) for x in re.split(r"……|\.\.\.|…", raw)]
+    segs = [x for x in segs if len(x) >= 4]
+    if not segs or max(len(x) for x in segs) < 6:
+        return {"ok": False, "why": "没有给出依据", "score": 0.0}
+    text = _ev_norm("\n".join(t or "" for t in texts))
+    scores = [_segment_match(x, text) for x in segs]
+    if min(scores) < 0.85:
+        return {"ok": False, "why": "依据在原文里找不到", "score": min(scores)}
+    nums = [n for n in numbers(CITE.sub("", sentence or "")) if n not in NOISE_NUMS]
+    if nums and not any(num_in(n, _norm(raw)) for n in nums):
+        return {"ok": False, "why": "依据和句子的数字对不上", "score": min(scores)}
+    return {"ok": True, "why": "", "score": min(scores)}
+
+
+def evidence_ok(evidence: str, texts: list[str], sentence: str = "") -> bool:
+    return evidence_match(evidence, texts, sentence)["ok"]
+
+
+def checked_verdict(r: dict, texts: list[str], sentence: str = "") -> dict:
+    """语义核对结果过一道程序检查：判为支持、却给不出原文里真实存在且和句子相关的依据的，降为不支持。
+    降级的都记下来（claimed、evidence、why），可以在判断校准里请人确认这道检查有没有误杀。"""
+    v = r.get("verdict")
+    reason = str(r.get("reason") or "")[:40]
+    if v in ("supported", "partial"):
+        m = evidence_match(str(r.get("evidence") or ""), texts, sentence)
+        if not m["ok"]:
+            return {"verdict": "unsupported", "reason": f"大模型说支持，但{m['why']}", "claimed": v,
+                    "evidence": str(r.get("evidence") or "")[:120], "evidence_score": m["score"]}
+        return {"verdict": v, "reason": reason, "evidence": str(r.get("evidence") or "")[:120]}
+    return {"verdict": v, "reason": reason}
 
 
 def semantic_batch(items: list[dict], docs: list[dict]) -> str:
@@ -519,6 +784,64 @@ def renumber(sections: list[dict]) -> tuple[list[dict], dict]:
     return out, refmap
 
 
+def undash(text: str) -> str:
+    """破折号“——”是 AI 稿最显眼的节奏标记之一：换成逗号（引号里的原话不动）。"""
+    out, depth = [], 0
+    parts = re.split(r"([“”「」])", text or "")
+    for p in parts:
+        if p in "“「":
+            depth += 1
+        elif p in "”」":
+            depth = max(0, depth - 1)
+        elif depth == 0 and "——" in p:
+            p = re.sub(r"\s*——+\s*", "，", p)
+            p = re.sub(r"，([，。；：！？])", r"\1", p)
+            p = re.sub(r"([。；：！？\n])，", r"\1", p)
+        out.append(p)
+    return "".join(out)
+
+
+def clean_title(t: str | None) -> str:
+    """资料标题去掉话题标签符号、站名尾巴等噪声（“共庆华诞#”→“共庆华诞”）。"""
+    t = re.sub(r"#+", "", t or "").strip()
+    t = re.sub(r"\s*[-_|｜]\s*(新浪|凤凰|网易|搜狐|腾讯)[^-_|｜]{0,8}$", "", t)
+    return t.strip(" ·-_|") or (t or "")
+
+
+def clean_heading(h: str | None) -> str:
+    """小标题里不放“【分析】”这类标记，也不要“先说结论：”这类模板前缀。"""
+    h = (h or "").replace(ANALYSIS, "").strip()
+    h = re.sub(r"^(先说结论|结论先行|一句话总结|我们的判断|核心结论|来龙去脉|各方怎么看|三个概念|背景)\s*[:：]\s*", "", h)
+    return h.strip()
+
+
+# 规则能识别的“AI 腔”句式：自然化改写时点名这些句子
+TROPE_PATTERNS = [
+    (re.compile(r"不(?:只|仅)?是[^。！？]{1,30}?而是"), "“不是……而是……”对举"),
+    (re.compile(r"不再是[^。！？]{1,30}?(?:而是|，)"), "“不再是……”"),
+    (re.compile(r"(?:把|将)[^。！？]{1,30}?放在一起看"), "“把……放在一起看”"),
+    (re.compile(r"这意味着|意味着"), "“这意味着”"),
+    (re.compile(r"换挡|结构性变化|新常态|拐点"), "抽象大词"),
+    (re.compile(r"大白话|换句话说|简单来说|说到底"), "口头禅式转述"),
+    (re.compile(r"引用时(?:宜|应|必须|要)|写作时(?:应|宜)|读的时候(?:要|请)|需要注意的是|值得注意的是"), "对作者/读者的说教"),
+    (re.compile(r"真正(?:值得|重要|的增量)|更重要的是|关键在于|核心在于"), "强调套话"),
+    (re.compile(r"[——]{2}|——"), "破折号制造节奏"),
+]
+
+
+def trope_sentences(md: str) -> list[dict]:
+    out = []
+    for p in re.split(r"(?<=[。！？!?])|\n+", md or ""):
+        p = p.strip()
+        if len(p) < 6 or p.startswith("|"):
+            continue
+        for rx, why in TROPE_PATTERNS:
+            if rx.search(p):
+                out.append({"sentence": p, "why": why})
+                break
+    return out
+
+
 def assemble(title: str, sections: list[dict], docs: list[dict], used: set[int], names: dict | None = None,
              note: str | None = None, cover_md: str | None = None) -> str:
     parts = [f"# {title}", ""]
@@ -528,7 +851,7 @@ def assemble(title: str, sections: list[dict], docs: list[dict], used: set[int],
     if note:
         parts += ["", f"> {note}"]
     for s in sections:
-        parts += ["", f"## {s['heading']}", "", (s.get("md") or "").strip()]
+        parts += ["", f"## {clean_heading(s['heading']) or s['heading']}", "", (s.get("md") or "").strip()]
     refs = references_md(sorted(docs, key=lambda d: d["n"]), used, names)
     if refs:
         parts += ["", "## 参考资料", "", refs]
@@ -537,11 +860,17 @@ def assemble(title: str, sections: list[dict], docs: list[dict], used: set[int],
 
 # 写作说明混进正文（大模型把给它的指令当成内容写了出来）：这类句子直接删掉
 META_TEXT = re.compile(r"记忆中的事实|本节(暂不|不再|将|只|不|所)|本文所依据的(材料|素材)|所依据的材料中|暂不引用|素材(中|里|编号)|资料编号|出处编号|核对(发现|结果)|上一稿|"
-                       r"按(核对|要求)改写|根据(提示|要求)|（来源：记忆）|未能确认其具体出处")
+                       r"按(核对|要求)改写|根据(提示|要求)|（来源：记忆）|未能确认其具体出处|争议标记|"
+                       r"^(?:【分析】)?\s*(?:引用时|写作时|读的时候)(?:宜|应|要|必须|请)")
+
+
+# 句子后半截是给作者/读者的提醒（“……，引用时宜以官方口径为准”）：只删这半截，前半截的事实保留
+META_CLAUSE = re.compile(r"[，,；;]\s*(?:引用时|写作时|转述时|读的时候|使用时)[^。！？]*(?=[。！？])")
 
 
 def strip_meta(md: str) -> tuple[str, list[str]]:
-    removed = []
+    removed = [m.group(0).lstrip("，,；; ") for m in META_CLAUSE.finditer(md or "")]
+    md = META_CLAUSE.sub("", md or "")
     out_lines = []
     for line in (md or "").split("\n"):
         if line.lstrip().startswith("|"):

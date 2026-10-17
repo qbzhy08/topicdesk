@@ -239,7 +239,7 @@ def edit(ctx):
         r = writing.ensure_hedges(st["sections"], flags)
         before = f"需要写明限制的说法 {before_aud['needed']} 句，其中没写的 {before_aud['missing']} 句"
         ok = sum(1 for x in logs if x.get("doc"))
-        after = (f"找到印证 {ok} 条（补上出处）；" if logs else "") + f"写明限制 {r['added']} 句" + ("，新增“还不确定的”一节" if r["section"] else "")
+        after = (f"找到印证 {ok} 条（补上出处）；" if logs else "") + f"写明限制 {r['added']} 句" + ("，新增“尚待确认”一节" if r["section"] else "")
         summary = "核实单一来源的说法：" + (after if ok or r["added"] or r["section"] else "原文已经都写明了，没有改动")
     elif op == "cover_swap":
         nf = _new_fig(p, st, None, 0)
@@ -380,6 +380,14 @@ def save(ctx):
                 source={"by": "user", "confirmed": True, "article": st["article_id"], "base_version": st["base_version"]},
                 meta={"type": "feedback", "from": "审阅修改"}, actor="user", task_id=ctx.task_id)
             ctx.observe(f"修改意见写入长期记忆（{'只用于 Skill「' + st['skill']['name'] + '」' if scope != 'all' else '所有写作'}）：{text}")
+    if p["op"] == "text" and e.get("before") and e.get("after"):
+        # 编辑亲手改的句子存成写作示例（改前 → 改后），以后“去 AI 味”时当示范
+        from .. import edit_examples as EX
+        got = EX.record(e["before"], e["after"], skill=st["skill"]["id"], article_id=st["article_id"],
+                        topic=ctx.topic, user_id=ctx.user_id)
+        if got:
+            ctx.observe(f"记下 {len(got)} 条写法示例：" + "；".join(f"「{x['before'][:16]}…」→「{x['after'][:16]}…」（{x['kind']}）"
+                                                         for x in got[:3]))
     st["revisions"] = (st.get("revisions") or []) + [{
         "op": p["op"], "summary": e["summary"], "instruction": e.get("instruction"), "base_version": st["base_version"],
         "task_id": ctx.task_id, "at": time.time(), "feedback_memory": fb_id, "check_delta": e.get("check_delta")}]

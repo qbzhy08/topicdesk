@@ -113,9 +113,15 @@ def _credibility(d: dict, sig: dict) -> tuple[float, list[str], dict]:
     meta = d["meta"] or {}
     reasons, info = [], {}
     score = 0.35
-    if meta.get("primary"):
+    from .collect.sources import self_archive
+    unreviewed = self_archive(d["url"])
+    if meta.get("primary") and not unreviewed:
         score += 0.3
         reasons.append("一手来源（论文/仓库/官方）")
+    if unreviewed:
+        score -= 0.2
+        reasons.append("自存档论文（Zenodo 等，任何人可上传、未经同行评审），不算一手资料")
+        info["unreviewed"] = True
     n = len(sig["events"].get(d["event_id"], set()) | {source_key(d["url"], d["author"])}) if d["event_id"] else 1
     info["independent"] = n
     if n >= 2:
@@ -192,7 +198,8 @@ def score_pool(pool: list[dict], *, min_rel: float = 0.4, weights: dict | None =
         items.append({
             "id": d["id"], "title": d["title"] or d["url"], "url": d["url"], "source_id": d["source_id"],
             "published_at": d["published_at"], "event_id": d["event_id"], "duplicate_of": d["duplicate_of"],
-            "novelty": d["novelty"], "content_kind": d["content_kind"], "primary": bool(meta.get("primary")),
+            "novelty": d["novelty"], "content_kind": d["content_kind"], "primary": bool(meta.get("primary")) and not cinfo.get("unreviewed"),
+            "unreviewed": bool(cinfo.get("unreviewed")),
             "features": f, "value": round(value, 4), "reasons": reasons,
             "independent": cinfo.get("independent", 1), "disputed": bool(cinfo.get("disputed")),
             "unverified": bool(fl.get("unverified")),

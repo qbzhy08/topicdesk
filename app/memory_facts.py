@@ -16,7 +16,7 @@ import time
 from . import db, llm
 from . import memory as mem
 from .collect.dedup import title_sim
-from .collect.sources import is_primary
+from .collect.sources import is_primary, self_archive
 
 NUM = re.compile(r"\d+(?:\.\d+)?\s*(?:%|K|k|M|B|万|亿|倍|个|款|项|篇|tokens?|token)?")
 SENT_SPLIT = re.compile(r"(?<=[。！？!?；;])\s*|\n+")
@@ -38,9 +38,20 @@ def numbers(text: str) -> list[str]:
     return sorted(out)
 
 
+YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?=\s*年)")
+_YEAR_LETTERS = str.maketrans("0123456789", "abcdefghij")
+
+
+def years(text: str) -> set[str]:
+    """句子里提到的年份（“比2024年增长”“2025年”）。年份不同 = 比较基准不同 = 不是同一件事。"""
+    return set(YEAR.findall(text or ""))
+
+
 def skeleton(text: str) -> str:
-    """去掉数字和标点后的骨架，用来判断两句话是否在说同一件事。"""
-    s = NUM.sub("#", ORDINAL.sub("", text or ""))
+    """去掉数字和标点后的骨架，用来判断两句话是否在说同一件事。
+    年份保留下来（换成字母，避免被当成普通数字抹掉）：“比2024年增长19%”和“比2025年增长6.5%”不是一回事。"""
+    s = YEAR.sub(lambda m: "y" + m.group(0).translate(_YEAR_LETTERS), ORDINAL.sub("", text or ""))
+    s = NUM.sub("#", s)
     return re.sub(r"[\s\W_]+", "", s.lower())
 
 
@@ -138,7 +149,7 @@ def verify(mid: str, task_id=None) -> dict:
         if root in roots or d["duplicate_of"]:
             reprints += 1          # 转载：同一个根来源只算一次
         roots.add(root)
-        primary = primary or bool(meta.get("primary")) or is_primary(d["url"])
+        primary = primary or ((bool(meta.get("primary")) or is_primary(d["url"])) and not self_archive(d["url"]))
     n = len(roots)
     meta = dict(m["meta"] or {})
     old_verify = meta.get("verify")
@@ -188,6 +199,68 @@ def _same_root(doc_id: str, mid: str) -> bool:
 
 # ---------------------------------------------------------------- 合并
 
+def _doc_texts(doc_ids) -> list[str]:
+    out = []
+    for i in dict.fromkeys(x for x in doc_ids if x):
+        r = db.query_one("SELECT text FROM documents WHERE id=?", (i,))
+        if r and r.get("text"):
+            out.append(r["text"])
+    return out
+
+
+def different_points(text_a: str, text_b: str, doc_ids=()) -> str | None:
+    """两句骨架相近、数字不同的话，是不是其实在说不同的点（而不是互相矛盾）。返回原因，不是则 None。
+    - 比较基准年份不同（“比2024年增长19.0%”“比2025年增长6.5%”）；
+    - 两组数字同时出现在同一篇资料里（同一份通报里本来就并列给出）。"""
+    ya, yb = years(text_a), years(text_b)
+    if ya and yb and ya != yb:
+        return "比较基准不同"
+    na, nb = numbers(text_a), numbers(text_b)
+    if na and nb:
+        want = [_norm(n) for n in set(na) | set(nb)]
+        for t in _doc_texts(doc_ids):
+            tn = _norm(t)
+            if all(w in tn for w in want):
+                return "同一篇资料里并列给出"
+    return None
+
+
+def _evidence_docs(mid: str) -> list[str]:
+    return [e["doc_id"] for e in db.query("SELECT doc_id FROM evidence WHERE claim_id=?", (mid,))]
+
+
+def recheck_disputes(topic: str, task_id: str | None = None) -> list[dict]:
+    """复查已有的争议：早期规则把“不同年份的同比”“同一篇通报里并列的数字”误判成了冲突。
+    误判的争议作废，两条事实按证据重新计算核验状态（包括被错误“否定”的那一条）。"""
+    out = []
+    for status in ("active", "stale", "resolved"):
+        for dsp in mem.list_memories(scope="topic", topic=topic, kind="dispute", status=status):
+            if (dsp["meta"] or {}).get("misjudged"):
+                continue
+            ids = (dsp["meta"] or {}).get("facts") or dsp["derived_from"] or []
+            facts = [mem.get(i) for i in ids]
+            facts = [f for f in facts if f]
+            if len(facts) < 2:
+                continue
+            a, b = facts[:2]
+            why = different_points(a["content"], b["content"], _evidence_docs(a["id"]) + _evidence_docs(b["id"]))
+            if not why:
+                continue
+            meta = dict(dsp["meta"] or {})
+            meta["misjudged"] = why
+            mem.update(dsp["id"], {"status": "resolved", "meta": meta, "note": f"不是冲突：{why}"},
+                       "resolve", {"misjudged": why}, task_id=task_id)
+            for f in (a, b):
+                fm = dict(f["meta"] or {})
+                if fm.get("verify") in ("disputed", "refuted"):
+                    fm.pop("verify", None)
+                    mem.update(f["id"], {"meta": fm}, "verify", {"by": "dispute_recheck", "why": why},
+                               task_id=task_id)
+                    verify(f["id"], task_id)
+            out.append({"dispute": dsp["id"], "why": why, "facts": [a["content"], b["content"]]})
+    return out
+
+
 def merge_claim(topic: str, c: dict, task_id: str, stats: dict) -> str:
     sk, nums = skeleton(c["text"]), numbers(c["text"])
     facts = [m for m in mem.list_memories(scope="topic", topic=topic, kind="fact", status="alive")]
@@ -210,9 +283,10 @@ def merge_claim(topic: str, c: dict, task_id: str, stats: dict) -> str:
             verify(best["id"], task_id)
             return best["id"]
         old_doc = _is_newer_version(c["doc"], best["id"])
-        same_src = _same_root(c["doc"], best["id"])
+        same_src = _same_root(c["doc"], best["id"]) or bool(
+            different_points(c["text"], best["content"], [c["doc"]] + _evidence_docs(best["id"])))
         if not old_doc and same_src:
-            # 同一篇资料（或其转载）里的不同数字是在说不同的点，不构成冲突：作为新事实保存
+            # 同一篇资料（或其转载）里的不同数字、不同年份的同比，是在说不同的点，不构成冲突：作为新事实保存
             nid = mem.add("topic", "fact", c["text"], topic=topic, mkey=sk[:40],
                           source={"doc": c["doc"], "task": task_id, "by": c.get("by")},
                           time_sensitive=bool(c.get("time_sensitive")), recheck_at=recheck,
@@ -278,12 +352,16 @@ def resolve_disputes(topic: str, task_id: str) -> list[dict]:
             mem.update(dsp["id"], {"status": "resolved", "note": "一方已失效"}, "resolve", {}, task_id=task_id)
             continue
 
+        from .calibrate import dispute_score, params
+        pd = params("dispute")          # 权重和分差门槛可以按人工裁决标注调整（判断校准页）
+
         def score(f):
             m = f["meta"] or {}
-            return (2 if m.get("primary") else 0) + m.get("independent", 0) + (2 if m.get("corrected_doc") else 0)
+            return dispute_score({"primary": m.get("primary"), "independent": m.get("independent", 0),
+                                  "corrected": m.get("corrected_doc")}, pd)
         a, b = sorted(facts, key=score, reverse=True)[:2]
         sa, sb = score(a), score(b)
-        if sa - sb >= 2:
+        if sa - sb >= pd["gap"]:
             for f, v in ((a, "supported"), (b, "refuted")):
                 meta = dict(f["meta"] or {})
                 meta["verify"] = v

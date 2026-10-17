@@ -67,7 +67,7 @@ def _pages(base, n):
         tasks = []
     whole = fp(tasks)          # 固定页面（资料库、记忆、评测列表……）跟着整体数据走
     out = [(x, h, whole) for x, h in [("新主题", "#/new"), ("资料库", "#/library"), ("记忆", "#/memory"), ("写法 Skill", "#/skills"),
-           ("新建 Skill", "#/skills/new"), ("评测", "#/experiments"), ("信息源", "#/sources"), ("设置", "#/settings")]]
+           ("新建 Skill", "#/skills/new"), ("评测", "#/experiments"), ("判断校准", "#/calibrate"), ("判断校准·争议", "#/calibrate?k=dispute"), ("判断校准·更新", "#/calibrate?k=update"), ("信息源", "#/sources"), ("设置", "#/settings")]]
     try:
         by_graph = {}
         for t in tasks:

@@ -256,7 +256,7 @@ const store = {
 // 等同浏览器的后退、前进；返回时恢复之前看到的位置；旁边显示“上一页 › 当前页”，点上一页名称也能返回
 const PAGE_KIND = [[/^#\/task\//, "任务"], [/^#\/article\//, "文章"], [/^#\/doc\//, "资料"], [/^#\/library/, "资料库"],
   [/^#\/memory\/demo/, "记忆演示"], [/^#\/memory\//, "记忆"], [/^#\/memory/, "记忆"], [/^#\/sources/, "信息源"],
-  [/^#\/settings/, "设置"], [/^#\/skills\/new/, "新建 Skill"], [/^#\/skills\/edit/, "编辑 Skill"], [/^#\/skills/, "写法 Skill"], [/^#\/experiments\//, "实验报告"], [/^#\/trust\//, "可信度"], [/^#\/experiments/, "评测"], [/^#\/blind/, "读者盲评"]];
+  [/^#\/settings/, "设置"], [/^#\/skills\/new/, "新建 Skill"], [/^#\/skills\/edit/, "编辑 Skill"], [/^#\/skills/, "写法 Skill"], [/^#\/experiments\//, "实验报告"], [/^#\/trust\//, "可信度"], [/^#\/experiments/, "评测"], [/^#\/blind/, "读者盲评"], [/^#\/calibrate/, "判断校准"]];
 const hist = { labels: {}, scroll: {}, traverse: false, last: location.hash || "#/" };
 try { Object.assign(hist.labels, JSON.parse(sessionStorage.getItem("td:labels") || "{}")); } catch { /* */ }
 
@@ -360,7 +360,7 @@ function route() {
     return;
   }
   const view = h.startsWith("#/library") ? "library" : h.startsWith("#/doc/") ? "library"
-    : h.startsWith("#/skills") ? "skills" : h.startsWith("#/experiments") || h.startsWith("#/blind") ? "experiments"
+    : h.startsWith("#/skills") ? "skills" : h.startsWith("#/experiments") || h.startsWith("#/blind") || h.startsWith("#/calibrate") ? "experiments"
     : h.startsWith("#/memory") ? "memory"
     : h.startsWith("#/sources") ? "sources" : h.startsWith("#/settings") ? "settings" : "tasks";
   $$("#nav a").forEach((a) => a.classList.toggle("on", a.dataset.nav === view));
@@ -387,6 +387,7 @@ function route() {
   if (ex) return showExperiment(ex[1]);
   const bl = h.match(/^#\/blind\/(t_\w+)/);
   if (bl) return showBlind(bl[1]);
+  if (h.startsWith("#/calibrate")) return showCalibrate(new URLSearchParams(h.split("?")[1] || ""));
   if (h.startsWith("#/experiments")) return showExperiments();
   if (h.startsWith("#/sources")) return showSources();
   if (h.startsWith("#/settings")) return showSettings();
@@ -447,7 +448,7 @@ function showComposer() {
   const hello = hour < 6 ? "夜深了" : hour < 11 ? "早上好" : hour < 14 ? "中午好" : hour < 18 ? "下午好" : "晚上好";
   const el = $("#detail");
   el.innerHTML = `<div class="hero">
-      <p class="hero-hello"><span class="spark big">✳</span>${hello}</p>
+      <p class="hero-hello"><span class="seal big" aria-hidden="true"></span>${hello}</p>
       <h1 class="hero-title">${GREETINGS[Math.floor(Math.random() * GREETINGS.length)]}</h1>
       <div class="hero-slot"></div>
       <div class="hero-examples" id="hero-examples"></div>
@@ -938,7 +939,7 @@ function renderSteps(steps) {
       ${s.thought ? `<p class="thought">${esc(s.thought)}</p>` : ""}
       ${s.summary ? `<p class="obs">${esc(s.summary)}</p>` : ""}
       ${(s.tool_calls || []).map((c) => `
-        <details class="tc"><summary><span class="st-${c.status}">${esc(c.tool)} · ${esc(c.status)}</span> · ${c.latency_ms ?? 0}ms <small>${esc(toolHint(c))}</small></summary>
+        <details class="tc"><summary><span class="st-${c.status}">${esc(c.tool)} · ${esc(c.status === "shared" ? "复用其他任务的结果" : c.status)}</span> · ${c.latency_ms ?? 0}ms <small>${esc(toolHint(c))}</small></summary>
           <pre>输入 ${esc(JSON.stringify(c.input, null, 1))}</pre>
           ${c.error ? `<pre class="error">${esc(c.error)}</pre>` : `<pre>输出 ${esc(c.output_preview ?? JSON.stringify(c.output))}</pre>`}
         </details>`).join("")}
@@ -1039,7 +1040,7 @@ function docRow(d) {
       ${d.version > 1 ? `<span class="tag">v${d.version}</span>` : ""}
       ${d.primary_src ? `<span class="tag pri">一手</span>` : ""}
       ${d.via_browser ? `<span class="tag">浏览器渲染</span>` : ""}
-      ${d.relation === "reprint" ? `<span class="tag">转载</span>` : d.relation === "same_event" ? `<span class="tag">同事件</span>` : ""}
+      ${d.relation === "reprint" ? `<span class="tag">转载</span>` : d.relation === "rewrite" ? `<span class="tag" title="逐句改写自同一篇稿子，不算独立来源">洗稿/改写</span>` : d.relation === "same_event" ? `<span class="tag">同事件</span>` : ""}
       ${d.images_kept ? `<span class="tag">图 ${d.images_kept}</span>` : ""}
     </div></a>`;
 }
@@ -1213,7 +1214,7 @@ async function showDoc(id) {
     ${fetchCard(d)}
     ${d.versions.length > 1 ? `<h3>版本历史</h3><ul class="small">${d.versions.map((v) => `<li><a href="#/doc/${v.id}">v${v.version}</a> · ${fmtTime(v.fetched_at)} · ${v.status === "superseded" ? "已被新版本取代" : "当前"}${v.change ? ` · 相似度 ${v.change.similarity}${v.change.numbers_removed?.length ? ` · 数字变化：${esc(v.change.numbers_removed.join(","))} → ${esc(v.change.numbers_added.join(","))}` : ""}` : ""}
       ${v.change?.sentences_added?.length ? `<br><small>新增：${esc(v.change.sentences_added.slice(0, 2).join(" / "))}</small>` : ""}</li>`).join("")}</ul>` : ""}
-    ${d.reprints.length ? `<h3>转载 / 重复</h3>${d.reprints.map(docRow).join("")}` : ""}
+    ${d.reprints.length ? `<h3>转载 / 洗稿 / 重复</h3>${d.reprints.map(docRow).join("")}` : ""}
     ${d.same_event.length ? `<h3>同一事件的其他报道</h3>${d.same_event.map(docRow).join("")}` : ""}
     ${imgs.length ? `<h3>图片（保留 ${imgs.filter((i) => i.status === "kept").length} / 共 ${imgs.length}）</h3>
       <div class="img-grid">${imgs.map((i) => `
@@ -1303,10 +1304,11 @@ async function showMemoryHome(qs) {
   const topics = await api("/api/memory/topics");
   const topic = qs.get("topic") || topics[0]?.topic || "";
   const showDead = qs.get("all") === "1";
-  const [prefs, rows, preview] = await Promise.all([
+  const [prefs, rows, preview, examples] = await Promise.all([
     api("/api/memories?scope=user&kind=preference&status=alive"),
     topic ? api(`/api/memories?scope=topic&topic=${encodeURIComponent(topic)}${showDead ? "" : "&status=alive"}`) : [],
-    topic ? api(`/api/memory/preview?topic=${encodeURIComponent(topic)}`) : null]);
+    topic ? api(`/api/memory/preview?topic=${encodeURIComponent(topic)}`) : null,
+    api("/api/edit_examples").catch(() => [])]);
   const by = (k) => rows.filter((m) => m.kind === k);
   el.innerHTML = `
     <div class="detail-head"><div><p class="kicker">记忆</p><h1>下次再来，别从头开始</h1>
@@ -1321,6 +1323,13 @@ async function showMemoryHome(qs) {
         <input name="applies_to" placeholder="适用范围（可空=全部，如 topic:主题名）">
         <button>保存为长期偏好</button></form>
       <p class="small">同一类型再次保存会更正旧值（旧值保留在变化记录里）。</p>
+    </div>
+    <div class="card"><h3>写法示例（来自你亲手改过的句子）<small class="muted"> ${examples.length} 条</small></h3>
+      <p class="small">在文章审阅页“直接修改”一段后，改动的句子会存成“改前 → 改后”。以后去 AI 味改写时，挑和那一节最像的 2-3 条当示范。
+      改数字属于事实更正，不算写法，不会存。觉得某条只是一时口味，可以删掉。</p>
+      ${examples.length ? `<ul class="ex-list">${examples.slice(0, 30).map((x) => `<li><span class="del">${esc(x.before_text)}</span><br><span class="add">${esc(x.after_text)}</span>
+        <small class="muted">${esc(x.kind || "")} · ${x.skill ? `Skill ${esc(x.skill)} · ` : ""}用过 ${x.used} 次</small>
+        <button type="button" class="ghost sm" data-ex-del="${x.id}">删除</button></li>`).join("")}</ul>` : `<p class="small muted">还没有。去任意文章的审阅页直接改一段试试。</p>`}
     </div>
     <div class="filters">
       <select id="mem-topic">${topics.map((t) => `<option ${t.topic === topic ? "selected" : ""}>${esc(t.topic)}</option>`).join("") || "<option>暂无主题记忆</option>"}</select>
@@ -1353,6 +1362,11 @@ async function showMemoryHome(qs) {
   };
   sel.onchange = syncInput;
   syncInput();
+  $$("[data-ex-del]", el).forEach((b) => (b.onclick = async () => {
+    b.disabled = true;
+    try { await api(`/api/edit_examples/${b.dataset.exDel}`, { method: "DELETE" }); b.closest("li").remove(); }
+    catch (err) { alert(err.message); b.disabled = false; }
+  }));
   $("#pref-form").onsubmit = async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
@@ -1746,11 +1760,11 @@ async function showTrust(id) {
       <section class="card trust-q"><h3>① 资料可靠吗？ ${verdict(R.events_multi > 0 && R.primary > 0, R.primary > 0 ? "有一手资料、有多来源印证" : "缺少一手资料")}</h3>
         <ul>
           <li>收集到 <b>${R.docs}</b> 篇，来自 <b>${R.sources}</b> 个来源；其中一手资料（论文、官方、代码仓库）<b>${R.primary}</b> 篇（${pc(R.primary_rate)}）。</li>
-          <li>识别出 <b>${R.duplicates}</b> 篇转载/重复报道，已归并到原文，<b>不重复计数</b>。</li>
+          <li>识别出 <b>${R.duplicates}</b> 篇转载/重复报道，已归并到原文，<b>不重复计数</b>（转载、洗稿、同一事件判得准不准，可以在 <a href="#/calibrate">判断校准</a> 里用人工标注检验）。</li>
           <li>${R.off_topic ? `去掉相关度低的 ${R.off_topic} 篇后，` : ""}相关资料归并成 <b>${R.events}</b> 个事件：<b>${R.events_multi}</b> 个有 2 个以上独立来源印证，<b>${R.events_single}</b> 个只有单一来源且不是一手资料。</li>
           ${R.top_reprint ? `<li>报道最多的事件「${esc(R.top_reprint.title.slice(0, 40))}」有 ${R.top_reprint.docs} 篇，按独立来源算是 <b>${R.top_reprint.independent}</b> 个。</li>` : ""}
           <li>写入长期记忆的事实：${facts}。</li>
-          ${R.examples_single.length ? `<li>只有单一来源的例子：${R.examples_single.map(esc).join("；")}（排序时可信度降权，写作时放进“还不确定的”）。</li>` : ""}
+          ${R.examples_single.length ? `<li>只有单一来源的例子：${R.examples_single.map(esc).join("；")}（排序时可信度降权，写作时写明“仅见于某网站”，并列进“尚待确认”）。</li>` : ""}
           ${R.primary ? "" : `<li class="gap">这次没有找到一手资料。${d.primary_search?.official_used ? "已经专门搜过政府、监管、交易所公告、论文和官方新闻稿，仍没有——相关说法都按“待证实”处理。"
             : d.primary_search?.websearch ? "这次检索开始时还没有“官方与一手披露”来源；重新检索一次，会专门去搜政府、监管、交易所公告、论文和官方新闻稿。"
             : "要专门搜政府、监管、交易所公告和官方新闻稿，需要先在“设置”里配置搜索 API（博查 / Tavily / Brave 任一）。"}</li>`}
@@ -1769,13 +1783,13 @@ async function showTrust(id) {
           <li>以「<a href="#/article/${a0.id}">${esc(a0.title)}</a>」（${esc(a0.skill || "")}，第 ${a0.version} 版）为例：原始资料约 <b>${a0.gain.minutes_sources}</b> 分钟才读得完，文章 <b>${a0.gain.minutes_article}</b> 分钟。</li>
           <li><b>${a0.gain.cross_source_paras}</b> 段把两个以上来源放在一起交叉印证；<b>${a0.analysis_marked}</b> 段是单独标出的判断（【分析】），和来源原话分开。</li>
           <li>出处支持率 <b>${pc(a0.fidelity.support_rate)}</b>，数字错误 <b>${a0.fidelity.number_errors}</b> 处，待确认 <b>${a0.fidelity.problems}</b> 处。</li>
-          <li>限制条件和争议：只有单一来源、或有争议的说法 <b>${a0.hedge_needed}</b> 句，${a0.hedge_missing ? `<span class="gap">其中 ${a0.hedge_missing} 句没写明限制（如「${esc(a0.hedge_examples[0] || "")}」）</span>` : a0.hedge_needed ? "<b>都写明了</b>“目前只有某来源报道 / 存在争议”" : "没有需要特别说明的"}；全文共 ${a0.caveats} 句带“可能、尚未、仅、据称、有争议”这类限制。
-            ${a0.hedge_needed ? (a0.has_uncertain_section ? "结构里有专门写“还不确定的”一节。" : "<span class='gap'>结构里没有专门写不确定性的一节。</span>") : ""}
+          <li>限制条件和争议：只有单一来源、或有争议的说法 <b>${a0.hedge_needed}</b> 句，${a0.hedge_missing ? `<span class="gap">其中 ${a0.hedge_missing} 句没写明限制（如「${esc(a0.hedge_examples[0] || "")}」）</span>` : a0.hedge_needed ? "<b>都写明了</b>（交代了出处方、“仅见于某网站”或“各方数字不一”）" : "没有需要特别说明的"}；全文共 ${a0.caveats} 句带“可能、尚未、仅、据称、有争议”这类限制。
+            ${a0.hedge_needed ? (a0.has_uncertain_section ? "结构里有专门交代不确定内容的一节。" : "<span class='gap'>结构里没有专门写不确定性的一节。</span>") : ""}
             ${hedgeOk(a0) ? "" : `<br><button type="button" class="ghost small" data-hedge="${a0.id}" data-v="${a0.version}">找资料核实，找不到就写明限制（存为新版本）</button>`}</li>
           ${a0.corroborations?.length ? `<li>给单一来源的说法找印证：查了 <b>${a0.corroborations.length}</b> 条，找到 <b>${a0.corroborations.filter((x) => x.found).length}</b> 条——
-            ${a0.corroborations.map((x) => `「${esc((x.claim || "").slice(0, 24))}」${x.found ? `✓ <a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.result.replace(/^找到/, "").slice(0, 40))}</a>` : "✗ 没找到，写明“尚待证实”"}`).join("；")}</li>` : ""}
+            ${a0.corroborations.map((x) => `「${esc((x.claim || "").slice(0, 24))}」${x.found ? `✓ <a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.result.replace(/^找到/, "").slice(0, 40))}</a>` : "✗ 没找到，写明“仅见于某网站”"}`).join("；")}</li>` : ""}
           <li>平均句长 ${a0.comprehension.avg_sentence_len} 字，长句占 ${pc(a0.comprehension.long_sentence_ratio)}，未解释的外文术语 ${a0.comprehension.unexplained_terms} 个。</li>
-        </ul>${U.articles.length > 1 ? `<p class="small">这批资料写的 ${U.articles.length} 篇，限制条件是否写全：${U.articles.map((x) => `<a href="#/article/${x.id}">${esc(x.skill || x.title.slice(0, 12))}</a> ${hedgeOk(x) ? "✓" : `<b class="gap">缺 ${x.hedge_missing || "“还不确定的”一节"}${x.hedge_missing ? " 句" : ""}</b> <button type="button" class="linkish" data-hedge="${x.id}" data-v="${x.version}">核实并补上</button>`}`).join("、")}。</p>` : ""}` : `<p class="small muted">这次检索还没有写成文章。</p>`}
+        </ul>${U.articles.length > 1 ? `<p class="small">这批资料写的 ${U.articles.length} 篇，限制条件是否写全：${U.articles.map((x) => `<a href="#/article/${x.id}">${esc(x.skill || x.title.slice(0, 12))}</a> ${hedgeOk(x) ? "✓" : `<b class="gap">缺 ${x.hedge_missing || "“尚待确认”一节"}${x.hedge_missing ? " 句" : ""}</b> <button type="button" class="linkish" data-hedge="${x.id}" data-v="${x.version}">核实并补上</button>`}`).join("、")}。</p>` : ""}` : `<p class="small muted">这次检索还没有写成文章。</p>`}
         ${U.experiments.length ? `<p class="small">用这批资料做过对照实验：${U.experiments.map((x) => `<a href="#/experiments/${x.id}">${esc(x.topic.replace(/^评测实验：/, ""))}<small>（${fmtTime(x.created_at)}${x.status !== "done" ? " · " + esc(STATUS[x.status] || x.status) : ""}）</small></a>`).join("、")}（初稿与优化稿的保真度、信息密度、读者盲评都在里面）。</p>` : `<p class="small muted">还没有用这批资料做对照实验；可以在“评测”里做，用读者盲评回答“到底有没有更好懂”。</p>`}</section>
       <section class="card trust-q"><h3>④ 过程可追溯、可复现吗？ ${verdict(T.steps > 0 && T.checkpoints > 0, "每一步都有记录")}</h3>
         <ul>
@@ -1792,12 +1806,12 @@ async function showTrust(id) {
         <p><b>不会。</b>系统数的是<b>独立来源</b>，不是篇数：转载、洗稿、同一事件的重复报道会被归并（这次归并了 ${R.duplicates} 篇），同一平台同一作者算一个来源。
           只有单一来源、又不是一手资料的说法，排序时可信度降权、标“待核实”；写入长期记忆时状态是“待核实”，要等到第二个独立来源或一手资料出现才变成“已证实”。
           ${R.top_reprint ? `这次报道最多的事件有 ${R.top_reprint.docs} 篇，只算 ${R.top_reprint.independent} 个独立来源。` : ""}
-          写作时，只有单一来源的说法会先去别的网站和官方渠道找印证——找到才算数；找不到的放进“还不确定的”，并写明“目前只有某来源报道，尚待证实”。</p>
+          写作时，只有单一来源的说法会先去别的网站和官方渠道找印证——找到才算数；找不到的写明“据某某”或“仅见于某网站”（同一说法只交代一次），并列进文末“尚待确认”。</p>
         <p class="small muted">我们的取舍：宁可把真消息暂时标成“待核实”，也不让转载量冒充证据。代价是突发新闻的第一时间判断会保守一些。</p></details>
       <details class="card" open><summary>改写更流畅，却丢掉了限制条件与争议，价值增加了吗？</summary>
         <p><b>没有，反而是减分。</b>所以“降 AI 腔”这一步有两道闸：改完逐句重新核对出处，改出问题的节退回原稿；
           并且<b>限制条件和争议的句子数只要变少，这一节就不采用改写</b>（“可能、尚未、仅、据称、有争议、样本”这类词被顺掉，就退回）。
-          成稿前还有两道：只有单一来源的说法，先去别的网站和官方渠道找印证，找到就补上出处；找不到的写明“目前只有某来源报道，尚待证实”，并在文末加“还不确定的”一节逐条列出。
+          成稿前还有两道：只有单一来源的说法，先去别的网站和官方渠道找印证，找到就补上出处；找不到的写明“据某某”或“仅见于某网站”，并在文末“尚待确认”里逐条列出。
           ${a0 ? (hedgeOk(a0) ? `这次的文章「${esc(a0.title)}」里需要说明的 ${a0.hedge_needed} 句都写明了。` : `这次的文章「${esc(a0.title)}」是加这道闸之前写的，还有 ${a0.hedge_missing} 句没写明，上面③标了红，可以一键补上。`) : ""}评测实验里还有“限制与争议/千字”指标，专门看改写有没有把它们丢掉。</p>
         <p class="small muted">我们的取舍：流畅度让位于准确的不确定性。读者宁可读一句“目前只有单一来源”，也不该读一句漂亮但过度确定的话。</p></details>
       <details class="card" open><summary>昨天交付的结论今天被更正，Agent 能否记起并说明变化？</summary>
@@ -1867,7 +1881,8 @@ async function showExperiments() {
   const failedIn = {};                 // 素材在之前的实验里写失败过：选的时候标出来
   list.forEach((x) => x.failed.forEach((f) => (failedIn[f.research_task] ||= []).push(f.error || "写作失败")));
   el.innerHTML = `<div class="detail-head"><div><p class="kicker">评测</p><h1>评测实验</h1>
-      <p class="meta">用同一批素材写出不同版本，比较事实保真、信息密度、表达自然、理解成本和 AIGC 检测结果；也可以比较几种 Skill 的选材和表达。</p></div></div>
+      <p class="meta">用同一批素材写出不同版本，比较事实保真、信息密度、表达自然、理解成本和 AIGC 检测结果；也可以比较几种 Skill 的选材和表达。
+      系统的自动判断（转载/洗稿、同一事件、网页更新、争议裁决）准不准，到 <a href="#/calibrate">判断校准</a> 用人工标注检验和调整。</p></div></div>
     <form class="card ex-new" id="ex-new">
       <h3>新建实验</h3>
       <div class="ex-kind"><label><input type="radio" name="kind" value="ablation" checked> <b>初稿 vs 优化稿 + 消融</b>：同一 Skill，只改写作步骤</label>
@@ -2048,7 +2063,11 @@ function renderExperiment(id, r, me) {
   el.innerHTML = `<div class="detail-head"><div><p class="kicker"><a href="#/experiments">评测</a> · ${r.kind === "skills" ? "多种 Skill 对照" : "初稿 vs 优化稿 + 消融"}</p><h1>${esc(r.topic)}</h1>
       <p class="meta"><span class="badge ${r.status}">${STATUS[r.status] || r.status}</span> ${busy ? `正在：${esc(NODE_NAME[r.current_node] || r.current_node || "")}` : ""}
         · ${fmtTime(r.created_at)} · <a href="#/task/${id}">实验过程</a></p>${r.error ? `<p class="error">${esc(r.error)}</p>` : ""}</div></div>
-    ${busy ? `<div class="live"><span class="orb"></span>实验进行中：已写完 ${rows.filter((x) => x.status !== "pending").length}/${rows.length} 篇，写完一篇就出一篇的结果，页面会自动刷新 <small class="muted" id="ex-llm"></small></div>` : ""}
+    ${busy ? `<div class="live"><span class="orb"></span>实验进行中：已写完 ${rows.filter((x) => x.status !== "pending").length}/${rows.length} 篇，写完一篇就出一篇的结果，页面会自动刷新 <small class="muted" id="ex-llm"></small>
+      ${rows.some((x) => x.writing) ? `<ul class="small ex-writing">${rows.filter((x) => x.writing).map((x) => `<li>正在写：${esc(x.topic.slice(0, 16))} · ${esc(vname(x.variant))}
+        — ${esc(NODE_NAME[x.step] || x.step || "准备中")}${x.elapsed != null ? `（已 ${x.elapsed >= 60 ? Math.floor(x.elapsed / 60) + " 分 " : ""}${x.elapsed % 60} 秒）` : ""}
+        ${x.write_task ? ` · <a href="#/task/${x.write_task}">看过程</a>` : ""}</li>`).join("")}</ul>
+        <small class="muted">同时写的几篇各走各的，快的先出结果；慢的通常在逐句核对或补充检索。</small>` : ""}</div>` : ""}
     ${(() => {
       const bad = rows.filter((x) => x.status === "failed");
       return bad.length ? `<div class="card ex-failbox"><b>有 ${bad.length} 篇没写成功，没有计入统计</b>
@@ -3058,3 +3077,176 @@ async function rerank(body) {
     wait();
   } catch (err) { if (msg) msg.textContent = err.message; }
 }
+
+// ---------------------------------------------------------------- 判断校准：人标注 → 检验系统判断 → 按标注调阈值
+const CAL_HELP = {
+  reprint: "两篇是不是同一篇稿子？原样转载、或者逐句换词改写（洗稿）的，都不能算两个独立来源。",
+  event: "两篇报道说的是不是同一件事？同一件事的不同报道会归成一个事件，用来数“几家独立来源报道了它”。",
+  update: "同一个网页前后两次抓到的内容，这次变化是实质更新（改了数字、增删了说法），还是阅读数、时间这类无关紧要的变化？",
+  dispute: "两条说法是不是真的矛盾？矛盾的话，哪条对？（可以点开出处核对）",
+};
+const CAL_FEAT = {
+  hamming: "指纹距离", align: "逐句对应比例", sents: "句子数", num_jacc: "数字重合度", title_sim: "标题相似度",
+  days: "相隔天数", num_shared: "共享关键数字", lead_sim: "导语相似度", similarity: "全文相似度", num_changed: "变化的数字",
+  sent_changed: "增删的句子",
+};
+const CAL_PARAM = {
+  hamming: "转载：指纹距离 ≤", align: "洗稿：逐句对应 ≥", num_jacc: "洗稿：数字重合 ≥", min_sents: "洗稿：至少句数",
+  title: "同事件：标题相似 ≥", days: "同事件：相隔 ≤ 天", title_lo: "标题较像时（≥）", num_shared: "…且共享数字 ≥",
+  similarity: "更新：全文相似度 <", num_changed: "更新：变化数字 ≥", primary_w: "一手来源权重", corrected_w: "来源更正权重",
+  gap: "分差 ≥ 才裁决",
+};
+
+async function showCalibrate(q) {
+  const el = $("#detail");
+  const me = current = {};
+  const kind = q.get("k") || "reprint", topic = q.get("topic") || "";
+  el.innerHTML = `<p class="muted small">正在读取标注…</p>`;
+  let ov;
+  try { ov = await api("/api/calibrate"); } catch (err) { el.innerHTML = `<p class="error">${esc(err.message)}</p>`; return; }
+  if (current !== me) return;
+  const rep = Object.fromEntries(ov.kinds.map((r) => [r.kind, r]));
+  const pc = (x) => x == null ? "—" : `${Math.round(x * 100)}%`;
+  const link = (k, t = topic) => `#/calibrate?k=${k}${t ? `&topic=${encodeURIComponent(t)}` : ""}`;
+  el.innerHTML = `<div class="detail-head"><div><p class="kicker"><a href="#/experiments">评测</a> · 判断校准</p>
+      <h1>系统的判断，和人的判断一致吗？</h1>
+      <p class="meta">系统有四类自动判断，都是阈值规则。在这里逐条标注“系统判对没有”，下面实时算出现行规则和你的判断有多一致；
+      标够 ${12} 条后，系统在参数网格上找最符合你判断的阈值，并用交叉验证（拿没参与调参的样本检验）确认确实更好，才建议采用。</p></div></div>
+    <div class="cal-tabs">${Object.entries(CAL_HELP).map(([k]) => `<a href="${link(k)}" class="${k === kind ? "on" : ""}">${esc(rep[k].name)} <small>${rep[k].labels}</small></a>`).join("")}</div>
+    <p class="small">${esc(CAL_HELP[kind])}
+      <select id="cal-topic" class="cal-topic"><option value="">全部主题</option>${ov.topics.map((t) => `<option ${t === topic ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></p>
+    <div id="cal-card"><p class="muted small">正在挑选样本（系统判为“是”的，和差一点就判为“是”的）…</p></div>
+    <section class="card" id="cal-report"></section>
+    <section class="card" id="cal-llm"><p class="muted small">正在读取大模型对比…</p></section>`;
+  $("#cal-topic").onchange = (e) => { location.hash = link(kind, e.target.value); };
+  const drawReport = (r) => {
+    const c = r.current, f = r.fit;
+    const row = (name, x) => x ? (kind === "dispute"
+      ? `<tr><th>${name}</th><td>${pc(x.conflict_accuracy)}</td><td>${pc(x.resolve_accuracy)}</td><td>${pc(x.coverage)}</td></tr>`
+      : `<tr><th>${name}</th><td>${pc(x.accuracy)}</td><td>${pc(x.precision)}</td><td>${pc(x.recall)}</td><td>${x.f1 ?? "—"}</td></tr>`) : "";
+    const head = kind === "dispute" ? `<tr><th></th><th>冲突识别准确率</th><th>裁决和你一致</th><th>敢裁决的比例</th></tr>`
+      : `<tr><th></th><th>准确率</th><th>精确率（判为是的里真的是）</th><th>召回率（真的是的里判出来了）</th><th>F1</th></tr>`;
+    $("#cal-report").innerHTML = `<h3>${esc(r.name)}：已标 ${r.labels} 条（${Object.entries(r.label_counts).map(([k, n]) => `${esc(ov.labels[kind][k])} ${n}`).join("，")}）</h3>
+      ${c ? `<table class="cal-table">${head}${row("现行规则", c)}${f ? row("按标注调参（调参用的样本）", f.train) + row("按标注调参（交叉验证）", f.cv) : ""}</table>` : `<p class="muted small">还没有标注。</p>`}
+      <p class="small">现行参数：${Object.entries(r.params).map(([k, v]) => `${esc(CAL_PARAM[k] || k)} <b>${v}</b>`).join("；")}${r.applied ? `（${fmtTime(r.applied)} 按标注调整过）` : "（默认值）"}</p>
+      ${f ? `<p class="small">${f.recommend ? "✓ " : ""}${esc(f.why)}${Object.keys(f.changed).length ? `：${Object.entries(f.changed).map(([k, [a, b]]) => `${esc(CAL_PARAM[k] || k)} ${a} → <b>${b}</b>`).join("；")}` : ""}</p>
+        ${f.recommend ? `<button type="button" id="cal-apply">采用新参数</button>` : ""}` : r.need ? `<p class="muted small">调参还需要：${esc(r.need)}。</p>` : ""}
+      ${r.applied ? `<button type="button" class="ghost sm" id="cal-reset">恢复默认参数</button>` : ""}
+      ${c && c.wrong?.length ? `<details><summary class="small">现行规则判错的 ${c.wrong.length} 条</summary><ul class="small">${c.wrong.map((w) => `<li>${esc(w.type)}（你标的是“${esc(ov.labels[kind][w.label] || w.label)}”）：${esc(w.title || w.a || w.key)}${w.b ? ` ↔ ${esc(w.b)}` : ""}</li>`).join("")}</ul></details>` : ""}`;
+    const ap = $("#cal-apply"), rs = $("#cal-reset");
+    if (ap) ap.onclick = async () => { ap.disabled = true; try { drawReport((await api(`/api/calibrate/${kind}/apply`, { method: "POST", body: {} })).report); } catch (err) { alert(err.message); ap.disabled = false; } };
+    if (rs) rs.onclick = async () => { drawReport((await api(`/api/calibrate/${kind}/apply`, { method: "POST", body: { reset: true } })).report); };
+  };
+  drawReport(rep[kind]);
+  const drawLLM = (c) => {
+    const box = $("#cal-llm");
+    if (!box) return;
+    const pend = c.labeled - c.judged;
+    const btn = c.llm_available && pend > 0 ? `<button type="button" id="cal-llm-run">让大模型判一遍已标注的 ${Math.min(pend, 30)} 条（另有最多 10 条问第二次，量一致性）</button>` : "";
+    let table = "";
+    if (c.rule) {
+      const rowB = (name, x) => `<tr><th>${name}</th><td>${pc(x.accuracy)}</td><td>${pc(x.precision)}</td><td>${pc(x.recall)}</td><td>${x.calls}</td></tr>`;
+      const rowD = (name, x) => `<tr><th>${name}</th><td>${pc(x.conflict_accuracy)}</td><td>${pc(x.resolve.accuracy)}（${x.resolve.right}/${x.resolve.decided}）</td><td>${pc(x.resolve.coverage)}</td><td>${x.calls}</td></tr>`;
+      table = kind === "dispute"
+        ? `<table class="cal-table"><tr><th></th><th>是否真矛盾，和你一致</th><th>谁对，和你一致</th><th>敢裁决的比例</th><th>大模型调用</th></tr>${rowD("规则", c.rule)}${rowD("大模型", c.llm)}${rowD("混合", c.hybrid)}</table>`
+        : `<table class="cal-table"><tr><th></th><th>准确率</th><th>精确率</th><th>召回率</th><th>大模型调用</th></tr>${rowB("规则", c.rule)}${rowB("大模型", c.llm)}${rowB("混合（规则拿不准才问）", c.hybrid)}</table>`;
+    }
+    box.innerHTML = `<h3>规则 vs 大模型 vs 混合（同一批 ${c.judged} 条你标注过的样本）</h3>
+      ${c.llm_available ? "" : `<p class="muted small">没有配置大模型，只能看规则。</p>`}
+      ${table || `<p class="muted small">${c.labeled ? "大模型还没判过这些样本。" : "先在上面标几条。"}</p>`}
+      ${c.hybrid?.note ? `<p class="small muted">混合：${esc(c.hybrid.note)}。</p>` : ""}
+      ${c.consistency.n ? `<p class="small">同一条样本、同样的设置问大模型两次：<b>${c.consistency.same}/${c.consistency.n}</b> 次答案一样（${pc(c.consistency.rate)}）。</p>` : ""}
+      ${c.flips?.length ? `<details><summary class="small">两次回答不一样的 ${c.flips.length} 条</summary><ul class="small">${c.flips.map((f) => `<li>第一次“${esc(ov.labels[kind][f.first] || f.first)}”：${esc(f.reasons[0])}；第二次“${esc(ov.labels[kind][f.second] || f.second)}”：${esc(f.reasons[1])}</li>`).join("")}</ul></details>` : ""}
+      ${c.llm_wrong?.length ? `<details><summary class="small">大模型和你判断不同的 ${c.llm_wrong.length} 条（附它的理由）</summary><ul class="small">${c.llm_wrong.map((w) => `<li>${esc(w.title || w.a || w.key)}${w.b ? ` ↔ ${esc(w.b)}` : ""}：你标“${esc(ov.labels[kind][w.human] || w.human)}”，大模型说“${esc(ov.labels[kind][w.llm] || w.llm)}”——${esc(w.reason)}</li>`).join("")}</ul></details>` : ""}
+      ${btn}`;
+    const b = $("#cal-llm-run");
+    if (b) b.onclick = async () => {
+      b.disabled = true; b.textContent = "大模型判断中（每条几秒，同时 4 条）…";
+      try { drawLLM((await api(`/api/calibrate/${kind}/llm`, { method: "POST", body: {} })).compare); }
+      catch (err) { alert(err.message); b.disabled = false; }
+    };
+  };
+  api(`/api/calibrate/${kind}/llm`).then((c) => { if (current === me) drawLLM(c); }).catch(() => {});
+  let queue = [];
+  const docBox = (d) => `<div class="cal-doc"><p class="small muted">${esc(d.site || "")}${d.published_at ? ` · ${esc(String(d.published_at).slice(0, 10))}` : ""}</p>
+    <p><a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.title || d.url)}</a></p><p class="small">${esc(d.excerpt || "")}…</p></div>`;
+  const factBox = (f, tag) => `<div class="cal-doc"><p class="small muted">${tag} · ${f.primary ? "有一手来源 · " : ""}独立来源 ${f.independent}${f.corrected ? " · 来源更正过" : ""}</p>
+    <p><b>${esc(f.content)}</b></p><p class="small">${f.sources.map((s) => `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.site)}《${esc((s.title || "").slice(0, 24))}》</a>`).join("；") || "（没有出处）"}</p></div>`;
+  const sysText = (it) => ({ reprint: { reprint: "原样转载", rewrite: "洗稿 / 改写", independent: "独立报道" },
+    event: { same: "同一事件", different: "不是同一事件" }, update: { significant: "实质更新", minor: "无关紧要的变化" },
+    dispute: { a: "第一条对", b: "第二条对", open: "证据差距不够，暂不裁决", not_conflict: "不矛盾" } }[kind][it.system] || it.system);
+  const draw = async () => {
+    if (current !== me) return;
+    if (!queue.length) {
+      queue = (await api(`/api/calibrate/${kind}/next?n=6${topic ? `&topic=${encodeURIComponent(topic)}` : ""}`)).items;
+      if (current !== me) return;
+    }
+    const it = queue[0];
+    const box = $("#cal-card");
+    if (!it) { box.innerHTML = `<p class="muted small">这一类暂时没有可标的样本了（${kind === "update" ? "网页复查发现变化后才会有" : kind === "dispute" ? "检索时发现说法冲突才会有" : "换个主题试试"}）。</p>`; return; }
+    const feats = Object.entries(it.features || {}).filter(([k, v]) => CAL_FEAT[k] && v != null && typeof v !== "object")
+      .map(([k, v]) => `<span class="tag">${esc(CAL_FEAT[k])} ${v}</span>`).join(" ");
+    const ch = it.change;
+    const body = kind === "dispute" ? `<div class="cal-pair">${factBox(it.fa, "第一条")}${factBox(it.fb, "第二条")}</div>`
+      : kind === "update" ? `${docBox(it.a)}<div class="cal-change small">
+          ${ch.numbers_removed?.length || ch.numbers_added?.length ? `<p>数字：${esc((ch.numbers_removed || []).join("、") || "无")} → ${esc((ch.numbers_added || []).join("、") || "无")}</p>` : ""}
+          ${(ch.sentences_removed || []).map((x) => `<p class="del">− ${esc(x.slice(0, 120))}</p>`).join("")}
+          ${(ch.sentences_added || []).map((x) => `<p class="add">+ ${esc(x.slice(0, 120))}</p>`).join("")}</div>`
+      : `<div class="cal-pair">${docBox(it.a)}${docBox(it.b)}</div>`;
+    box.innerHTML = `<section class="card cal-item"><p class="small">系统判断：<b>${esc(sysText(it))}</b> ${feats}</p>${body}
+      <p class="cal-btns">${Object.entries(ov.labels[kind]).map(([k, name], i) => `<button type="button" data-l="${k}">${i + 1}. ${esc(name)}</button>`).join(" ")}
+        <button type="button" class="ghost" data-l="skip">跳过</button></p></section>`;
+    const send = async (label) => {
+      $$(".cal-btns button", box).forEach((b) => (b.disabled = true));
+      const detail = kind === "dispute" ? { a: it.fa.content.slice(0, 40), b: it.fb.content.slice(0, 40) }
+        : { a: (it.a.title || "").slice(0, 40), b: it.b ? (it.b.title || "").slice(0, 40) : undefined, title: (it.a.title || "").slice(0, 40) };
+      try {
+        const r = await api(`/api/calibrate/${kind}/label`, { method: "POST", body: { key: it.key, label, features: it.features, system: it.system, detail } });
+        queue.shift();
+        drawReport(r.report);
+        api(`/api/calibrate/${kind}/llm`).then((c) => { if (current === me) drawLLM(c); }).catch(() => {});
+        draw();
+      } catch (err) { alert(err.message); $$(".cal-btns button", box).forEach((b) => (b.disabled = false)); }
+    };
+    $$(".cal-btns button", box).forEach((b) => (b.onclick = () => send(b.dataset.l)));
+    me.keys = (e) => {
+      if (current !== me || /INPUT|SELECT|TEXTAREA/.test(document.activeElement?.tagName || "")) return;
+      const k = Object.keys(ov.labels[kind])[Number(e.key) - 1];
+      if (k) send(k);
+    };
+  };
+  if (!showCalibrate.bound) {
+    document.addEventListener("keydown", (e) => current?.keys && current.keys(e));
+    showCalibrate.bound = true;
+  }
+  draw().catch((err) => { $("#cal-card").innerHTML = `<p class="error">${esc(err.message)}</p>`; });
+}
+
+
+// ---------------------------------------------------------------- 深浅色切换：跟随系统 → 浅色 → 深色，记在本机浏览器
+(function themeToggle() {
+  const btn = document.getElementById("theme-btn");
+  if (!btn) return;
+  const ICON = {
+    auto: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor"/></svg>',
+    light: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
+    dark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg>',
+  };
+  const NAME = { auto: "跟随系统", light: "浅色", dark: "深色" };
+  const NEXT = { auto: "light", light: "dark", dark: "auto" };
+  let mode = "auto";
+  try { mode = localStorage.getItem("td-theme") || "auto"; } catch (e) { /* 隐私模式等读不到就跟随系统 */ }
+  if (!NAME[mode]) mode = "auto";
+  const apply = () => {
+    if (mode === "auto") delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = mode;
+    btn.innerHTML = ICON[mode];
+    btn.title = `外观：${NAME[mode]}（点击切换为${NAME[NEXT[mode]]}）`;
+  };
+  btn.onclick = () => {
+    mode = NEXT[mode];
+    try { mode === "auto" ? localStorage.removeItem("td-theme") : localStorage.setItem("td-theme", mode); } catch (e) { /* 存不了也照样切换 */ }
+    apply();
+  };
+  apply();
+})();

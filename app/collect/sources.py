@@ -151,7 +151,22 @@ BUILTIN = [
 ]
 
 
+# 自存档 / 预印本平台：任何人都能上传、不经同行评审（Zenodo、Figshare、OSF、ResearchGate……）。
+# 它们的 DOI 看起来和期刊论文一样，但不能当“一手资料”，也不能单独构成“学界有争议”。
+SELF_ARCHIVE_HOSTS = ("zenodo.org", "figshare.com", "osf.io", "researchgate.net", "academia.edu", "vixra.org",
+                      "preprints.org", "authorea.com", "researchsquare.com", "hal.science", "scienceopen.com")
+SELF_ARCHIVE_DOI = re.compile(r"doi\.org/(10\.5281/zenodo|10\.6084/m9\.figshare|10\.31219/osf|10\.17605/osf|"
+                              r"10\.20944/preprints|10\.22541/au|10\.21203/rs|10\.13140/rg)", re.I)
+
+
+def self_archive(url: str) -> bool:
+    host = urlsplit(url or "").netloc.lower()
+    return bool(SELF_ARCHIVE_DOI.search(url or "")) or any(host == d or host.endswith("." + d) for d in SELF_ARCHIVE_HOSTS)
+
+
 def is_primary(url: str) -> bool:
+    if self_archive(url):
+        return False
     host = urlsplit(url).netloc.lower()
     return any(host == d or host.endswith("." + d) for d in PRIMARY_DOMAINS)
 
@@ -493,8 +508,9 @@ def search_openalex(source: dict, query: str, limit: int = 10, since: float | No
             "url": land, "title": w.get("display_name") or w.get("title") or "",
             "author": ", ".join((a.get("author") or {}).get("display_name", "") for a in (w.get("authorships") or [])[:5]),
             "published_at": w.get("publication_date"), "summary": abstract[:600], "text": abstract,
-            "content_kind": "summary", "images": [], "source_id": "openalex", "primary": True,
-            "meta": {"doi": w.get("doi"), "cited_by": w.get("cited_by_count"), "doc_type": "论文摘要",
+            "content_kind": "summary", "images": [], "source_id": "openalex", "primary": not self_archive(land or ""),
+            "meta": {"doi": w.get("doi"), "cited_by": w.get("cited_by_count"),
+                     "doc_type": "自存档论文（未经同行评审）" if self_archive(land or "") else "论文摘要",
                      "venue": ((w.get("primary_location") or {}).get("source") or {}).get("display_name")},
         })
     return items
